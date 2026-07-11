@@ -1,0 +1,10 @@
+FROM ghcr.io/ggml-org/llama.cpp:server-vulkan AS llama
+
+FROM quay.io/ramalama/ramalama:latest
+
+COPY --from=llama /app /app
+
+ENV LLAMA_ARG_HOST=0.0.0.0
+
+WORKDIR /app
+ENTRYPOINT ["/app/llama-server"]

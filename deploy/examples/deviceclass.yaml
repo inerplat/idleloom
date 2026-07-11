@@ -1,0 +1,10 @@
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: apple-vulkan
+spec:
+  selectors:
+    - cel:
+        expression: >
+          device.driver == "gpu.apple-vulkan.example" &&
+          device.attributes["gpu.apple-vulkan.example"].computeHealthy == true

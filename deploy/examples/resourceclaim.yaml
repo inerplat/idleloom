@@ -1,0 +1,15 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: apple-vulkan-smoke
+spec:
+  devices:
+    requests:
+      - name: accelerator
+        exactly:
+          deviceClassName: apple-vulkan
+          allocationMode: ExactCount
+          count: 1
+          selectors:
+            - cel:
+                expression: device.attributes["gpu.apple-vulkan.example"].backend == "venus"

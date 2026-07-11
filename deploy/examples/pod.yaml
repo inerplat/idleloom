@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: apple-vulkan-smoke
+spec:
+  restartPolicy: Never
+  tolerations:
+    - key: idleloom-dedicated
+      operator: Equal
+      value: compute
+      effect: NoSchedule
+  resourceClaims:
+    - name: gpu
+      resourceClaimName: apple-vulkan-smoke
+  containers:
+    - name: smoke
+      image: debian:bookworm-slim
+      command: ["/bin/sh", "-c"]
+      args: ["test -r /dev/dri/renderD128 && test -w /dev/dri/renderD128 && ls -l /dev/dri/renderD128"]
+      resources:
+        claims:
+          - name: gpu
+            request: accelerator
