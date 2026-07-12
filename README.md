@@ -85,6 +85,7 @@ from other cluster nodes.
 ```sh
 make build
 ./bin/idleloom version
+./bin/idlectl version
 ```
 
 For development:
@@ -203,6 +204,189 @@ The public manifests use the development driver name
 `gpu.apple-vulkan.example`. Operators must replace it with a DNS name they
 control before production deployment.
 
+## Native Metal projection alpha
+
+The Native Metal backend runs an explicitly authorized shell workload or a
+locked MLX model directly on macOS. It does not present the Mac as a
+general-purpose container host. Kubernetes execution state remains in
+`IdleloomHost`, `IdleloomWorkload`, and `IdleloomWorkloadAssignment` resources.
+The public `run` command currently creates shell workloads; curated model
+workloads remain declarative Kubernetes resources in this alpha.
+
+For a tested MLX training walkthrough in both link modes, see
+[`docs/native-training.md`](docs/native-training.md).
+
+Build the complete macOS bundle:
+
+```sh
+make build-idlectl
+```
+
+The public CLI contains only Kubernetes-style resource operations:
+
+```text
+idlectl join HOST
+idlectl run NAME
+idlectl get (hosts|workloads) [NAME]
+idlectl logs workload/NAME
+idlectl delete (host|workload)/NAME
+idlectl version
+```
+
+Controller, agent, link, and projection processes are implementation
+details. `join` installs and starts them with launchd; users do not run service
+subcommands or keep terminal sessions open.
+
+The agent runs workloads and reports host state as the regular login user. The
+link is the smaller root service that maintains the WireKube tunnel and routes.
+API-only mode needs the agent but does not install the link service.
+
+The CLI accepts the CRD singular, plural, short, and API-qualified resource
+names. For example, `workload`, `idleloomworkloads`, `ilw`, and
+`idleloomworkloads.ai.idleloom.io` all address `IdleloomWorkload` resources.
+The same forms are available for `IdleloomHost` through `host`,
+`idleloomhosts`, and `ilh`. Hosts are exposed as logical cluster-wide
+resources, so host `get` and `delete` reject namespace flags.
+
+### Join a Mac
+
+Native Metal requires an Apple Silicon Mac and a kubeconfig allowed to install
+the Native CRDs and RBAC. It does not require krunkit or the Ubuntu worker VM.
+WireKube must already be installed in the target cluster for connected mode.
+
+Join installs the Native API and restricted RBAC, enrolls the host, creates
+short-lived service credentials, and installs user LaunchAgents. In the
+default WireKube mode it also installs the root link LaunchDaemon and
+waits until the host is ready and connected:
+
+```sh
+./bin/idlectl join studio-idle \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster
+```
+
+The default WireKube join asks for macOS administrator authorization once when
+it installs the root-owned link helper. API-only mode does not install
+that helper and does not require administrator authorization. Neither mode
+runs the agent or shell workloads as root. The WireKube private key used by the
+helper is copied into a root-owned state directory; the long-running
+privileged service does not trust the user-writable enrollment directory for
+tunnel configuration.
+
+If the source kubeconfig disables TLS verification, explicitly pin the API
+certificate observed during the first connection:
+
+```sh
+./bin/idlectl join studio-idle \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster \
+  --allow-tofu
+```
+
+The pin is stored as an SPKI SHA-256 value in `cluster-trust.json` under the
+selected state directory. Verify it through a trusted channel before relying
+on the connection. A later mismatch is rejected; after separately verifying a
+legitimate API certificate rotation, repeat the command with both
+`--allow-tofu` and `--reset-trust`.
+
+Use `--link api-only` when inbound cluster-to-host access is not required.
+API-only hosts can execute work but do not provide Kubernetes log streaming.
+Run `./bin/idlectl logs --local workload/NAME` on the joined Mac to read a
+completed log snapshot from agent state. Use `--projection=false` to disable
+ephemeral Node and Pod projection.
+
+`--shell-access` is an immutable enrollment boundary. The default,
+`sandboxed`, accepts Seatbelt-restricted shell workloads. `disabled` exposes no
+shell runtime. `host` executes trusted commands with the full access of the
+regular macOS login user. Changing this boundary requires deleting and joining
+the host again.
+
+Sandbox mode denies the user home, `/Users`, `/Volumes`, `/Network`, the
+Idleloom state directory, and the agent kubeconfig, and permits writes only in
+the assignment work directory. It is a constrained execution boundary, not a
+complete macOS confidentiality boundary; other system-readable paths may
+remain visible.
+
+Clusters using a non-default API server kubelet client certificate subject can
+set exact comma-separated allowlists with `--kubelet-client-cn` and
+`--kubelet-client-organization` during `join`.
+
+### Run and observe work
+
+Commands use the namespace from the selected kubeconfig context unless `-n`
+is supplied:
+
+```sh
+./bin/idlectl get host/studio-idle \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster
+
+./bin/idlectl run inventory \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster \
+  -n default \
+  --shell 'uname -a; sysctl -n hw.memsize' \
+  --isolation sandbox \
+  --network none
+
+./bin/idlectl get workloads -A \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster
+
+./bin/idlectl logs -f workload/inventory \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster \
+  -n default
+```
+
+Check the installed binary without contacting a cluster:
+
+```sh
+./bin/idlectl version
+```
+
+Projected Nodes are unschedulable, carry dedicated `NoSchedule` and
+`NoExecute` taints, and expose one synthetic execution slot. The projection
+publishes a reachable kubelet log endpoint only after an API-server-mediated
+probe succeeds. It does not support arbitrary Pod submission, OCI container
+execution, Pod networking, Services, volumes, probes, `exec`, attach, or port
+forwarding.
+
+### Delete resources
+
+Delete a workload with Kubernetes resource syntax:
+
+```sh
+./bin/idlectl delete workload/inventory \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster \
+  -n default
+```
+
+Delete every workload that references the host, wait for its assignment to be
+removed, and then delete the joined Mac:
+
+```sh
+./bin/idlectl delete host/studio-idle \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster
+```
+
+Host deletion stops and removes the launchd services, revokes the WireKube
+peer with UID and key ownership checks, deletes the host namespace, and then
+removes local credentials and private state. Removing the root link
+helper requires macOS administrator authorization. Deletion fails closed while
+a workload or assignment still references the host. Before any local or root
+cleanup, the selected cluster namespace must match the enrollment nonce stored
+in local state, which prevents deleting a same-named host from another context.
+
+Joining over an existing local installation is rejected. Delete the current
+host first, then join it again when changing immutable enrollment settings.
+Service installation keeps a private receipt so a failed fresh installation
+can roll back its partial services. There is no offline root-helper removal
+command in this alpha; if the cluster is unavailable, restore access and run
+`delete host/...` rather than deleting launchd files by hand.
+
 ## Known limitations
 
 - The worker backend currently supports Apple Silicon and krunkit only.
@@ -211,7 +395,13 @@ control before production deployment.
 - A newly joined Node needs a registry-pullable DRA image.
 - Serving certificate rotation depends on the host-side maintainer and the operator kubeconfig remaining valid while the worker runs.
 - Physical Apple GPU exclusivity still requires a future macOS host lease agent.
+- Native Metal projection creates Kubernetes API objects but is not a kubelet or a general-purpose Fargate implementation.
+- Native Metal connected leaf is relay-only; its kubelet bridge supports logs but not exec, attach, or port forwarding.
 
 Idleloom is experimental software. Do not enroll untrusted hosts or run
 untrusted GPU workloads until the security boundaries have been reviewed for
 your environment.
+
+## License
+
+Idleloom is licensed under the Apache License 2.0. See [`LICENSE`](LICENSE).

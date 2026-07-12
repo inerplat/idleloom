@@ -1,0 +1,92 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: idleloom-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idleloom-controller
+  namespace: idleloom-system
+---
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: idleloom-controller-leader
+  namespace: idleloom-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: idleloom-controller-runtime
+  namespace: idleloom-system
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["idleloom-controller"]
+    verbs: ["create"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["idleloom-controller-leader"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: idleloom-controller-runtime
+  namespace: idleloom-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: idleloom-controller-runtime
+subjects:
+  - kind: ServiceAccount
+    name: idleloom-controller
+    namespace: idleloom-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idleloom-controller
+rules:
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloads"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloads/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloommodels"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloommodels/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomhosts"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloadassignments"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloadassignments/status"]
+    verbs: ["get"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["idleloom-fencing"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idleloom-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: idleloom-controller
+subjects:
+  - kind: ServiceAccount
+    name: idleloom-controller
+    namespace: idleloom-system

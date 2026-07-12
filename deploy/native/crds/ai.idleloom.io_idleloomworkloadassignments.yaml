@@ -1,0 +1,323 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: idleloomworkloadassignments.ai.idleloom.io
+spec:
+  group: ai.idleloom.io
+  names:
+    kind: IdleloomWorkloadAssignment
+    listKind: IdleloomWorkloadAssignmentList
+    plural: idleloomworkloadassignments
+    shortNames:
+    - ilwa
+    singular: idleloomworkloadassignment
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.workloadRef.name
+      name: Workload
+      type: string
+    - jsonPath: .spec.desiredState
+      name: Desired
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              desiredState:
+                enum:
+                - Running
+                - Stopped
+                type: string
+              executionID:
+                format: uuid
+                type: string
+              fencingEpoch:
+                format: int64
+                minimum: 1
+                type: integer
+              hostRef:
+                properties:
+                  name:
+                    minLength: 1
+                    type: string
+                  uid:
+                    type: string
+                required:
+                - name
+                - uid
+                type: object
+              leaseDurationSeconds:
+                format: int32
+                maximum: 300
+                minimum: 10
+                type: integer
+              model:
+                properties:
+                  artifact:
+                    properties:
+                      format:
+                        enum:
+                        - mlx-safetensors-v1
+                        type: string
+                      manifestDigest:
+                        pattern: ^sha256:[a-f0-9]{64}$
+                        type: string
+                      ociReference:
+                        pattern: ^oci://[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$
+                        type: string
+                      signature:
+                        properties:
+                          issuer:
+                            minLength: 1
+                            pattern: .*[[:graph:]].*
+                            type: string
+                          subject:
+                            minLength: 1
+                            pattern: .*[[:graph:]].*
+                            type: string
+                        required:
+                        - issuer
+                        - subject
+                        type: object
+                      sizeBytes:
+                        format: int64
+                        maximum: 68719476736
+                        minimum: 1
+                        type: integer
+                    required:
+                    - format
+                    - manifestDigest
+                    - ociReference
+                    - signature
+                    - sizeBytes
+                    type: object
+                  catalogRef:
+                    properties:
+                      name:
+                        minLength: 1
+                        type: string
+                      uid:
+                        type: string
+                    required:
+                    - name
+                    - uid
+                    type: object
+                  family:
+                    enum:
+                    - qwen3.5
+                    type: string
+                  maxConcurrentRequests:
+                    format: int32
+                    maximum: 1
+                    minimum: 1
+                    type: integer
+                  maxContextLength:
+                    format: int32
+                    maximum: 8192
+                    minimum: 128
+                    type: integer
+                  runtimeProfile:
+                    enum:
+                    - mlx-lm-v1
+                    type: string
+                  unifiedMemoryRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - artifact
+                - catalogRef
+                - family
+                - maxConcurrentRequests
+                - maxContextLength
+                - runtimeProfile
+                - unifiedMemoryRequest
+                type: object
+              shell:
+                properties:
+                  isolation:
+                    type: string
+                  network:
+                    type: string
+                  script:
+                    type: string
+                  timeoutSeconds:
+                    format: int32
+                    type: integer
+                  unifiedMemoryRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - isolation
+                - network
+                - script
+                - timeoutSeconds
+                - unifiedMemoryRequest
+                type: object
+              workloadRef:
+                properties:
+                  generation:
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  name:
+                    minLength: 1
+                    type: string
+                  namespace:
+                    minLength: 1
+                    type: string
+                  uid:
+                    type: string
+                required:
+                - generation
+                - name
+                - namespace
+                - uid
+                type: object
+            required:
+            - desiredState
+            - executionID
+            - fencingEpoch
+            - hostRef
+            - leaseDurationSeconds
+            - workloadRef
+            type: object
+          status:
+            properties:
+              agentID:
+                type: string
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              executionID:
+                type: string
+              fencingEpoch:
+                format: int64
+                type: integer
+              lastHeartbeatTime:
+                format: date-time
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              phase:
+                type: string
+              resolvedArtifactDigest:
+                type: string
+              runtimeVersion:
+                type: string
+              stopAcknowledgement:
+                properties:
+                  assignmentUID:
+                    type: string
+                  executionID:
+                    type: string
+                  fencingEpoch:
+                    format: int64
+                    type: integer
+                  observedGeneration:
+                    format: int64
+                    type: integer
+                  stoppedAt:
+                    format: date-time
+                    type: string
+                required:
+                - assignmentUID
+                - executionID
+                - fencingEpoch
+                - observedGeneration
+                - stoppedAt
+                type: object
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: workload identity is immutable
+          rule: self.spec.workloadRef == oldSelf.spec.workloadRef
+        - message: host identity is immutable
+          rule: self.spec.hostRef == oldSelf.spec.hostRef
+        - message: resolved model is immutable
+          rule: has(self.spec.model) == has(oldSelf.spec.model) && (!has(self.spec.model)
+            || self.spec.model == oldSelf.spec.model)
+        - message: resolved shell is immutable
+          rule: has(self.spec.shell) == has(oldSelf.spec.shell) && (!has(self.spec.shell)
+            || self.spec.shell == oldSelf.spec.shell)
+        - message: execution identity is immutable
+          rule: self.spec.executionID == oldSelf.spec.executionID
+        - message: fencing epoch is immutable
+          rule: self.spec.fencingEpoch == oldSelf.spec.fencingEpoch
+        - message: lease duration is immutable
+          rule: self.spec.leaseDurationSeconds == oldSelf.spec.leaseDurationSeconds
+        - message: assignment mailbox object must be named active
+          rule: self.metadata.name == 'active'
+        - message: workload and host UIDs are required
+          rule: size(self.spec.workloadRef.uid) > 0 && size(self.spec.hostRef.uid)
+            > 0
+        - message: exactly one resolved model or shell is required
+          rule: has(self.spec.model) != has(self.spec.shell)
+        - message: resolved model identity and memory request are required
+          rule: '!has(self.spec.model) || (size(self.spec.model.catalogRef.uid) >
+            0 && quantity(self.spec.model.unifiedMemoryRequest).isGreaterThan(quantity(''0'')))'
+        - message: resolved shell memory request must be positive
+          rule: '!has(self.spec.shell) || quantity(self.spec.shell.unifiedMemoryRequest).isGreaterThan(quantity(''0''))'
+        - message: Host shell isolation requires outbound network access
+          rule: '!has(self.spec.shell) || self.spec.shell.isolation != ''Host'' ||
+            self.spec.shell.network == ''Outbound'''
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -1,0 +1,53 @@
+# This host-scoped mailbox template is intentionally not part of the default
+# kustomization. The enrollment CLI will create an equivalent namespace,
+# identity, Role, binding, Host object, and heartbeat Lease for each Mac.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: idleloom-host-example
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idleloom-agent
+  namespace: idleloom-host-example
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: idleloom-agent
+  namespace: idleloom-host-example
+rules:
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomhosts"]
+    resourceNames: ["host"]
+    verbs: ["get"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomhosts/status"]
+    resourceNames: ["host"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloadassignments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloadassignments/status"]
+    resourceNames: ["active"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["idleloom-agent"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: idleloom-agent
+  namespace: idleloom-host-example
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: idleloom-agent
+subjects:
+  - kind: ServiceAccount
+    name: idleloom-agent
+    namespace: idleloom-host-example

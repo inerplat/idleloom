@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idleloom-workload-operator
+rules:
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloads"]
+    verbs: ["create", "delete", "get", "list", "watch"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloads/status"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idleloom-model-admin
+rules:
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloommodels"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloommodels/status"]
+    verbs: ["get"]

@@ -1,0 +1,161 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: idleloommodels.ai.idleloom.io
+spec:
+  group: ai.idleloom.io
+  names:
+    kind: IdleloomModel
+    listKind: IdleloomModelList
+    plural: idleloommodels
+    shortNames:
+    - ilm
+    singular: idleloommodel
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.family
+      name: Family
+      type: string
+    - jsonPath: .spec.runtimeProfile
+      name: Runtime
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              artifact:
+                properties:
+                  format:
+                    enum:
+                    - mlx-safetensors-v1
+                    type: string
+                  manifestDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  ociReference:
+                    pattern: ^oci://[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$
+                    type: string
+                  signature:
+                    properties:
+                      issuer:
+                        minLength: 1
+                        pattern: .*[[:graph:]].*
+                        type: string
+                      subject:
+                        minLength: 1
+                        pattern: .*[[:graph:]].*
+                        type: string
+                    required:
+                    - issuer
+                    - subject
+                    type: object
+                  sizeBytes:
+                    format: int64
+                    maximum: 68719476736
+                    minimum: 1
+                    type: integer
+                required:
+                - format
+                - manifestDigest
+                - ociReference
+                - signature
+                - sizeBytes
+                type: object
+              family:
+                enum:
+                - qwen3.5
+                type: string
+              maxConcurrentRequests:
+                format: int32
+                maximum: 1
+                minimum: 1
+                type: integer
+              maxContextLength:
+                format: int32
+                maximum: 8192
+                minimum: 128
+                type: integer
+              minimumUnifiedMemory:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              runtimeProfile:
+                enum:
+                - mlx-lm-v1
+                type: string
+            required:
+            - artifact
+            - family
+            - maxConcurrentRequests
+            - maxContextLength
+            - minimumUnifiedMemory
+            - runtimeProfile
+            type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                format: int64
+                type: integer
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: catalog model specs are immutable
+          rule: self.spec == oldSelf.spec
+        - message: minimumUnifiedMemory must be positive
+          rule: quantity(self.spec.minimumUnifiedMemory).isGreaterThan(quantity('0'))
+    served: true
+    storage: true
+    subresources:
+      status: {}

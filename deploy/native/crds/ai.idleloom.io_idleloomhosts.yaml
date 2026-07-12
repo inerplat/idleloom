@@ -1,0 +1,167 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.1
+  name: idleloomhosts.ai.idleloom.io
+spec:
+  group: ai.idleloom.io
+  names:
+    kind: IdleloomHost
+    listKind: IdleloomHostList
+    plural: idleloomhosts
+    shortNames:
+    - ilh
+    singular: idleloomhost
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.agentID
+      name: Agent
+      type: string
+    - jsonPath: .status.krunkitState
+      name: Krunkit
+      type: string
+    - jsonPath: .status.availableUnifiedMemory
+      name: Memory
+      type: string
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            type: string
+          kind:
+            type: string
+          metadata:
+            type: object
+          spec:
+            properties:
+              agentID:
+                minLength: 1
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                type: string
+              shellAccess:
+                enum:
+                - Disabled
+                - Sandboxed
+                - Host
+                type: string
+            required:
+            - agentID
+            type: object
+          status:
+            properties:
+              activeAssignmentUID:
+                type: string
+              allocatableUnifiedMemory:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              availableUnifiedMemory:
+                anyOf:
+                - type: integer
+                - type: string
+                pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                x-kubernetes-int-or-string: true
+              conditions:
+                items:
+                  properties:
+                    lastTransitionTime:
+                      format: date-time
+                      type: string
+                    message:
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              connectivity:
+                properties:
+                  address:
+                    type: string
+                  interfaceName:
+                    type: string
+                  lastHandshakeTime:
+                    format: date-time
+                    type: string
+                  mode:
+                    enum:
+                    - APIOnly
+                    - WireKubeLeaf
+                    type: string
+                  peerName:
+                    type: string
+                  provider:
+                    enum:
+                    - WireKube
+                    type: string
+                  transport:
+                    enum:
+                    - Relay
+                    type: string
+                type: object
+              krunkitState:
+                enum:
+                - Stopped
+                - Running
+                - Unknown
+                type: string
+              lastHeartbeatTime:
+                format: date-time
+                type: string
+              modelFamilies:
+                items:
+                  type: string
+                type: array
+              observedGeneration:
+                format: int64
+                type: integer
+              protocolVersion:
+                type: string
+              runtimeProfiles:
+                items:
+                  type: string
+                type: array
+              vulkanLeaseActive:
+                type: boolean
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: host identity is immutable
+          rule: self.spec == oldSelf.spec
+        - message: host mailbox object must be named host
+          rule: self.metadata.name == 'host'
+    served: true
+    storage: true
+    subresources:
+      status: {}

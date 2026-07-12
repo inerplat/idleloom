@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: idleloom-projection
+  namespace: idleloom-system
+---
+apiVersion: coordination.k8s.io/v1
+kind: Lease
+metadata:
+  name: idleloom-projection-leader
+  namespace: idleloom-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: idleloom-projection-leader
+  namespace: idleloom-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    resourceNames: ["idleloom-projection-leader"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["idleloom-projection"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: idleloom-projection-leader
+  namespace: idleloom-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: idleloom-projection-leader
+subjects:
+  - kind: ServiceAccount
+    name: idleloom-projection
+    namespace: idleloom-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: idleloom-projection
+rules:
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloadassignments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomworkloads"]
+    verbs: ["get"]
+  - apiGroups: ["ai.idleloom.io"]
+    resources: ["idleloomhosts"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["create", "delete", "get", "list", "update"]
+  - apiGroups: [""]
+    resources: ["nodes/status"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "delete", "get", "list", "update"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: idleloom-projection
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: idleloom-projection
+subjects:
+  - kind: ServiceAccount
+    name: idleloom-projection
+    namespace: idleloom-system

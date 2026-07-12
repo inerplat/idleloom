@@ -1,0 +1,122 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: idleloom-projection
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["pods", "pods/status", "nodes", "nodes/status"]
+  variables:
+    - name: projectionController
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:idleloom-system:idleloom-projection'
+    - name: privilegedOperator
+      expression: >-
+        request.userInfo.groups.exists(group, group == 'system:masters')
+    - name: currentManaged
+      expression: >-
+        object != null && has(object.metadata.labels) &&
+        ('native.idleloom.io/projection' in object.metadata.labels) &&
+        object.metadata.labels['native.idleloom.io/projection'] == 'true'
+    - name: previousManaged
+      expression: >-
+        oldObject != null && has(oldObject.metadata.labels) &&
+        ('native.idleloom.io/projection' in oldObject.metadata.labels) &&
+        oldObject.metadata.labels['native.idleloom.io/projection'] == 'true'
+    - name: currentReserved
+      expression: >-
+        object != null && object.metadata.name.startsWith('idleloom-')
+    - name: previousReserved
+      expression: >-
+        oldObject != null && oldObject.metadata.name.startsWith('idleloom-')
+  validations:
+    - expression: >-
+        variables.projectionController || variables.privilegedOperator ||
+        !(variables.currentManaged || variables.previousManaged ||
+        variables.currentReserved || variables.previousReserved)
+      message: only the Idleloom projection controller may mutate projection Pods and Nodes
+    - expression: >-
+        !variables.projectionController ||
+        (request.operation == 'DELETE'
+        ? variables.previousManaged && variables.previousReserved
+        : variables.currentManaged && variables.currentReserved)
+      message: the Idleloom projection controller may mutate only managed objects with reserved names
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: idleloom-projection
+spec:
+  policyName: idleloom-projection
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: idleloom-projection-pod-binding
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: projectionController
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:idleloom-system:idleloom-projection'
+    - name: privilegedOperator
+      expression: >-
+        request.userInfo.groups.exists(group, group == 'system:masters')
+    - name: currentManaged
+      expression: >-
+        has(object.metadata.labels) &&
+        ('native.idleloom.io/projection' in object.metadata.labels) &&
+        object.metadata.labels['native.idleloom.io/projection'] == 'true'
+  validations:
+    - expression: >-
+        !has(object.spec.nodeName) ||
+        !object.spec.nodeName.startsWith('idleloom-') ||
+        ((variables.projectionController || variables.privilegedOperator) &&
+        variables.currentManaged)
+      message: only managed projection Pods may bind to Idleloom ephemeral Nodes
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: idleloom-projection-pod-binding
+spec:
+  policyName: idleloom-projection-pod-binding
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: idleloom-projection-binding-subresource
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods/binding"]
+  validations:
+    - expression: >-
+        !object.target.name.startsWith('idleloom-')
+      message: binding subresource requests cannot target Idleloom ephemeral Nodes
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: idleloom-projection-binding-subresource
+spec:
+  policyName: idleloom-projection-binding-subresource
+  validationActions: [Deny]

@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: idleloom-projection
+  namespace: idleloom-system
+  labels:
+    app.kubernetes.io/name: idleloom-projection
+    app.kubernetes.io/part-of: idleloom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: idleloom-projection
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: idleloom-projection
+        app.kubernetes.io/part-of: idleloom
+    spec:
+      serviceAccountName: idleloom-projection
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: projection
+          image: idleloom-projection:dev
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
