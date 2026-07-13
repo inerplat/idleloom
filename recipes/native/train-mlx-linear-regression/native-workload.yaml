@@ -1,0 +1,61 @@
+apiVersion: ai.idleloom.io/v1alpha1
+kind: IdleloomWorkload
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: train
+    ai.idleloom.io/backend: native
+    ai.idleloom.io/runtime: mlx
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  mode: Shell
+  shell:
+    isolation: Sandbox
+    network: None
+    timeoutSeconds: {{ integer (index .Values "timeoutSeconds") }}
+    script: |
+      #!/bin/zsh
+      set -euo pipefail
+
+      python_bin="${IDLELOOM_TRAIN_PYTHON:-/var/tmp/idleloom-mlx/bin/python}"
+      if [[ ! -x "${python_bin}" ]]; then
+        print -u2 "MLX Python was not found at ${python_bin}"
+        exit 1
+      fi
+
+      PYTHONDONTWRITEBYTECODE=1 "${python_bin}" -c '
+      import mlx.core as mx
+
+      mx.set_default_device(mx.gpu)
+      x = mx.linspace(-2.0, 2.0, 4096)
+      y = 3.0 * x + 2.0
+      weight = mx.array(0.0)
+      bias = mx.array(0.0)
+
+      def loss_fn(current_weight, current_bias):
+          prediction = current_weight * x + current_bias
+          return mx.mean(mx.square(prediction - y))
+
+      loss_and_grad = mx.value_and_grad(loss_fn, argnums=(0, 1))
+      for step in range(101):
+          loss, (weight_grad, bias_grad) = loss_and_grad(weight, bias)
+          weight = weight - 0.08 * weight_grad
+          bias = bias - 0.08 * bias_grad
+          mx.eval(weight, bias, loss)
+          if step % 20 == 0:
+              print(f"step={step:03d} loss={float(loss):.8f}")
+
+      mx.savez("checkpoint.npz", weight=weight, bias=bias)
+      print(f"device={mx.default_device()}")
+      print(f"weight={float(weight):.6f} bias={float(bias):.6f}")
+      print("checkpoint=checkpoint.npz")
+      '
+      /usr/bin/shasum -a 256 checkpoint.npz
+  resources:
+    unifiedMemoryRequest: {{ quote (index .Values "unifiedMemory") }}

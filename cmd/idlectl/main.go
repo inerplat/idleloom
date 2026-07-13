@@ -53,6 +53,7 @@ const usageText = `idlectl manages Native Metal hosts and workloads.
 Usage:
   idlectl join HOST [flags]
   idlectl run NAME --shell '<script>' [flags]
+  idlectl recipe (list | show NAME | render NAME --name RUN) [flags]
   idlectl get (hosts|workloads) [NAME] [flags]
   idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]
   idlectl delete ((host|workload) NAME | (host|workload)/NAME) [flags]
@@ -123,6 +124,8 @@ func runPublicCommand(ctx context.Context, command string, args []string) (bool,
 		return true, runJoin(ctx, args)
 	case "run":
 		return true, runWorkload(ctx, args)
+	case "recipe":
+		return true, runRecipe(args, os.Stdin, os.Stdout)
 	case "get":
 		return true, runGet(ctx, args)
 	case "logs":

@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "namespace": {
+      "type": "string",
+      "description": "Namespace for the IdleloomWorkload.",
+      "default": "default",
+      "format": "namespace"
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "description": "Maximum training runtime.",
+      "default": 120,
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "unifiedMemory": {
+      "type": "string",
+      "description": "Unified memory reservation hint for Native scheduling.",
+      "default": "512Mi",
+      "format": "positiveQuantity"
+    }
+  }
+}

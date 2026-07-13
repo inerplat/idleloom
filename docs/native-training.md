@@ -1,5 +1,9 @@
 # Native MLX training
 
+For the shorter manifest-first workflow shared with Linux workers, start with
+[`recipes.md`](recipes.md). This guide remains the detailed Native-only
+walkthrough for preparing MLX and testing both host link modes.
+
 Idleloom Native currently runs training code as a `Shell` workload. There is
 no separate training CRD, distributed trainer, dataset controller, or durable
 checkpoint exporter yet. The example in this guide verifies that a Kubernetes

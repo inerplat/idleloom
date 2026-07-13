@@ -82,7 +82,7 @@ func TestPublicUsageIsResourceOriented(t *testing.T) {
 	if !strings.HasPrefix(usageText, "idlectl ") {
 		t.Fatalf("usage does not expose the idlectl binary name: %s", usageText)
 	}
-	for _, expected := range []string{"join HOST", "run NAME", "get (hosts|workloads) [NAME]", "logs (WORKLOAD | workload/WORKLOAD)", "delete ((host|workload) NAME | (host|workload)/NAME)", "version"} {
+	for _, expected := range []string{"join HOST", "run NAME", "recipe (list | show NAME | render NAME", "get (hosts|workloads) [NAME]", "logs (WORKLOAD | workload/WORKLOAD)", "delete ((host|workload) NAME | (host|workload)/NAME)", "version"} {
 		if !strings.Contains(usageText, expected) {
 			t.Fatalf("usage does not contain %q", expected)
 		}
@@ -91,6 +91,49 @@ func TestPublicUsageIsResourceOriented(t *testing.T) {
 		if strings.Contains(usageText, legacy) {
 			t.Fatalf("usage still exposes legacy command %q", legacy)
 		}
+	}
+}
+
+func TestRecipeCommandsExposeBothBackendsAndRenderYAML(t *testing.T) {
+	var output bytes.Buffer
+	if err := runRecipe([]string{"list"}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"train/mlx-linear-regression@v1", "native", "train/container-linear-regression@v1", "worker"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("recipe list does not contain %q: %s", expected, output.String())
+		}
+	}
+
+	output.Reset()
+	if err := runRecipe([]string{"show", "train/mlx-linear-regression@v1"}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"id: train/mlx-linear-regression@v1", "digest: sha256:", "backend: native", "parameters:", "example:"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("recipe show does not contain %q: %s", expected, output.String())
+		}
+	}
+
+	output.Reset()
+	values := "namespace: training\nepochs: 140\n"
+	if err := runRecipe([]string{"render", "train/container-linear-regression@v1", "--name", "worker-train", "--values", "-", "-o", "yaml"}, strings.NewReader(values), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"apiVersion: batch/v1", "kind: Job", `name: "worker-train"`, `namespace: "training"`, `value: "140"`} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("recipe render does not contain %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestRecipeCommandsRejectUnpinnedAndUnsupportedOutput(t *testing.T) {
+	var output bytes.Buffer
+	if err := runRecipe([]string{"show", "train/mlx-linear-regression"}, strings.NewReader(""), &output); err == nil || !strings.Contains(err.Error(), "version-pinned") {
+		t.Fatalf("unpinned show error = %v", err)
+	}
+	if err := runRecipe([]string{"render", "train/mlx-linear-regression@v1", "--name", "train", "-o", "json"}, strings.NewReader(""), &output); err == nil || !strings.Contains(err.Error(), "--output must be yaml") {
+		t.Fatalf("unsupported output error = %v", err)
 	}
 }
 

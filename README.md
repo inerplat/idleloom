@@ -18,6 +18,11 @@ container semantics. Use Native Metal when direct Metal access matters more
 than OCI compatibility and the workload fits Idleloom's restricted execution
 contract.
 
+Training recipes provide one manifest-first workflow across both modes. They
+render either a real Kubernetes `Job` or an `IdleloomWorkload`; the resulting
+YAML is applied and operated with the native resource semantics of that
+backend. See [`docs/recipes.md`](docs/recipes.md).
+
 ## Native Metal quick start
 
 Install the complete macOS bundle from the public Homebrew tap:
@@ -77,7 +82,7 @@ Metal services receive restricted, short-lived service account credentials.
 The repository provides:
 
 - `idleloom init`, `status`, `start`, `stop`, and `delete`;
-- `idlectl join`, `run`, `get`, `logs`, and `delete`;
+- `idlectl join`, `run`, `recipe`, `get`, `logs`, and `delete`;
 - direct krunkit and gvproxy lifecycle management without a VM orchestrator;
 - an Ubuntu 24.04 ARM64 worker with persistent containerd and kubelet data;
 - kubelet version matching against the target Kubernetes API server;
@@ -87,7 +92,8 @@ The repository provides:
 - checksum-verified WireKube dependency installation, compatibility checks, and node enrollment;
 - hostPath and iSCSI support in the worker base system;
 - an Apple Vulkan DRA node driver and example ResourceClaims;
-- direct Native Metal execution with API-only and WireKube link modes.
+- direct Native Metal execution with API-only and WireKube link modes;
+- version-pinned Native and Worker training recipes that render Kubernetes YAML.
 
 ## How the Linux worker works
 
@@ -271,6 +277,8 @@ workloads remain declarative Kubernetes resources in this alpha.
 
 For a tested MLX training walkthrough in both link modes, see
 [`docs/native-training.md`](docs/native-training.md).
+For the shared manifest-first Native and Worker workflow, see
+[`docs/recipes.md`](docs/recipes.md).
 
 Homebrew installs the complete macOS bundle used by `join`:
 
@@ -289,6 +297,7 @@ The public CLI contains only Kubernetes-style resource operations:
 ```text
 idlectl join HOST
 idlectl run NAME
+idlectl recipe (list | show | render)
 idlectl get (hosts|workloads) [NAME]
 idlectl logs workload/NAME
 idlectl delete (host|workload)/NAME
