@@ -1,0 +1,226 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: serve
+    ai.idleloom.io/backend: worker
+    ai.idleloom.io/runtime: llama-vulkan
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  metadata:
+    labels:
+      app.kubernetes.io/managed-by: idleloom
+      ai.idleloom.io/run: {{ quote .Name }}
+      ai.idleloom.io/task: serve
+      ai.idleloom.io/backend: worker
+      ai.idleloom.io/runtime: llama-vulkan
+    annotations:
+      ai.idleloom.io/recipe: {{ quote .RecipeID }}
+      ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+      ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+  spec:
+    devices:
+      requests:
+      - name: accelerator
+        exactly:
+          deviceClassName: {{ quote (index .Values "deviceClass") }}
+          allocationMode: ExactCount
+          count: 1
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: serve
+    ai.idleloom.io/backend: worker
+    ai.idleloom.io/runtime: llama-vulkan
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 1
+  progressDeadlineSeconds: {{ integer (index .Values "startupTimeoutSeconds") }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      ai.idleloom.io/run: {{ quote .Name }}
+      app.kubernetes.io/component: inference-server
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: idleloom
+        app.kubernetes.io/component: inference-server
+        ai.idleloom.io/run: {{ quote .Name }}
+        ai.idleloom.io/task: serve
+        ai.idleloom.io/backend: worker
+        ai.idleloom.io/runtime: llama-vulkan
+      annotations:
+        ai.idleloom.io/recipe: {{ quote .RecipeID }}
+        ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+        ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+    spec:
+      nodeSelector:
+        kubernetes.io/os: linux
+        idleloom-worker: "true"
+        idleloom-accelerator: apple-vulkan
+      securityContext:
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      resourceClaims:
+      - name: gpu
+        resourceClaimTemplateName: {{ quote .Name }}
+      initContainers:
+      - name: model-fetch
+        image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:6f1a66f0576550c5145cd240d1c4dc5ee4cc08d9492551bbfaf4202efd3a0d95
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -ec
+        - |
+          curl --fail --location --retry 3 --output /models/model.gguf "$MODEL_URL"
+          echo "$MODEL_SHA256  /models/model.gguf" | sha256sum -c -
+        env:
+        - name: MODEL_URL
+          value: {{ quote (index .Values "modelURL") }}
+        - name: MODEL_SHA256
+          value: {{ quote (index .Values "modelSHA256") }}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 65532
+          runAsNonRoot: true
+          runAsUser: 65532
+        volumeMounts:
+        - name: model
+          mountPath: /models
+      containers:
+      - name: server
+        image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:6f1a66f0576550c5145cd240d1c4dc5ee4cc08d9492551bbfaf4202efd3a0d95
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/llama-server
+        args:
+        - --model
+        - /models/model.gguf
+        - --alias
+        - {{ quote (index .Values "modelAlias") }}
+        - --host
+        - 0.0.0.0
+        - --port
+        - {{ quote (index .Values "servicePort") }}
+        - --gpu-layers
+        - all
+        - --ctx-size
+        - {{ quote (index .Values "contextSize") }}
+        - --parallel
+        - {{ quote (index .Values "parallel") }}
+        - --api-key-file
+        - /run/secrets/idleloom/api-key
+        - --metrics
+        - --no-webui
+        env:
+        - name: VK_ICD_FILENAMES
+          value: /usr/share/vulkan/icd.d/virtio_icd.aarch64.json
+        ports:
+        - name: http
+          containerPort: {{ integer (index .Values "servicePort") }}
+          protocol: TCP
+        startupProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 10
+          timeoutSeconds: 2
+          failureThreshold: 180
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 3
+        resources:
+          requests:
+            cpu: {{ quote (index .Values "cpu") }}
+            memory: {{ quote (index .Values "memory") }}
+          limits:
+            cpu: {{ quote (index .Values "cpu") }}
+            memory: {{ quote (index .Values "memory") }}
+          claims:
+          - name: gpu
+            request: accelerator
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: model
+          mountPath: /models
+          readOnly: true
+        - name: api-key
+          mountPath: /run/secrets/idleloom
+          readOnly: true
+      volumes:
+      - name: model
+        emptyDir:
+          sizeLimit: {{ quote (index .Values "modelStorage") }}
+      - name: api-key
+        secret:
+          secretName: {{ quote (index .Values "apiKeySecret") }}
+          defaultMode: 0400
+          items:
+          - key: api-key
+            path: api-key
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: serve
+    ai.idleloom.io/backend: worker
+    ai.idleloom.io/runtime: llama-vulkan
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  type: ClusterIP
+  selector:
+    ai.idleloom.io/run: {{ quote .Name }}
+    app.kubernetes.io/component: inference-server
+  ports:
+  - name: http
+    port: {{ integer (index .Values "servicePort") }}
+    targetPort: http
+    protocol: TCP

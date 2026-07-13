@@ -7,23 +7,28 @@ import (
 	"testing"
 
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
+	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
+	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
 )
 
 const (
 	nativeRecipeID = "train/mlx-linear-regression@v1"
 	workerRecipeID = "train/container-linear-regression@v1"
+	workerServeID  = "serve/llama-vulkan@v1"
 )
 
 func TestDefaultRegistryListsPinnedBalancedRecipes(t *testing.T) {
 	registry := mustRegistry(t)
 	definitions := registry.List()
-	if len(definitions) != 4 {
-		t.Fatalf("recipe count = %d, want 4", len(definitions))
+	if len(definitions) != 5 {
+		t.Fatalf("recipe count = %d, want 5", len(definitions))
 	}
 	wantIDs := []string{
-		"infer/llama-vulkan@v1", "infer/mlx-batch@v1", workerRecipeID, nativeRecipeID,
+		"infer/llama-vulkan@v1", "infer/mlx-batch@v1", workerServeID, workerRecipeID, nativeRecipeID,
 	}
 	for index, want := range wantIDs {
 		if definitions[index].ID() != want {
@@ -86,7 +91,7 @@ func TestNativeRenderIsDeterministicAndValid(t *testing.T) {
 	if workload.Namespace != "training" || workload.Spec.Shell == nil || workload.Spec.Shell.TimeoutSeconds != 120 {
 		t.Fatalf("workload = %#v", workload)
 	}
-	assertMetadataContract(t, workload.Labels, workload.Annotations, "native-train", "native", "mlx", nativeRecipeID, first.RecipeDigest, first.InputDigest)
+	assertMetadataContract(t, workload.Labels, workload.Annotations, "native-train", "train", "native", "mlx", nativeRecipeID, first.RecipeDigest, first.InputDigest)
 }
 
 func TestWorkerRenderProducesRealPinnedJob(t *testing.T) {
@@ -109,8 +114,52 @@ func TestWorkerRenderProducesRealPinnedJob(t *testing.T) {
 	if job.Spec.Template.Spec.SecurityContext == nil || job.Spec.Template.Spec.SecurityContext.RunAsUser == nil || *job.Spec.Template.Spec.SecurityContext.RunAsUser == 0 {
 		t.Fatalf("worker Job does not select a non-root numeric identity: %#v", job.Spec.Template.Spec.SecurityContext)
 	}
-	assertMetadataContract(t, job.Labels, job.Annotations, "worker-train", "worker", "python", workerRecipeID, result.RecipeDigest, result.InputDigest)
-	assertMetadataContract(t, job.Spec.Template.Labels, job.Spec.Template.Annotations, "worker-train", "worker", "python", workerRecipeID, result.RecipeDigest, result.InputDigest)
+	assertMetadataContract(t, job.Labels, job.Annotations, "worker-train", "train", "worker", "python", workerRecipeID, result.RecipeDigest, result.InputDigest)
+	assertMetadataContract(t, job.Spec.Template.Labels, job.Spec.Template.Annotations, "worker-train", "train", "worker", "python", workerRecipeID, result.RecipeDigest, result.InputDigest)
+}
+
+func TestWorkerServeRenderProducesDRADeploymentAndService(t *testing.T) {
+	registry := mustRegistry(t)
+	result, err := registry.Render(workerServeID, RenderOptions{
+		Name: "worker-serve", Values: []byte("apiKeySecret: worker-serve-auth\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(result.Manifest), 4096)
+	var claimTemplate resourcev1.ResourceClaimTemplate
+	if err := decoder.Decode(&claimTemplate); err != nil {
+		t.Fatal(err)
+	}
+	var deployment appsv1.Deployment
+	if err := decoder.Decode(&deployment); err != nil {
+		t.Fatal(err)
+	}
+	var service corev1.Service
+	if err := decoder.Decode(&service); err != nil {
+		t.Fatal(err)
+	}
+	if claimTemplate.APIVersion != "resource.k8s.io/v1" || len(claimTemplate.Spec.Spec.Devices.Requests) != 1 {
+		t.Fatalf("claim template = %#v", claimTemplate)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 || deployment.Spec.Strategy.Type != appsv1.RecreateDeploymentStrategyType {
+		t.Fatalf("deployment strategy = %#v replicas=%v", deployment.Spec.Strategy, deployment.Spec.Replicas)
+	}
+	podSpec := deployment.Spec.Template.Spec
+	if len(podSpec.ResourceClaims) != 1 || podSpec.ResourceClaims[0].ResourceClaimTemplateName == nil || *podSpec.ResourceClaims[0].ResourceClaimTemplateName != "worker-serve" {
+		t.Fatalf("pod resource claims = %#v", podSpec.ResourceClaims)
+	}
+	if len(podSpec.Containers) != 1 || podSpec.Containers[0].Command[0] != "/app/llama-server" || !strings.Contains(strings.Join(podSpec.Containers[0].Args, " "), "--api-key-file") {
+		t.Fatalf("server container = %#v", podSpec.Containers)
+	}
+	if service.Spec.Type != corev1.ServiceTypeClusterIP || service.Spec.Selector["app.kubernetes.io/component"] != "inference-server" {
+		t.Fatalf("service = %#v", service.Spec)
+	}
+	assertMetadataContract(t, claimTemplate.Labels, claimTemplate.Annotations, "worker-serve", "serve", "worker", "llama-vulkan", workerServeID, result.RecipeDigest, result.InputDigest)
+	assertMetadataContract(t, claimTemplate.Spec.Labels, claimTemplate.Spec.Annotations, "worker-serve", "serve", "worker", "llama-vulkan", workerServeID, result.RecipeDigest, result.InputDigest)
+	assertMetadataContract(t, deployment.Labels, deployment.Annotations, "worker-serve", "serve", "worker", "llama-vulkan", workerServeID, result.RecipeDigest, result.InputDigest)
+	assertMetadataContract(t, deployment.Spec.Template.Labels, deployment.Spec.Template.Annotations, "worker-serve", "serve", "worker", "llama-vulkan", workerServeID, result.RecipeDigest, result.InputDigest)
+	assertMetadataContract(t, service.Labels, service.Annotations, "worker-serve", "serve", "worker", "llama-vulkan", workerServeID, result.RecipeDigest, result.InputDigest)
 }
 
 func TestAllEmbeddedExamplesRender(t *testing.T) {
@@ -172,6 +221,7 @@ func TestRenderRejectsUnknownAndInvalidParameters(t *testing.T) {
 		{name: "model-url", id: "infer/llama-vulkan@v1", values: "modelURL: http://models.example/model.gguf\n", want: "HTTPS URL"},
 		{name: "model-digest", id: "infer/llama-vulkan@v1", values: "modelSHA256: abc\n", want: "64 lowercase"},
 		{name: "prompt", id: "infer/mlx-batch@v1", values: "prompt: \"\"\n", want: "at least 1"},
+		{name: "serve-secret", id: workerServeID, values: "apiKeySecret: Invalid_Name\n", want: "DNS subdomain"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -233,10 +283,10 @@ func mustRegistry(t *testing.T) *Registry {
 	return registry
 }
 
-func assertMetadataContract(t *testing.T, labels, annotations map[string]string, name, backend, runtime, recipeID, recipeDigest, inputDigest string) {
+func assertMetadataContract(t *testing.T, labels, annotations map[string]string, name, task, backend, runtime, recipeID, recipeDigest, inputDigest string) {
 	t.Helper()
 	wantLabels := map[string]string{
-		managedByLabel: "idleloom", runLabel: name, taskLabel: "train", backendLabel: backend, runtimeLabel: runtime,
+		managedByLabel: "idleloom", runLabel: name, taskLabel: task, backendLabel: backend, runtimeLabel: runtime,
 	}
 	for key, want := range wantLabels {
 		if labels[key] != want {

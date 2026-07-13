@@ -15,6 +15,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	resourcev1 "k8s.io/api/resource/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
@@ -179,6 +180,17 @@ func validateRenderedManifest(manifest []byte, definition Definition, data templ
 			return err
 		}
 		switch typed := object.(type) {
+		case *resourcev1.ResourceClaim:
+			if definition.Backend != "worker" {
+				return fmt.Errorf("native recipe rendered a ResourceClaim")
+			}
+		case *resourcev1.ResourceClaimTemplate:
+			if definition.Backend != "worker" {
+				return fmt.Errorf("native recipe rendered a ResourceClaimTemplate")
+			}
+			if err := validateMetadata(typed.Spec.Labels, typed.Spec.Annotations, definition, data); err != nil {
+				return fmt.Errorf("resource claim template metadata: %w", err)
+			}
 		case *nativev1alpha1.IdleloomWorkload:
 			if definition.Backend != "native" {
 				return fmt.Errorf("worker recipe rendered an IdleloomWorkload")

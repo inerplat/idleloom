@@ -1,4 +1,4 @@
-# Reproducible training and inference recipes
+# Reproducible ML workload recipes
 
 Idleloom recipes produce ordinary Kubernetes YAML for one of two execution
 contracts. A recipe is a versioned manifest bundle in this repository, not a
@@ -29,6 +29,7 @@ idlectl recipe show train/mlx-linear-regression@v1
 idlectl recipe show train/container-linear-regression@v1
 idlectl recipe show infer/mlx-batch@v1
 idlectl recipe show infer/llama-vulkan@v1
+idlectl recipe show serve/llama-vulkan@v1
 ```
 
 The version suffix is required. A manifest always records the exact recipe ID
@@ -180,6 +181,71 @@ yet remap the render device node to a Pod security-context UID. The container
 drops all capabilities, forbids privilege escalation, and uses a read-only
 root filesystem, but this is not a multi-tenant isolation boundary.
 
+## Linux worker Vulkan serving
+
+The serving recipe renders a `resource.k8s.io/v1` `ResourceClaimTemplate`, an
+`apps/v1` `Deployment`, and a ClusterIP `Service`. It uses one replica with a
+`Recreate` strategy so two Pods cannot contend for the single DRA device during
+a rollout. The llama.cpp OpenAI-compatible API requires a key from an existing
+Kubernetes Secret; the key is never placed in recipe values or generated YAML.
+
+Create the Secret and a values file:
+
+```sh
+openssl rand -hex 32 | kubectl create secret generic worker-serve-auth \
+  --from-file=api-key=/dev/stdin
+```
+
+```yaml
+apiKeySecret: worker-serve-auth
+```
+
+Render, inspect, and apply the manifest:
+
+```sh
+idlectl recipe render serve/llama-vulkan@v1 \
+  --name worker-serve \
+  --values worker-serve-values.yaml \
+  -o yaml > worker-serve.yaml
+
+kubectl apply --dry-run=client -f worker-serve.yaml
+kubectl apply -f worker-serve.yaml
+kubectl rollout status deployment/worker-serve --timeout=30m
+```
+
+Forward the cluster-private Service in one terminal:
+
+```sh
+kubectl port-forward service/worker-serve 8080:8080
+```
+
+Read the key and call the endpoint from another terminal:
+
+```sh
+API_KEY="$(kubectl get secret worker-serve-auth \
+  -o jsonpath='{.data.api-key}' | openssl base64 -d -A)"
+
+curl --fail-with-body http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer ${API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"Why is idle compute useful?"}],"max_tokens":64}'
+```
+
+The default model is downloaded and checksum-verified into Pod-local
+`emptyDir` storage on each replacement Pod. Use an operator-managed persistent
+model cache in a future recipe before treating restarts as a fast path. The
+Service is cluster-private and does not configure Ingress, external TLS, or
+tenant authorization. Remove the generated resources and Secret explicitly:
+
+```sh
+kubectl delete -f worker-serve.yaml
+kubectl delete secret worker-serve-auth
+```
+
+Native serving is not included in this slice. It requires a connected Native
+host plus a selectorless Service and controller-managed EndpointSlice; API-only
+hosts continue to use batch inference.
+
 ## Manifest contract
 
 Every rendered object carries the same queryable metadata:
@@ -206,7 +272,7 @@ deterministic defaults, pinned assets, and consistent metadata.
 Query runs across both backends with the shared labels:
 
 ```sh
-kubectl get idleloomworkloads,jobs \
+kubectl get idleloomworkloads,jobs,deployments \
   -l app.kubernetes.io/managed-by=idleloom
 ```
 
