@@ -138,6 +138,38 @@ func TestBatchInferenceRejectsAgentWithoutCapability(t *testing.T) {
 	}
 }
 
+func TestPlannerCopiesConnectedServerIntent(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Server = &nativev1alpha1.WorkloadServer{ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b"}
+	model := testModel()
+	host := testHost("native", "32Gi", now)
+	planner := Planner{Now: func() time.Time { return now }, NewExecutionID: func() (string, error) {
+		return "123e4567-e89b-42d3-a456-426614174000", nil
+	}}
+	assignment, err := planner.PlanAssignment(&workload, &model, &host, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := assignment.Spec.Model.Server
+	if server == nil || server.ServiceName != "qwen-chat" || server.ModelAlias != "qwen3-5-0-8b" || server.AuthSecretName != nativev1alpha1.ServingAuthSecretName || server.Port != nativev1alpha1.NativeServingPort {
+		t.Fatalf("server assignment = %#v", server)
+	}
+}
+
+func TestConnectedServerRejectsAgentWithoutCapability(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Server = &nativev1alpha1.WorkloadServer{ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b"}
+	host := testHost("legacy", "32Gi", now)
+	host.Status.Capabilities = []string{nativev1alpha1.CapabilityBatchInferenceV1}
+	model := testModel()
+	_, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host})
+	if err == nil || !strings.Contains(err.Error(), "does not support connected Native serving") {
+		t.Fatalf("legacy agent error = %v", err)
+	}
+}
+
 func TestShellAccessNeverExceedsHostEnrollment(t *testing.T) {
 	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	planner := Planner{Now: func() time.Time { return now }}
@@ -256,7 +288,7 @@ func testHost(name, memory string, now time.Time) nativev1alpha1.IdleloomHost {
 			ProtocolVersion:          nativev1alpha1.AgentProtocolV1Alpha1,
 			RuntimeProfiles:          []string{nativev1alpha1.RuntimeProfileMLXLMV1},
 			ModelFamilies:            []string{nativev1alpha1.ModelFamilyQwen35},
-			Capabilities:             []string{nativev1alpha1.CapabilityBatchInferenceV1},
+			Capabilities:             []string{nativev1alpha1.CapabilityBatchInferenceV1, nativev1alpha1.CapabilityNativeServiceV1},
 			AllocatableUnifiedMemory: resource.MustParse(memory),
 			AvailableUnifiedMemory:   resource.MustParse(memory),
 			KrunkitState:             nativev1alpha1.KrunkitStateStopped,

@@ -13,12 +13,15 @@ const (
 	WorkloadModeBatch  = "Batch"
 	WorkloadModeShell  = "Shell"
 
-	RuntimeProfileMLXLMV1       = "mlx-lm-v1"
-	RuntimeProfileShellV1       = "shell-v1"
-	ModelFamilyQwen35           = "qwen3.5"
-	ArtifactFormatSafetensorsV1 = "mlx-safetensors-v1"
-	AgentProtocolV1Alpha1       = "native.ai.idleloom.io/v1alpha1"
-	CapabilityBatchInferenceV1  = "BatchInferenceV1"
+	RuntimeProfileMLXLMV1             = "mlx-lm-v1"
+	RuntimeProfileShellV1             = "shell-v1"
+	ModelFamilyQwen35                 = "qwen3.5"
+	ArtifactFormatSafetensorsV1       = "mlx-safetensors-v1"
+	AgentProtocolV1Alpha1             = "native.ai.idleloom.io/v1alpha1"
+	CapabilityBatchInferenceV1        = "BatchInferenceV1"
+	CapabilityNativeServiceV1         = "NativeServiceV1"
+	ServingAuthSecretName             = "active-serve-auth"
+	NativeServingPort           int32 = 18080
 
 	KrunkitStateStopped = "Stopped"
 	KrunkitStateRunning = "Running"
@@ -63,6 +66,7 @@ type IdleloomWorkloadSpec struct {
 	// +kubebuilder:validation:Enum=Server;Batch;Shell
 	Mode      string                  `json:"mode"`
 	Model     *WorkloadModelReference `json:"model,omitempty"`
+	Server    *WorkloadServer         `json:"server,omitempty"`
 	Batch     *WorkloadBatchInference `json:"batch,omitempty"`
 	Shell     *WorkloadShell          `json:"shell,omitempty"`
 	Resources WorkloadResources       `json:"resources"`
@@ -73,6 +77,17 @@ type WorkloadModelReference struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	CatalogRef string `json:"catalogRef"`
+}
+
+type WorkloadServer struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?$`
+	ServiceName string `json:"serviceName"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	ModelAlias string `json:"modelAlias"`
 }
 
 type WorkloadBatchInference struct {
@@ -134,7 +149,7 @@ type WorkloadSchedulingIntent struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:validation:XValidation:rule="self.spec == oldSelf.spec",message="spec is immutable; create a new workload to change it"
 // +kubebuilder:validation:XValidation:rule="quantity(self.spec.resources.unifiedMemoryRequest).isGreaterThan(quantity('0'))",message="unifiedMemoryRequest must be positive"
-// +kubebuilder:validation:XValidation:rule="(self.spec.mode == 'Server' && has(self.spec.model) && !has(self.spec.batch) && !has(self.spec.shell)) || (self.spec.mode == 'Batch' && has(self.spec.model) && has(self.spec.batch) && !has(self.spec.shell)) || (self.spec.mode == 'Shell' && !has(self.spec.model) && !has(self.spec.batch) && has(self.spec.shell))",message="mode-specific model, batch, and shell fields are inconsistent"
+// +kubebuilder:validation:XValidation:rule="(self.spec.mode == 'Server' && has(self.spec.model) && !has(self.spec.batch) && !has(self.spec.shell)) || (self.spec.mode == 'Batch' && has(self.spec.model) && !has(self.spec.server) && has(self.spec.batch) && !has(self.spec.shell)) || (self.spec.mode == 'Shell' && !has(self.spec.model) && !has(self.spec.server) && !has(self.spec.batch) && has(self.spec.shell))",message="mode-specific model, server, batch, and shell fields are inconsistent"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.shell) || self.spec.shell.isolation != 'Host' || !has(self.spec.shell.network) || self.spec.shell.network == 'Outbound'",message="Host shell isolation requires outbound network access"
 type IdleloomWorkload struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -299,6 +314,7 @@ type NamespacedObjectReference struct {
 	UID       types.UID `json:"uid,omitempty"`
 }
 
+// +kubebuilder:validation:XValidation:rule="!(has(self.server) && has(self.batch))",message="server and batch intents are mutually exclusive"
 type ResolvedModel struct {
 	CatalogRef ObjectReference `json:"catalogRef"`
 	// +kubebuilder:validation:Enum=qwen3.5
@@ -313,7 +329,24 @@ type ResolvedModel struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1
 	MaxConcurrentRequests int32                   `json:"maxConcurrentRequests"`
+	Server                *ResolvedServer         `json:"server,omitempty"`
 	Batch                 *WorkloadBatchInference `json:"batch,omitempty"`
+}
+
+type ResolvedServer struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=63
+	// +kubebuilder:validation:Pattern=`^[a-z]([-a-z0-9]*[a-z0-9])?$`
+	ServiceName string `json:"serviceName"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=253
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
+	ModelAlias string `json:"modelAlias"`
+	// +kubebuilder:validation:Enum=active-serve-auth
+	AuthSecretName string `json:"authSecretName"`
+	// +kubebuilder:validation:Minimum=18080
+	// +kubebuilder:validation:Maximum=18080
+	Port int32 `json:"port"`
 }
 
 type ResolvedShell struct {

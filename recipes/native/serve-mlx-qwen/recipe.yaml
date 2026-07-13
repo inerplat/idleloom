@@ -1,0 +1,13 @@
+name: serve/mlx-qwen
+version: v1
+description: Serve the locked Qwen MLX model through an authenticated cluster-private Service on a connected Native Metal host.
+task: serve
+backend: native
+runtime: mlx
+manifest: native-service.yaml
+parametersSchema: parameters.schema.json
+example: example.yaml
+prerequisites:
+- A Native Metal host joined in the default WireKube connected mode.
+- The built-in qwen3-5-0-8b-mlx model catalog installed by idlectl join.
+- Cluster access to read the controller-generated SERVICE-auth Secret.

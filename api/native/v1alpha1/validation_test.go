@@ -58,6 +58,24 @@ func TestValidateBatchInferenceWorkload(t *testing.T) {
 	}
 }
 
+func TestValidateConnectedServerWorkload(t *testing.T) {
+	workload := validWorkload()
+	workload.Spec.Server = &WorkloadServer{ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b"}
+	if err := ValidateWorkload(&workload); err != nil {
+		t.Fatalf("ValidateWorkload: %v", err)
+	}
+	workload.Spec.Server.ServiceName = "Invalid_Name"
+	if err := ValidateWorkload(&workload); err == nil {
+		t.Fatal("ValidateWorkload accepted an invalid serving Service name")
+	}
+	workload.Spec.Mode = WorkloadModeBatch
+	workload.Spec.Server = &WorkloadServer{ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b"}
+	workload.Spec.Batch = &WorkloadBatchInference{Prompt: "hello", MaxTokens: 8}
+	if err := ValidateWorkload(&workload); err == nil {
+		t.Fatal("ValidateWorkload accepted server and batch intents together")
+	}
+}
+
 func TestValidateModelRejectsMutableOrCredentialedArtifact(t *testing.T) {
 	model := validModel()
 	if err := ValidateModel(&model); err != nil {
@@ -109,6 +127,33 @@ func TestValidateAssignment(t *testing.T) {
 	assignment.Spec.ExecutionID = "reused-process"
 	if err := ValidateAssignment(&assignment); err == nil {
 		t.Fatal("ValidateAssignment accepted a non-UUID execution ID")
+	}
+}
+
+func TestValidateServingAssignment(t *testing.T) {
+	model := validModel()
+	assignment := IdleloomWorkloadAssignment{Spec: IdleloomWorkloadAssignmentSpec{
+		DesiredState: AssignmentDesiredRunning,
+		WorkloadRef:  WorkloadObjectReference{Namespace: "default", Name: "qwen", UID: types.UID("workload-uid"), Generation: 1},
+		HostRef:      ObjectReference{Name: "studio", UID: types.UID("host-uid")},
+		Model: &ResolvedModel{
+			CatalogRef: ObjectReference{Name: model.Name, UID: types.UID("model-uid")},
+			Family:     model.Spec.Family, RuntimeProfile: model.Spec.RuntimeProfile,
+			Artifact: model.Spec.Artifact, UnifiedMemoryRequest: resource.MustParse("16Gi"),
+			MaxContextLength: model.Spec.MaxContextLength, MaxConcurrentRequests: model.Spec.MaxConcurrentRequests,
+			Server: &ResolvedServer{
+				ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b",
+				AuthSecretName: ServingAuthSecretName, Port: NativeServingPort,
+			},
+		},
+		ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 1, LeaseDurationSeconds: 30,
+	}}
+	if err := ValidateAssignment(&assignment); err != nil {
+		t.Fatalf("ValidateAssignment: %v", err)
+	}
+	assignment.Spec.Model.Server.AuthSecretName = "user-secret"
+	if err := ValidateAssignment(&assignment); err == nil {
+		t.Fatal("ValidateAssignment accepted an untrusted serving Secret name")
 	}
 }
 

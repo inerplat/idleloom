@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -597,7 +598,7 @@ func runController(ctx context.Context, args []string) error {
 	if err := verifyRestrictedIdentity(ctx, clientset, "system:serviceaccount:idleloom-system:idleloom-controller", "idleloom-system"); err != nil {
 		return err
 	}
-	reconciler := &nativecontroller.Reconciler{Dynamic: dynamicClient, Coordination: clientset.CoordinationV1()}
+	reconciler := &nativecontroller.Reconciler{Dynamic: dynamicClient, Kubernetes: clientset, Coordination: clientset.CoordinationV1()}
 	hostname, err := os.Hostname()
 	if err != nil {
 		return err
@@ -768,6 +769,7 @@ func runAgent(ctx context.Context, args []string) error {
 	}
 	var connectivityStatus func() (nativev1alpha1.HostConnectivityStatus, error)
 	var kubeletBridge *nativeagent.KubeletBridgeConfig
+	serveListenAddress := ""
 	if *link == nativewirekube.ConnectivityWireKube {
 		state, err := nativewirekube.ReadState(*stateDirectory)
 		if err != nil {
@@ -780,6 +782,10 @@ func runAgent(ctx context.Context, args []string) error {
 		connectivityStatus = func() (nativev1alpha1.HostConnectivityStatus, error) {
 			return nativewirekube.ReadRuntimeStatus(runtimeDirectory, state, time.Now().UTC(), 15*time.Second)
 		}
+		if ip := net.ParseIP(state.AssignedMeshIP); ip == nil || ip.To4() == nil {
+			return fmt.Errorf("WireKube connected leaf has no valid assigned IPv4 address")
+		}
+		serveListenAddress = net.JoinHostPort(state.AssignedMeshIP, fmt.Sprint(nativev1alpha1.NativeServingPort))
 		clientCA, err := os.ReadFile(kubeletbridge.ClientCAPath(*stateDirectory))
 		if err != nil {
 			return fmt.Errorf("read enrolled Kubernetes client CA: %w", err)
@@ -792,9 +798,9 @@ func runAgent(ctx context.Context, args []string) error {
 		return fmt.Errorf("--link must be %q or %q", nativewirekube.ConnectivityAPIOnly, nativewirekube.ConnectivityWireKube)
 	}
 	agent, err := nativeagent.NewDevAgent(nativeagent.DevAgentConfig{
-		Dynamic: dynamicClient, Namespace: *namespace, AgentID: *agentID,
+		Dynamic: dynamicClient, Kubernetes: clientset, Namespace: *namespace, AgentID: *agentID,
 		Layout: devruntime.NewLayout(*root), StateDirectory: *stateDirectory,
-		KubeconfigPath: *kubeconfig, ListenAddress: *listen,
+		KubeconfigPath: *kubeconfig, ListenAddress: *listen, ServeListenAddress: serveListenAddress,
 		ConnectivityStatus: connectivityStatus,
 		KubeletBridge:      kubeletBridge,
 		Logf:               func(format string, values ...any) { fmt.Fprintf(os.Stderr, "agent: "+format+"\n", values...) },

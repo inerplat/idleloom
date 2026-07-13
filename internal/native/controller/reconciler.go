@@ -15,11 +15,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	coordinationclient "k8s.io/client-go/kubernetes/typed/coordination/v1"
 )
 
 type Reconciler struct {
 	Dynamic      dynamic.Interface
+	Kubernetes   kubernetes.Interface
 	Coordination coordinationclient.CoordinationV1Interface
 	Planner      scheduler.Planner
 	Now          func() time.Time
@@ -42,14 +44,36 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	}
 	cycle := &reconcileCycle{reconciler: r, models: make(map[string]*nativev1alpha1.IdleloomModel)}
 	var errs []error
+	var servingWorkloads []*nativev1alpha1.IdleloomWorkload
 	for i := range list.Items {
 		var workload nativev1alpha1.IdleloomWorkload
 		if err := nativekube.FromUnstructured(&list.Items[i], &workload); err != nil {
 			errs = append(errs, err)
 			continue
 		}
+		if workload.Spec.Server != nil {
+			servingWorkloads = append(servingWorkloads, workload.DeepCopy())
+		}
 		if err := r.reconcileWorkloadWithCycle(ctx, &workload, cycle); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile workload %s/%s: %w", workload.Namespace, workload.Name, err))
+		}
+	}
+	for _, workload := range servingWorkloads {
+		currentObject, err := r.Dynamic.Resource(nativekube.WorkloadsGVR).Namespace(workload.Namespace).Get(ctx, workload.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("refresh serving workload %s/%s: %w", workload.Namespace, workload.Name, err))
+			continue
+		}
+		var current nativev1alpha1.IdleloomWorkload
+		if err := nativekube.FromUnstructured(currentObject, &current); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := r.reconcileServingEndpoint(ctx, &current); err != nil {
+			errs = append(errs, fmt.Errorf("reconcile Native Service for workload %s/%s: %w", workload.Namespace, workload.Name, err))
 		}
 	}
 	return errors.Join(errs...)
@@ -147,6 +171,9 @@ func (r *Reconciler) createAssignmentFromIntent(ctx context.Context, workload *n
 		if err := validateAssignmentIdentity(&assignment, workload, intent); err != nil {
 			return err
 		}
+		if err := r.ensureServingSecrets(ctx, workload, intent); err != nil {
+			return err
+		}
 		return r.persistAssignmentReference(ctx, workload, &assignment)
 	}
 	if !apierrors.IsNotFound(err) {
@@ -162,6 +189,9 @@ func (r *Reconciler) createAssignmentFromIntent(ctx context.Context, workload *n
 	}
 	if host.UID != intent.HostRef.UID {
 		return fmt.Errorf("persisted scheduling intent refers to a replaced host")
+	}
+	if err := r.ensureServingSecrets(ctx, workload, intent); err != nil {
+		return err
 	}
 	planner := r.Planner
 	planner.NewExecutionID = func() (string, error) { return intent.ExecutionID, nil }
@@ -280,6 +310,9 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, workload *nativev1al
 	ref := workload.Status.AssignmentRef
 	intent := workload.Status.SchedulingIntent
 	if ref == nil && intent == nil {
+		if err := r.cleanupServingResources(ctx, workload, ""); err != nil {
+			return err
+		}
 		return r.removeFinalizer(ctx, workload)
 	}
 	namespace := ""
@@ -293,6 +326,9 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, workload *nativev1al
 	resource := r.Dynamic.Resource(nativekube.AssignmentsGVR).Namespace(namespace)
 	object, err := resource.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if err := r.cleanupServingResources(ctx, workload, namespace); err != nil {
+			return err
+		}
 		return r.removeFinalizer(ctx, workload)
 	}
 	if err != nil {
@@ -325,6 +361,9 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, workload *nativev1al
 	}
 	if err := resource.Delete(ctx, assignment.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &assignment.UID}}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete stopped assignment: %w", err)
+	}
+	if err := r.cleanupServingResources(ctx, workload, namespace); err != nil {
+		return err
 	}
 	return r.removeFinalizer(ctx, workload)
 }

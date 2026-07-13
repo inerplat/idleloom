@@ -17,6 +17,7 @@ import (
 
 const (
 	nativeRecipeID = "train/mlx-linear-regression@v1"
+	nativeServeID  = "serve/mlx-qwen@v1"
 	workerRecipeID = "train/container-linear-regression@v1"
 	workerServeID  = "serve/llama-vulkan@v1"
 )
@@ -24,11 +25,11 @@ const (
 func TestDefaultRegistryListsPinnedBalancedRecipes(t *testing.T) {
 	registry := mustRegistry(t)
 	definitions := registry.List()
-	if len(definitions) != 5 {
-		t.Fatalf("recipe count = %d, want 5", len(definitions))
+	if len(definitions) != 6 {
+		t.Fatalf("recipe count = %d, want 6", len(definitions))
 	}
 	wantIDs := []string{
-		"infer/llama-vulkan@v1", "infer/mlx-batch@v1", workerServeID, workerRecipeID, nativeRecipeID,
+		"infer/llama-vulkan@v1", "infer/mlx-batch@v1", workerServeID, nativeServeID, workerRecipeID, nativeRecipeID,
 	}
 	for index, want := range wantIDs {
 		if definitions[index].ID() != want {
@@ -160,6 +161,31 @@ func TestWorkerServeRenderProducesDRADeploymentAndService(t *testing.T) {
 	assertMetadataContract(t, deployment.Labels, deployment.Annotations, "worker-serve", "serve", "worker", "llama-vulkan", workerServeID, result.RecipeDigest, result.InputDigest)
 	assertMetadataContract(t, deployment.Spec.Template.Labels, deployment.Spec.Template.Annotations, "worker-serve", "serve", "worker", "llama-vulkan", workerServeID, result.RecipeDigest, result.InputDigest)
 	assertMetadataContract(t, service.Labels, service.Annotations, "worker-serve", "serve", "worker", "llama-vulkan", workerServeID, result.RecipeDigest, result.InputDigest)
+}
+
+func TestNativeServeRenderProducesWorkloadAndSelectorlessService(t *testing.T) {
+	registry := mustRegistry(t)
+	result, err := registry.Render(nativeServeID, RenderOptions{Name: "native-serve"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(result.Manifest), 4096)
+	var workload nativev1alpha1.IdleloomWorkload
+	if err := decoder.Decode(&workload); err != nil {
+		t.Fatal(err)
+	}
+	var service corev1.Service
+	if err := decoder.Decode(&service); err != nil {
+		t.Fatal(err)
+	}
+	if workload.Spec.Mode != nativev1alpha1.WorkloadModeServer || workload.Spec.Server == nil || workload.Spec.Server.ServiceName != "native-serve" || workload.Spec.Server.ModelAlias != "qwen3-5-0-8b" {
+		t.Fatalf("Native serving workload = %#v", workload.Spec)
+	}
+	if service.Spec.Type != corev1.ServiceTypeClusterIP || len(service.Spec.Selector) != 0 || service.Annotations["ai.idleloom.io/native-workload"] != workload.Name || service.Annotations["ai.idleloom.io/auth-secret"] != "native-serve-auth" {
+		t.Fatalf("Native serving Service = %#v", service)
+	}
+	assertMetadataContract(t, workload.Labels, workload.Annotations, "native-serve", "serve", "native", "mlx", nativeServeID, result.RecipeDigest, result.InputDigest)
+	assertMetadataContract(t, service.Labels, service.Annotations, "native-serve", "serve", "native", "mlx", nativeServeID, result.RecipeDigest, result.InputDigest)
 }
 
 func TestAllEmbeddedExamplesRender(t *testing.T) {

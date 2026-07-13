@@ -29,6 +29,7 @@ idlectl recipe show train/mlx-linear-regression@v1
 idlectl recipe show train/container-linear-regression@v1
 idlectl recipe show infer/mlx-batch@v1
 idlectl recipe show infer/llama-vulkan@v1
+idlectl recipe show serve/mlx-qwen@v1
 idlectl recipe show serve/llama-vulkan@v1
 ```
 
@@ -150,8 +151,8 @@ Do not put credentials or other secrets in a prompt.
 
 Native API and catalog installation currently happens during `idlectl join`.
 A host joined by an older binary must be deleted and joined again with the
-current binary before applying a `Batch` workload; in-place join upgrades are
-not yet implemented.
+current binary before applying a `Batch` or serving workload; in-place join
+upgrades are not yet implemented.
 
 ## Linux worker Vulkan batch inference
 
@@ -180,6 +181,64 @@ currently runs as its default root user because the Worker CDI path does not
 yet remap the render device node to a Pod security-context UID. The container
 drops all capabilities, forbids privilege escalation, and uses a read-only
 root filesystem, but this is not a multi-tenant isolation boundary.
+
+## Native Metal serving
+
+The Native serving recipe renders an explicit `Server` `IdleloomWorkload` and
+a selectorless ClusterIP `Service`. It can schedule only to a Native host with
+a fresh WireKube connection. The controller creates an `EndpointSlice` that
+points at the host's WireKube mesh address after the assignment reaches
+`Running`; API-only hosts are rejected by capability scheduling and continue
+to use batch inference.
+
+```sh
+idlectl recipe render serve/mlx-qwen@v1 \
+  --name native-serve \
+  -o yaml > native-serve.yaml
+
+kubectl apply -f native-serve.yaml
+kubectl wait --for=condition=Ready \
+  idleloomworkload/native-serve --timeout=15m
+kubectl get endpointslice/native-serve
+```
+
+The controller generates `Secret/native-serve-auth` in the workload namespace
+and copies the same API key into a fixed, agent-readable Secret in the selected
+host namespace. Secret values never enter the Workload or Assignment CRs.
+Start a local Kubernetes API proxy:
+
+```sh
+kubectl proxy --port=8001
+```
+
+Read the client key and send a smoke request from another terminal through the
+standard Service proxy:
+
+```sh
+API_KEY="$(kubectl get secret native-serve-auth \
+  -o jsonpath='{.data.api-key}' | openssl base64 -d -A)"
+
+curl --fail-with-body \
+  http://127.0.0.1:8001/api/v1/namespaces/default/services/native-serve:http/proxy/v1/chat/completions \
+  -H "X-Idleloom-API-Key: ${API_KEY}" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-5-0-8b","messages":[{"role":"user","content":"Why is idle compute useful?"}],"max_tokens":64}'
+```
+
+In-cluster clients use `http://native-serve.default.svc:8000` with the normal
+`Authorization: Bearer API_KEY` header. The current adapter implements
+non-streaming chat completions, `GET /v1/models`, and a 512-token response
+limit. Traffic to the Mac is encrypted by WireGuard and authenticated with the
+generated API key; this slice does not add application-layer TLS or expose an
+Ingress. The first request path may require the same approximately 650 MB
+locked runtime and model preparation as Native batch inference.
+
+Delete the manifest to stop the process and remove its EndpointSlice and
+managed Secrets:
+
+```sh
+kubectl delete -f native-serve.yaml
+```
 
 ## Linux worker Vulkan serving
 
@@ -242,10 +301,6 @@ kubectl delete -f worker-serve.yaml
 kubectl delete secret worker-serve-auth
 ```
 
-Native serving is not included in this slice. It requires a connected Native
-host plus a selectorless Service and controller-managed EndpointSlice; API-only
-hosts continue to use batch inference.
-
 ## Manifest contract
 
 Every rendered object carries the same queryable metadata:
@@ -255,7 +310,7 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: idleloom
     ai.idleloom.io/run: RUN
-    ai.idleloom.io/task: train-or-infer
+    ai.idleloom.io/task: train-infer-or-serve
     ai.idleloom.io/backend: native-or-worker
     ai.idleloom.io/runtime: RUNTIME
   annotations:

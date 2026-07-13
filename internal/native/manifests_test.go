@@ -48,11 +48,13 @@ func TestNativeCRDsExposeOnlyTheRestrictedWorkloadIntent(t *testing.T) {
 	workload := decodeObjects(t, filepath.Join(crdDir, "ai.idleloom.io_idleloomworkloads.yaml"))[0]
 	rootSchema := crdSchema(t, workload)
 	specProperties := nestedMap(t, rootSchema, "properties", "spec", "properties")
-	assertKeys(t, specProperties, []string{"batch", "mode", "model", "resources", "shell"})
+	assertKeys(t, specProperties, []string{"batch", "mode", "model", "resources", "server", "shell"})
 	batchProperties := nestedMap(t, specProperties, "batch", "properties")
 	assertKeys(t, batchProperties, []string{"maxTokens", "prompt", "timeoutSeconds"})
 	modelProperties := nestedMap(t, specProperties, "model", "properties")
 	assertKeys(t, modelProperties, []string{"catalogRef"})
+	serverProperties := nestedMap(t, specProperties, "server", "properties")
+	assertKeys(t, serverProperties, []string{"modelAlias", "serviceName"})
 	resourceProperties := nestedMap(t, specProperties, "resources", "properties")
 	assertKeys(t, resourceProperties, []string{"unifiedMemoryRequest"})
 	shellProperties := nestedMap(t, specProperties, "shell", "properties")
@@ -137,6 +139,7 @@ func TestAgentRoleCannotReadUserWorkloadsCredentialsOrNodes(t *testing.T) {
 	}
 	expected := map[string]expectedRule{
 		"/serviceaccounts/token":                            {verbs: []string{"create"}, resourceNames: []string{"idleloom-agent"}},
+		"/secrets":                                          {verbs: []string{"get"}, resourceNames: []string{"active-serve-auth"}},
 		"ai.idleloom.io/idleloomhosts":                      {verbs: []string{"get"}, resourceNames: []string{"host"}},
 		"ai.idleloom.io/idleloomhosts/status":               {verbs: []string{"get", "patch", "update"}, resourceNames: []string{"host"}},
 		"ai.idleloom.io/idleloomworkloadassignments":        {verbs: []string{"get", "list", "watch"}},
@@ -212,6 +215,47 @@ func TestControllerLeasePermissionIsFencingOnly(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("controller ClusterRole is missing idleloom-fencing Lease CAS permission")
+	}
+}
+
+func TestControllerServingPermissionsAreResourceScoped(t *testing.T) {
+	objects := decodeObjects(t, filepath.Join("..", "..", "deploy", "native", "rbac", "controller.yaml"))
+	want := map[string][]string{
+		"/secrets":                        {"create", "delete", "get"},
+		"/services":                       {"get"},
+		"discovery.k8s.io/endpointslices": {"create", "delete", "get", "update"},
+	}
+	seen := make(map[string]bool, len(want))
+	for _, object := range objects {
+		if object.GetKind() != "ClusterRole" {
+			continue
+		}
+		rules, _, _ := unstructured.NestedSlice(object.Object, "rules")
+		for _, rawRule := range rules {
+			rule := rawRule.(map[string]any)
+			apiGroups, _, _ := unstructured.NestedStringSlice(rule, "apiGroups")
+			resources, _, _ := unstructured.NestedStringSlice(rule, "resources")
+			if len(apiGroups) != 1 || len(resources) != 1 {
+				continue
+			}
+			key := apiGroups[0] + "/" + resources[0]
+			verbs, ok := want[key]
+			if !ok {
+				continue
+			}
+			got, _, _ := unstructured.NestedStringSlice(rule, "verbs")
+			sort.Strings(got)
+			sort.Strings(verbs)
+			if !equalStrings(got, verbs) {
+				t.Fatalf("controller serving permission %s = %v, want %v", key, got, verbs)
+			}
+			seen[key] = true
+		}
+	}
+	for key := range want {
+		if !seen[key] {
+			t.Fatalf("controller ClusterRole is missing serving permission %s", key)
+		}
 	}
 }
 

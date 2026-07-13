@@ -399,6 +399,7 @@ func ensureAgentRBAC(ctx context.Context, client kubernetes.Interface, namespace
 			{APIGroups: []string{"ai.idleloom.io"}, Resources: []string{"idleloomworkloadassignments"}, Verbs: []string{"get", "list", "watch"}},
 			{APIGroups: []string{"ai.idleloom.io"}, Resources: []string{"idleloomworkloadassignments/status"}, ResourceNames: []string{"active"}, Verbs: []string{"get", "patch", "update"}},
 			{APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, ResourceNames: []string{"idleloom-agent"}, Verbs: []string{"create"}},
+			{APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{nativev1alpha1.ServingAuthSecretName}, Verbs: []string{"get"}},
 		},
 	}
 	roles := client.RbacV1().Roles(namespace)

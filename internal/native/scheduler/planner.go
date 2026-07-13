@@ -170,6 +170,12 @@ func (p Planner) PlanAssignment(workload *nativev1alpha1.IdleloomWorkload, model
 			}
 			assignment.Spec.Model.Batch = &batch
 		}
+		if workload.Spec.Server != nil {
+			assignment.Spec.Model.Server = &nativev1alpha1.ResolvedServer{
+				ServiceName: workload.Spec.Server.ServiceName, ModelAlias: workload.Spec.Server.ModelAlias,
+				AuthSecretName: nativev1alpha1.ServingAuthSecretName, Port: nativev1alpha1.NativeServingPort,
+			}
+		}
 	} else {
 		isolation := workload.Spec.Shell.Isolation
 		if isolation == "" {
@@ -248,6 +254,9 @@ func hostIneligible(host nativev1alpha1.IdleloomHost, workload *nativev1alpha1.I
 		}
 		if workload.Spec.Mode == nativev1alpha1.WorkloadModeBatch && !contains(host.Status.Capabilities, nativev1alpha1.CapabilityBatchInferenceV1) {
 			return "agent does not support Native batch inference"
+		}
+		if workload.Spec.Server != nil && !contains(host.Status.Capabilities, nativev1alpha1.CapabilityNativeServiceV1) {
+			return "agent does not support connected Native serving"
 		}
 	} else if workload.Spec.Shell != nil {
 		access := host.Spec.ShellAccess

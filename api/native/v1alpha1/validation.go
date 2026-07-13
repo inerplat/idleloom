@@ -31,12 +31,17 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 	case WorkloadModeServer:
 		if workload.Spec.Model == nil || workload.Spec.Batch != nil || workload.Spec.Shell != nil {
 			errs = append(errs, field.Invalid(specPath, workload.Spec, "Server mode requires model and forbids batch and shell"))
-		} else if problems := validation.IsDNS1123Subdomain(workload.Spec.Model.CatalogRef); len(problems) > 0 {
-			errs = append(errs, field.Invalid(specPath.Child("model", "catalogRef"), workload.Spec.Model.CatalogRef, strings.Join(problems, "; ")))
+		} else {
+			if problems := validation.IsDNS1123Subdomain(workload.Spec.Model.CatalogRef); len(problems) > 0 {
+				errs = append(errs, field.Invalid(specPath.Child("model", "catalogRef"), workload.Spec.Model.CatalogRef, strings.Join(problems, "; ")))
+			}
+			if workload.Spec.Server != nil {
+				errs = append(errs, validateWorkloadServer(workload.Spec.Server, specPath.Child("server"))...)
+			}
 		}
 	case WorkloadModeBatch:
-		if workload.Spec.Model == nil || workload.Spec.Batch == nil || workload.Spec.Shell != nil {
-			errs = append(errs, field.Invalid(specPath, workload.Spec, "Batch mode requires model and batch and forbids shell"))
+		if workload.Spec.Model == nil || workload.Spec.Server != nil || workload.Spec.Batch == nil || workload.Spec.Shell != nil {
+			errs = append(errs, field.Invalid(specPath, workload.Spec, "Batch mode requires model and batch and forbids server and shell"))
 		} else {
 			if problems := validation.IsDNS1123Subdomain(workload.Spec.Model.CatalogRef); len(problems) > 0 {
 				errs = append(errs, field.Invalid(specPath.Child("model", "catalogRef"), workload.Spec.Model.CatalogRef, strings.Join(problems, "; ")))
@@ -44,8 +49,8 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 			errs = append(errs, validateBatchInference(workload.Spec.Batch, specPath.Child("batch"))...)
 		}
 	case WorkloadModeShell:
-		if workload.Spec.Shell == nil || workload.Spec.Model != nil || workload.Spec.Batch != nil {
-			errs = append(errs, field.Invalid(specPath, workload.Spec, "Shell mode requires shell and forbids model and batch"))
+		if workload.Spec.Shell == nil || workload.Spec.Model != nil || workload.Spec.Server != nil || workload.Spec.Batch != nil {
+			errs = append(errs, field.Invalid(specPath, workload.Spec, "Shell mode requires shell and forbids model, server, and batch"))
 		} else {
 			if strings.TrimSpace(workload.Spec.Shell.Script) == "" || strings.ContainsRune(workload.Spec.Shell.Script, '\x00') {
 				errs = append(errs, field.Invalid(specPath.Child("shell", "script"), workload.Spec.Shell.Script, "must contain a non-empty script without NUL bytes"))
@@ -161,6 +166,12 @@ func ValidateAssignment(assignment *IdleloomWorkloadAssignment) error {
 		if assignment.Spec.Model.Batch != nil {
 			errs = append(errs, validateBatchInference(assignment.Spec.Model.Batch, specPath.Child("model", "batch"))...)
 		}
+		if assignment.Spec.Model.Server != nil {
+			errs = append(errs, validateResolvedServer(assignment.Spec.Model.Server, specPath.Child("model", "server"))...)
+		}
+		if assignment.Spec.Model.Batch != nil && assignment.Spec.Model.Server != nil {
+			errs = append(errs, field.Invalid(specPath.Child("model"), assignment.Spec.Model, "batch and server intents are mutually exclusive"))
+		}
 	} else {
 		if strings.TrimSpace(assignment.Spec.Shell.Script) == "" || strings.ContainsRune(assignment.Spec.Shell.Script, '\x00') {
 			errs = append(errs, field.Invalid(specPath.Child("shell", "script"), assignment.Spec.Shell.Script, "must contain a non-empty script without NUL bytes"))
@@ -182,6 +193,31 @@ func ValidateAssignment(assignment *IdleloomWorkloadAssignment) error {
 		}
 	}
 	return errs.ToAggregate()
+}
+
+func validateWorkloadServer(server *WorkloadServer, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if server == nil {
+		return errs
+	}
+	if problems := validation.IsDNS1035Label(server.ServiceName); len(problems) > 0 {
+		errs = append(errs, field.Invalid(path.Child("serviceName"), server.ServiceName, strings.Join(problems, "; ")))
+	}
+	if problems := validation.IsDNS1123Subdomain(server.ModelAlias); len(problems) > 0 {
+		errs = append(errs, field.Invalid(path.Child("modelAlias"), server.ModelAlias, strings.Join(problems, "; ")))
+	}
+	return errs
+}
+
+func validateResolvedServer(server *ResolvedServer, path *field.Path) field.ErrorList {
+	errs := validateWorkloadServer(&WorkloadServer{ServiceName: server.ServiceName, ModelAlias: server.ModelAlias}, path)
+	if server.AuthSecretName != ServingAuthSecretName {
+		errs = append(errs, field.Invalid(path.Child("authSecretName"), server.AuthSecretName, fmt.Sprintf("must be %q", ServingAuthSecretName)))
+	}
+	if server.Port != NativeServingPort {
+		errs = append(errs, field.Invalid(path.Child("port"), server.Port, fmt.Sprintf("must be %d", NativeServingPort)))
+	}
+	return errs
 }
 
 func validateBatchInference(batch *WorkloadBatchInference, path *field.Path) field.ErrorList {

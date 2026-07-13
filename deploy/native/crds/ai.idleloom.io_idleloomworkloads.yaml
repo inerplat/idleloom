@@ -84,6 +84,22 @@ spec:
                 required:
                 - unifiedMemoryRequest
                 type: object
+              server:
+                properties:
+                  modelAlias:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                  serviceName:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - modelAlias
+                - serviceName
+                type: object
               shell:
                 properties:
                   isolation:
@@ -217,11 +233,12 @@ spec:
           rule: self.spec == oldSelf.spec
         - message: unifiedMemoryRequest must be positive
           rule: quantity(self.spec.resources.unifiedMemoryRequest).isGreaterThan(quantity('0'))
-        - message: mode-specific model, batch, and shell fields are inconsistent
+        - message: mode-specific model, server, batch, and shell fields are inconsistent
           rule: (self.spec.mode == 'Server' && has(self.spec.model) && !has(self.spec.batch)
             && !has(self.spec.shell)) || (self.spec.mode == 'Batch' && has(self.spec.model)
-            && has(self.spec.batch) && !has(self.spec.shell)) || (self.spec.mode ==
-            'Shell' && !has(self.spec.model) && !has(self.spec.batch) && has(self.spec.shell))
+            && !has(self.spec.server) && has(self.spec.batch) && !has(self.spec.shell))
+            || (self.spec.mode == 'Shell' && !has(self.spec.model) && !has(self.spec.server)
+            && !has(self.spec.batch) && has(self.spec.shell))
         - message: Host shell isolation requires outbound network access
           rule: '!has(self.spec.shell) || self.spec.shell.isolation != ''Host'' ||
             !has(self.spec.shell.network) || self.spec.shell.network == ''Outbound'''

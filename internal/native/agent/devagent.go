@@ -25,16 +25,19 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 )
 
 type DevAgentConfig struct {
 	Dynamic            dynamic.Interface
+	Kubernetes         kubernetes.Interface
 	Namespace          string
 	AgentID            string
 	Layout             devruntime.Layout
 	StateDirectory     string
 	KubeconfigPath     string
 	ListenAddress      string
+	ServeListenAddress string
 	PollInterval       time.Duration
 	Now                func() time.Time
 	Logf               func(string, ...any)
@@ -493,11 +496,22 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 				Layout: a.config.Layout, DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
 				ReadyTimeout: 5 * time.Minute, Nonce: nonce, OnSpawn: onSpawn,
 			})
-			if err == nil && assignment.Spec.Model.Batch != nil {
-				batch := assignment.Spec.Model.Batch
-				process = startBatchProcess(process, devruntime.GenerateRequest{
-					Prompt: batch.Prompt, MaxTokens: int(batch.MaxTokens),
-				}, time.Duration(batch.TimeoutSeconds)*time.Second, &agentLogWriter{agent: a})
+			if err == nil {
+				switch {
+				case assignment.Spec.Model.Batch != nil:
+					batch := assignment.Spec.Model.Batch
+					process = startBatchProcess(process, devruntime.GenerateRequest{
+						Prompt: batch.Prompt, MaxTokens: int(batch.MaxTokens),
+					}, time.Duration(batch.TimeoutSeconds)*time.Second, &agentLogWriter{agent: a})
+				case assignment.Spec.Model.Server != nil:
+					key, keyErr := a.resolveServingKey(startupCtx, assignment)
+					if keyErr != nil {
+						_ = process.Stop()
+						err = keyErr
+						break
+					}
+					process, err = startServeProcess(process, a.config.ServeListenAddress, assignment.Spec.Model.Server.ModelAlias, key, a)
+				}
 			}
 		}
 		completed <- result{process: process, err: err}
@@ -687,6 +701,9 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 	}
 	if len(copy.Status.ModelFamilies) > 0 {
 		copy.Status.Capabilities = append(copy.Status.Capabilities, nativev1alpha1.CapabilityBatchInferenceV1)
+		if connectedCondition.Status == metav1.ConditionTrue && a.config.ServeListenAddress != "" {
+			copy.Status.Capabilities = append(copy.Status.Capabilities, nativev1alpha1.CapabilityNativeServiceV1)
+		}
 	}
 	if host.Spec.ShellAccess == nativev1alpha1.ShellAccessSandboxed || host.Spec.ShellAccess == nativev1alpha1.ShellAccessHost {
 		copy.Status.RuntimeProfiles = append(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileShellV1)
