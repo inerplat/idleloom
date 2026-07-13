@@ -2,38 +2,94 @@
 
 > Weave idle machines into compute.
 
-Idleloom turns an after-hours Apple Silicon Mac into a Kubernetes worker for
-AI compute. It directly manages a Linux VM with krunkit, enrolls kubelet with
-Kubernetes TLS bootstrap, and exposes the Apple GPU through Vulkan, Venus,
-MoltenVK, and Metal.
+Idleloom turns an after-hours Apple Silicon Mac into Kubernetes compute. It
+supports a full Linux worker for ordinary Pods and a Native Metal mode for
+running explicitly authorized MLX or shell workloads directly on macOS.
 
-The intended onboarding experience is one command:
+## Choose a mode
+
+| Mode | Kubernetes view | Workloads | Host runtime | CLI |
+| --- | --- | --- | --- | --- |
+| Linux worker | A real kubelet-managed Node | OCI containers, hostPath, iSCSI, and DRA workloads | Ubuntu VM managed with krunkit and containerd | `idleloom` |
+| Native Metal alpha | Idleloom CRDs with optional ephemeral Node and Pod projection | Sandboxed or trusted shell commands and a locked MLX model | Regular macOS processes using Metal directly | `idlectl` |
+
+Use the Linux worker when the workload expects normal Kubernetes Pod and
+container semantics. Use Native Metal when direct Metal access matters more
+than OCI compatibility and the workload fits Idleloom's restricted execution
+contract.
+
+## Native Metal quick start
+
+Install the complete macOS bundle from the public Homebrew tap:
 
 ```sh
-idleloom init --kubeconfig ~/.kube/config
+brew install inerplat/tap/idleloom
+idlectl version
 ```
 
-The administrator kubeconfig never enters the VM. The worker receives only
-the cluster CA, API endpoint, and a short-lived bootstrap token. Idleloom
-deletes both the token and the guest copy of its bootstrap identity after the
-kubelet receives a client certificate.
+Join the current Kubernetes context and run a sandboxed command:
+
+```sh
+idlectl join studio-idle
+idlectl run inventory --shell 'uname -a; sysctl -n hw.memsize'
+idlectl logs -f workload/inventory
+```
+
+`idlectl join` installs a missing compatible WireKube release automatically
+for the default connected link. The user does not need a WireKube checkout or
+a preinstalled `wirekubectl`.
+
+Native Metal has two link modes. They use the same scheduler and execute the
+same workloads; the link changes how logs and control-plane-to-host traffic
+return from the Mac.
+
+| Link mode | Inbound path to the Mac | Administrator authorization | Logs |
+| --- | --- | --- | --- |
+| `wirekube` (default) | WireKube relay and root-owned route service | Required during join and deletion | Standard Kubernetes logs, including follow |
+| `api-only` | None; the agent makes outbound Kubernetes API requests | Not required | Completed local snapshots with `idlectl logs --local` |
+
+For API-only hosts, `--projection=false` is recommended because projected
+Nodes and Pods cannot provide a reachable kubelet log endpoint without the
+WireKube link.
+
+Connected mode does not require a WireKube checkout or a preinstalled
+`wirekubectl`. When the cluster has no compatible WireKube installation,
+`idlectl join` downloads the pinned CLI release into the user cache, verifies
+its checksum, shows the combined infrastructure plan, installs WireKube, and
+continues the same host enrollment transaction.
+
+Each execution mode starts with one command:
+
+```sh
+# Full Linux worker
+idleloom init --kubeconfig ~/.kube/config
+
+# Native Metal host; WireKube is the default link
+idlectl join HOST --kubeconfig ~/.kube/config
+```
+
+The administrator kubeconfig remains on the Mac. The Linux worker receives
+only the cluster CA, API endpoint, and a short-lived bootstrap token. Native
+Metal services receive restricted, short-lived service account credentials.
 
 ## Current milestone
 
 The repository provides:
 
 - `idleloom init`, `status`, `start`, `stop`, and `delete`;
+- `idlectl join`, `run`, `get`, `logs`, and `delete`;
 - direct krunkit and gvproxy lifecycle management without a VM orchestrator;
 - an Ubuntu 24.04 ARM64 worker with persistent containerd and kubelet data;
 - kubelet version matching against the target Kubernetes API server;
 - checksum-verified Ubuntu image and kubelet downloads;
 - short-lived bootstrap tokens and dedicated CSR approval RBAC;
 - a host-side certificate maintainer for kubelet serving certificate rotation;
-- WireKube compatibility checks and node enrollment;
+- checksum-verified WireKube dependency installation, compatibility checks, and node enrollment;
 - hostPath and iSCSI support in the worker base system;
-- an Apple Vulkan DRA node driver and example ResourceClaims.
+- an Apple Vulkan DRA node driver and example ResourceClaims;
+- direct Native Metal execution with API-only and WireKube link modes.
 
-## How it works
+## How the Linux worker works
 
 The CLI runs on macOS and uses the operator kubeconfig only for enrollment and
 lifecycle operations. It manages krunkit and gvproxy directly. Inside the
@@ -51,7 +107,7 @@ images, kubelet certificates, hostPath data, and runtime state live on a
 separate sparse data disk. This keeps the root image simple and avoids a
 `qemu-img` dependency.
 
-## Requirements
+## Linux worker requirements
 
 - Apple Silicon Mac running macOS 14 or later;
 - at least 4 GiB VM memory; 8 GiB or more is recommended for AI workloads;
@@ -80,7 +136,7 @@ creates a VM. The gvproxy backend intentionally supports WireKube networking
 only: its guest address is private to the host and is not directly routable
 from other cluster nodes.
 
-## Build
+## Build from source
 
 ```sh
 make build
@@ -95,7 +151,7 @@ go test ./...
 go vet ./...
 ```
 
-## Join a worker
+## Join a Linux worker
 
 Interactive setup:
 
@@ -127,7 +183,7 @@ The advanced `--runtime-dir` flag changes where VM disks, SSH keys, sockets,
 and local logs are stored. The default is
 `~/.idleloom/runtimes/<node-name>`.
 
-## Worker lifecycle
+## Linux worker lifecycle
 
 ```sh
 idleloom status
@@ -164,7 +220,7 @@ delete` removes the Node, VM processes, disks, keys, runtime logs, and the
 certificate maintainer. It refuses active workloads unless `--force` is
 supplied.
 
-## Worker capabilities
+## Linux worker capabilities
 
 The Ubuntu base installs and configures:
 
@@ -204,7 +260,7 @@ The public manifests use the development driver name
 `gpu.apple-vulkan.example`. Operators must replace it with a DNS name they
 control before production deployment.
 
-## Native Metal projection alpha
+## Native Metal mode (alpha)
 
 The Native Metal backend runs an explicitly authorized shell workload or a
 locked MLX model directly on macOS. It does not present the Mac as a
@@ -216,7 +272,13 @@ workloads remain declarative Kubernetes resources in this alpha.
 For a tested MLX training walkthrough in both link modes, see
 [`docs/native-training.md`](docs/native-training.md).
 
-Build the complete macOS bundle:
+Homebrew installs the complete macOS bundle used by `join`:
+
+```sh
+brew install inerplat/tap/idleloom
+```
+
+Contributors can build the same bundle from source:
 
 ```sh
 make build-idlectl
@@ -251,8 +313,9 @@ resources, so host `get` and `delete` reject namespace flags.
 ### Join a Mac
 
 Native Metal requires an Apple Silicon Mac and a kubeconfig allowed to install
-the Native CRDs and RBAC. It does not require krunkit or the Ubuntu worker VM.
-WireKube must already be installed in the target cluster for connected mode.
+the Native CRDs, RBAC, and connected-mode cluster dependencies. It does not
+require krunkit, the Ubuntu worker VM, a WireKube source checkout, or a
+preinstalled `wirekubectl`.
 
 Join installs the Native API and restricted RBAC, enrolls the host, creates
 short-lived service credentials, and installs user LaunchAgents. In the
@@ -272,6 +335,23 @@ runs the agent or shell workloads as root. The WireKube private key used by the
 helper is copied into a root-owned state directory; the long-running
 privileged service does not trust the user-writable enrollment directory for
 tunnel configuration.
+
+If WireKube is missing, interactive join first displays the detected cluster,
+compatible WireKube version and image digest, selected mesh CIDR, privileged
+DaemonSet requirement, and the public TCP and UDP LoadBalancers needed for the
+connected leaf. One confirmation approves both dependency installation and the
+host join. The successful WireKube installation remains available for other
+hosts if a later Idleloom enrollment step fails.
+
+For non-interactive onboarding, explicitly authorize dependency installation:
+
+```sh
+./bin/idlectl join studio-idle \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster \
+  --install-dependencies \
+  --yes
+```
 
 If the source kubeconfig disables TLS verification, explicitly pin the API
 certificate observed during the first connection:
@@ -390,7 +470,7 @@ command in this alpha; if the cluster is unavailable, restore access and run
 ## Known limitations
 
 - The worker backend currently supports Apple Silicon and krunkit only.
-- WireKube installation is not embedded; Idleloom integrates with an existing deployment.
+- Linux workers still require a compatible WireKube deployment before `idleloom init`; Native Metal `idlectl join` installs a missing compatible release automatically.
 - The Ubuntu image is downloaded once and retained in the user cache.
 - A newly joined Node needs a registry-pullable DRA image.
 - Serving certificate rotation depends on the host-side maintainer and the operator kubeconfig remaining valid while the worker runs.

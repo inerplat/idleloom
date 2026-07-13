@@ -1,4 +1,8 @@
 CONTROLLER_GEN_VERSION ?= v0.20.1
+IDLECTL_VERSION ?= development
+IDLECTL_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || printf unknown)
+IDLECTL_BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+IDLECTL_LDFLAGS = -s -w -X main.version=$(IDLECTL_VERSION) -X main.commit=$(IDLECTL_COMMIT) -X main.buildDate=$(IDLECTL_BUILD_DATE)
 
 .PHONY: build build-idlectl build-projection test vet generate-native clean
 
@@ -9,7 +13,7 @@ build: build-idlectl
 
 build-idlectl:
 	mkdir -p bin
-	go build -trimpath -o bin/idlectl ./cmd/idlectl
+	go build -trimpath -ldflags "$(IDLECTL_LDFLAGS)" -o bin/idlectl ./cmd/idlectl
 	cp bin/idlectl bin/idleloom-controller
 	cp bin/idlectl bin/idleloom-agent
 	cp bin/idlectl bin/idleloom-link
