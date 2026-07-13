@@ -18,10 +18,10 @@ container semantics. Use Native Metal when direct Metal access matters more
 than OCI compatibility and the workload fits Idleloom's restricted execution
 contract.
 
-Training recipes provide one manifest-first workflow across both modes. They
-render either a real Kubernetes `Job` or an `IdleloomWorkload`; the resulting
-YAML is applied and operated with the native resource semantics of that
-backend. See [`docs/recipes.md`](docs/recipes.md).
+Training and batch inference recipes provide one manifest-first workflow
+across both modes. They render real Kubernetes resources or an explicit
+`IdleloomWorkload`; the resulting YAML is applied and operated with the native
+resource semantics of that backend. See [`docs/recipes.md`](docs/recipes.md).
 
 ## Native Metal quick start
 
@@ -93,7 +93,7 @@ The repository provides:
 - hostPath and iSCSI support in the worker base system;
 - an Apple Vulkan DRA node driver and example ResourceClaims;
 - direct Native Metal execution with API-only and WireKube link modes;
-- version-pinned Native and Worker training recipes that render Kubernetes YAML.
+- version-pinned Native and Worker training and batch inference recipes that render Kubernetes YAML.
 
 ## How the Linux worker works
 

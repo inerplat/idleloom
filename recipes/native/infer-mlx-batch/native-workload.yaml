@@ -1,0 +1,25 @@
+apiVersion: ai.idleloom.io/v1alpha1
+kind: IdleloomWorkload
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: infer
+    ai.idleloom.io/backend: native
+    ai.idleloom.io/runtime: mlx
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  mode: Batch
+  model:
+    catalogRef: {{ quote (index .Values "model") }}
+  batch:
+    prompt: {{ quote (index .Values "prompt") }}
+    maxTokens: {{ integer (index .Values "maxTokens") }}
+    timeoutSeconds: {{ integer (index .Values "timeoutSeconds") }}
+  resources:
+    unifiedMemoryRequest: {{ quote (index .Values "unifiedMemory") }}

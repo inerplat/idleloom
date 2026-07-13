@@ -28,6 +28,19 @@ func TestEmbeddedLocks(t *testing.T) {
 	}
 }
 
+func TestLockedModelDescriptorMatchesEmbeddedLock(t *testing.T) {
+	descriptor, err := LockedModel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.Name != "qwen3-5-0-8b-mlx" || descriptor.SizeBytes != 652019388 || descriptor.ManifestDigest != "sha256:dbac28dadd17eb15750fcc92aa9f05181ab1b7f574dbae66bd73a73977eec44f" {
+		t.Fatalf("locked model descriptor = %#v", descriptor)
+	}
+	if descriptor.ArtifactIdentity != "oci://development.invalid/idleloom/qwen3.5-0.8b-4bit@"+descriptor.ManifestDigest {
+		t.Fatalf("artifact identity = %q", descriptor.ArtifactIdentity)
+	}
+}
+
 func TestProcessStopWaitsForEntireProcessGroup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("process groups are Unix-specific")

@@ -19,11 +19,16 @@ const (
 func TestDefaultRegistryListsPinnedBalancedRecipes(t *testing.T) {
 	registry := mustRegistry(t)
 	definitions := registry.List()
-	if len(definitions) != 2 {
-		t.Fatalf("recipe count = %d, want 2", len(definitions))
+	if len(definitions) != 4 {
+		t.Fatalf("recipe count = %d, want 4", len(definitions))
 	}
-	if definitions[0].ID() != workerRecipeID || definitions[1].ID() != nativeRecipeID {
-		t.Fatalf("recipe order = %q, %q", definitions[0].ID(), definitions[1].ID())
+	wantIDs := []string{
+		"infer/llama-vulkan@v1", "infer/mlx-batch@v1", workerRecipeID, nativeRecipeID,
+	}
+	for index, want := range wantIDs {
+		if definitions[index].ID() != want {
+			t.Fatalf("recipe[%d] = %q, want %q", index, definitions[index].ID(), want)
+		}
 	}
 	backends := map[string]bool{}
 	for _, definition := range definitions {
@@ -164,6 +169,9 @@ func TestRenderRejectsUnknownAndInvalidParameters(t *testing.T) {
 		{name: "quantity", id: nativeRecipeID, values: "unifiedMemory: \"0\"\n", want: "positive Kubernetes quantity"},
 		{name: "integer", id: workerRecipeID, values: "epochs: 1.5\n", want: "must be an integer"},
 		{name: "duplicate", id: workerRecipeID, values: "epochs: 10\nepochs: 20\n", want: "decode values YAML"},
+		{name: "model-url", id: "infer/llama-vulkan@v1", values: "modelURL: http://models.example/model.gguf\n", want: "HTTPS URL"},
+		{name: "model-digest", id: "infer/llama-vulkan@v1", values: "modelSHA256: abc\n", want: "64 lowercase"},
+		{name: "prompt", id: "infer/mlx-batch@v1", values: "prompt: \"\"\n", want: "at least 1"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

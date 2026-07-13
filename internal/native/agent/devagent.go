@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -41,6 +42,7 @@ type DevAgentConfig struct {
 	Platform           Platform
 	StartProcess       func(context.Context, devruntime.ProcessConfig) (Process, error)
 	StartShell         func(context.Context, devruntime.ShellConfig) (Process, error)
+	PrepareRuntime     func(context.Context, func(string)) (devruntime.Receipt, error)
 	KubeletBridge      *KubeletBridgeConfig
 }
 
@@ -136,6 +138,11 @@ func NewDevAgent(config DevAgentConfig) (*DevAgent, error) {
 	if config.StartShell == nil {
 		config.StartShell = func(ctx context.Context, shellConfig devruntime.ShellConfig) (Process, error) {
 			return devruntime.StartShell(ctx, shellConfig)
+		}
+	}
+	if config.PrepareRuntime == nil && runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
+		config.PrepareRuntime = func(ctx context.Context, progress func(string)) (devruntime.Receipt, error) {
+			return (devruntime.Preparer{Root: config.Layout.Root, Progress: progress}).Prepare(ctx)
 		}
 	}
 	if err := os.MkdirAll(config.StateDirectory, 0o700); err != nil {
@@ -292,7 +299,7 @@ func (a *DevAgent) reconcile(ctx context.Context) error {
 		}
 		return a.updateHostStatus(ctx, &host, true, "")
 	}
-	if phase, terminal := a.completedShellPhase(&assignment); terminal {
+	if phase, terminal := a.completedAssignmentPhase(&assignment); terminal {
 		a.mu.Lock()
 		a.assignment = assignment.DeepCopy()
 		a.mu.Unlock()
@@ -321,8 +328,8 @@ func (a *DevAgent) reconcile(ctx context.Context) error {
 	return a.updateHostStatus(ctx, &host, false, assignment.UID)
 }
 
-func (a *DevAgent) completedShellPhase(assignment *nativev1alpha1.IdleloomWorkloadAssignment) (string, bool) {
-	if assignment.Spec.Shell == nil || assignment.Status.ObservedGeneration != assignment.Generation || assignment.Status.AgentID != a.config.AgentID || assignment.Status.ExecutionID != assignment.Spec.ExecutionID || assignment.Status.FencingEpoch != assignment.Spec.FencingEpoch {
+func (a *DevAgent) completedAssignmentPhase(assignment *nativev1alpha1.IdleloomWorkloadAssignment) (string, bool) {
+	if !finiteAssignment(assignment) || assignment.Status.ObservedGeneration != assignment.Generation || assignment.Status.AgentID != a.config.AgentID || assignment.Status.ExecutionID != assignment.Spec.ExecutionID || assignment.Status.FencingEpoch != assignment.Spec.FencingEpoch {
 		return "", false
 	}
 	if assignment.Status.Phase != nativev1alpha1.PhaseSucceeded && assignment.Status.Phase != nativev1alpha1.PhaseFailed {
@@ -340,44 +347,56 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 		return nil
 	}
 	if process != nil {
-		if assignment.Spec.Shell != nil && !process.Alive() {
+		if finiteAssignment(assignment) && !process.Alive() {
+			kind := "shell process"
+			if assignment.Spec.Model != nil {
+				kind = "batch inference"
+			}
 			waitErr := process.WaitError()
 			current := a.store.Current()
 			if current == nil || !recordMatchesAssignment(*current, assignment) {
-				return fmt.Errorf("shell completion does not match the durable execution journal")
+				return fmt.Errorf("finite workload completion does not match the durable execution journal")
 			}
 			if err := a.store.Complete(*current, waitErr); err != nil {
-				return fmt.Errorf("persist shell completion: %w", err)
+				return fmt.Errorf("persist %s completion: %w", kind, err)
 			}
 			if err := a.stopProcess(); err != nil {
 				return err
 			}
 			if waitErr == nil {
-				a.appendLog(a.now(), "shell process completed successfully")
+				a.appendLog(a.now(), "%s completed successfully", kind)
 				return ErrProcessCompleted
 			}
-			a.appendLog(a.now(), "shell process exited with error: %v", waitErr)
-			return fmt.Errorf("shell process exited: %w", waitErr)
+			a.appendLog(a.now(), "%s exited with error: %v", kind, waitErr)
+			return fmt.Errorf("%s exited: %w", kind, waitErr)
 		}
 		if err := a.stopProcess(); err != nil {
 			return err
 		}
 		return ErrProcessExited
 	}
-	if assignment.Spec.Shell != nil {
+	if finiteAssignment(assignment) {
 		if current := a.store.Current(); current != nil && current.Completed && recordMatchesAssignment(*current, assignment) {
 			if current.ExitError == "" {
 				return ErrProcessCompleted
 			}
-			return fmt.Errorf("shell process exited: %s", current.ExitError)
+			return fmt.Errorf("finite native workload exited: %s", current.ExitError)
 		}
 	}
+	a.mu.Lock()
+	a.assignment = assignment.DeepCopy()
+	a.mu.Unlock()
+	a.resetLog(string(assignment.UID), a.now(), "assignment accepted: execution="+assignment.Spec.ExecutionID)
 	var receipt devruntime.Receipt
 	var err error
 	if assignment.Spec.Model != nil {
 		receipt, err = devruntime.VerifyFast(a.config.Layout)
+		if err != nil && a.config.PrepareRuntime != nil {
+			a.appendLog(a.now(), "preparing locked MLX runtime and model")
+			receipt, err = a.prepareRuntimeWithLease(ctx, assignment)
+		}
 		if err != nil {
-			return err
+			return fmt.Errorf("prepare locked MLX runtime: %w", err)
 		}
 		if assignment.Spec.Model.Artifact.OCIReference != receipt.ArtifactIdentity || assignment.Spec.Model.Artifact.ManifestDigest != receipt.ManifestDigest || assignment.Spec.Model.RuntimeProfile != nativev1alpha1.RuntimeProfileMLXLMV1 || assignment.Spec.Model.Family != nativev1alpha1.ModelFamilyQwen35 {
 			return fmt.Errorf("assignment is not the exact locked development model")
@@ -405,16 +424,16 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 	if err := a.store.Begin(planned); err != nil {
 		return err
 	}
-	a.resetLog(string(assignment.UID), a.now(), "assignment accepted: execution="+assignment.Spec.ExecutionID)
 	if assignment.Spec.Model != nil {
 		a.appendLog(a.now(), "verified locked MLX runtime and model artifact")
-		a.appendLog(a.now(), "starting sandboxed MLX process")
+		if assignment.Spec.Model.Batch != nil {
+			a.appendLog(a.now(), "starting sandboxed MLX batch inference")
+		} else {
+			a.appendLog(a.now(), "starting sandboxed MLX server process")
+		}
 	} else {
 		a.appendLog(a.now(), "starting shell process: isolation=%s network=%s", assignment.Spec.Shell.Isolation, assignment.Spec.Shell.Network)
 	}
-	a.mu.Lock()
-	a.assignment = assignment.DeepCopy()
-	a.mu.Unlock()
 	process, err = a.startProcessWithLease(ctx, assignment, planned, nonce)
 	if err != nil {
 		a.appendLog(a.now(), "native process failed to start: %v", err)
@@ -423,9 +442,6 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 				_ = a.store.Clear(*current)
 			}
 		}
-		a.mu.Lock()
-		a.assignment = nil
-		a.mu.Unlock()
 		if assignment.Spec.Shell != nil {
 			_ = os.RemoveAll(shellWorkDirectory(a.config.Layout, assignment.UID))
 		}
@@ -477,6 +493,12 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 				Layout: a.config.Layout, DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
 				ReadyTimeout: 5 * time.Minute, Nonce: nonce, OnSpawn: onSpawn,
 			})
+			if err == nil && assignment.Spec.Model.Batch != nil {
+				batch := assignment.Spec.Model.Batch
+				process = startBatchProcess(process, devruntime.GenerateRequest{
+					Prompt: batch.Prompt, MaxTokens: int(batch.MaxTokens),
+				}, time.Duration(batch.TimeoutSeconds)*time.Second, &agentLogWriter{agent: a})
+			}
 		}
 		completed <- result{process: process, err: err}
 	}()
@@ -525,8 +547,49 @@ func (a *DevAgent) refreshStartupLease(ctx context.Context, expected *nativev1al
 	if current.UID != expected.UID || current.Spec.ExecutionID != expected.Spec.ExecutionID || current.Spec.FencingEpoch != expected.Spec.FencingEpoch || current.Generation != expected.Generation || current.Spec.DesiredState != nativev1alpha1.AssignmentDesiredRunning {
 		return fmt.Errorf("assignment changed while the native process was starting")
 	}
+	if err := a.updateAssignmentStatus(ctx, &current, nativev1alpha1.PhaseStarting, nil); err != nil {
+		return err
+	}
 	a.markAPISuccess()
 	return nil
+}
+
+func (a *DevAgent) prepareRuntimeWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) (devruntime.Receipt, error) {
+	type result struct {
+		receipt devruntime.Receipt
+		err     error
+	}
+	completed := make(chan result, 1)
+	prepareCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		receipt, err := a.config.PrepareRuntime(prepareCtx, func(message string) {
+			a.appendLog(a.now(), "prepare: %s", message)
+		})
+		completed <- result{receipt: receipt, err: err}
+	}()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-completed:
+			return result.receipt, result.err
+		case <-ticker.C:
+			if err := a.refreshStartupLease(prepareCtx, assignment); err != nil {
+				cancel()
+				result := <-completed
+				return result.receipt, errors.Join(fmt.Errorf("refresh preparation assignment lease: %w", err), result.err)
+			}
+		case <-ctx.Done():
+			cancel()
+			result := <-completed
+			return result.receipt, errors.Join(ctx.Err(), result.err)
+		}
+	}
+}
+
+func finiteAssignment(assignment *nativev1alpha1.IdleloomWorkloadAssignment) bool {
+	return assignment.Spec.Shell != nil || assignment.Spec.Model != nil && assignment.Spec.Model.Batch != nil
 }
 
 func (a *DevAgent) stopAssignment(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) error {
@@ -594,6 +657,7 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 	copy.Status.ProtocolVersion = nativev1alpha1.AgentProtocolV1Alpha1
 	copy.Status.RuntimeProfiles = nil
 	copy.Status.ModelFamilies = nil
+	copy.Status.Capabilities = nil
 	copy.Status.AllocatableUnifiedMemory = memory
 	copy.Status.AvailableUnifiedMemory = memory
 	copy.Status.KrunkitState = nativev1alpha1.KrunkitStateStopped
@@ -614,6 +678,15 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 		readyStatus = metav1.ConditionTrue
 		readyReason = "DevelopmentRuntimeReady"
 		readyMessage = "locked development MLX runtime is available"
+	} else if a.config.PrepareRuntime != nil {
+		copy.Status.RuntimeProfiles = append(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXLMV1)
+		copy.Status.ModelFamilies = append(copy.Status.ModelFamilies, nativev1alpha1.ModelFamilyQwen35)
+		readyStatus = metav1.ConditionTrue
+		readyReason = "DevelopmentRuntimePreparable"
+		readyMessage = "locked development MLX runtime will be prepared on first use"
+	}
+	if len(copy.Status.ModelFamilies) > 0 {
+		copy.Status.Capabilities = append(copy.Status.Capabilities, nativev1alpha1.CapabilityBatchInferenceV1)
 	}
 	if host.Spec.ShellAccess == nativev1alpha1.ShellAccessSandboxed || host.Spec.ShellAccess == nativev1alpha1.ShellAccessHost {
 		copy.Status.RuntimeProfiles = append(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileShellV1)

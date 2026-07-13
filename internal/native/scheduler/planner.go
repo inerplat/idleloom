@@ -37,7 +37,7 @@ func (p Planner) SelectHost(workload *nativev1alpha1.IdleloomWorkload, model *na
 	if err := nativev1alpha1.ValidateWorkload(workload); err != nil {
 		return nil, fmt.Errorf("validate workload: %w", err)
 	}
-	if workload.Spec.Mode == nativev1alpha1.WorkloadModeServer {
+	if workload.Spec.Mode == nativev1alpha1.WorkloadModeServer || workload.Spec.Mode == nativev1alpha1.WorkloadModeBatch {
 		if model == nil {
 			return nil, fmt.Errorf("model workload requires a resolved model")
 		}
@@ -163,6 +163,13 @@ func (p Planner) PlanAssignment(workload *nativev1alpha1.IdleloomWorkload, model
 			MaxContextLength:      model.Spec.MaxContextLength,
 			MaxConcurrentRequests: model.Spec.MaxConcurrentRequests,
 		}
+		if workload.Spec.Batch != nil {
+			batch := *workload.Spec.Batch
+			if batch.TimeoutSeconds == 0 {
+				batch.TimeoutSeconds = 600
+			}
+			assignment.Spec.Model.Batch = &batch
+		}
 	} else {
 		isolation := workload.Spec.Shell.Isolation
 		if isolation == "" {
@@ -238,6 +245,9 @@ func hostIneligible(host nativev1alpha1.IdleloomHost, workload *nativev1alpha1.I
 		}
 		if !contains(host.Status.ModelFamilies, model.Spec.Family) {
 			return fmt.Sprintf("model family %s is not supported", model.Spec.Family)
+		}
+		if workload.Spec.Mode == nativev1alpha1.WorkloadModeBatch && !contains(host.Status.Capabilities, nativev1alpha1.CapabilityBatchInferenceV1) {
+			return "agent does not support Native batch inference"
 		}
 	} else if workload.Spec.Shell != nil {
 		access := host.Spec.ShellAccess

@@ -133,11 +133,12 @@ func (p Preparer) Prepare(ctx context.Context) (Receipt, error) {
 	if err := atomicWrite(layout.Runner, runner, 0o500); err != nil {
 		return Receipt{}, fmt.Errorf("write embedded runner: %w", err)
 	}
+	descriptor := lockedModelDescriptor(modelFiles, modelDigest)
 	receipt := Receipt{
 		Version:           receiptVersion,
 		DevelopmentOnly:   true,
-		ArtifactIdentity:  "oci://development.invalid/idleloom/qwen3.5-0.8b-4bit@sha256:" + modelDigest,
-		ManifestDigest:    "sha256:" + modelDigest,
+		ArtifactIdentity:  descriptor.ArtifactIdentity,
+		ManifestDigest:    descriptor.ManifestDigest,
 		RuntimeLockDigest: "sha256:" + runtimeDigest,
 		ModelRepository:   ModelRepository,
 		ModelRevision:     ModelRevision,
@@ -269,7 +270,7 @@ func verify(layout Layout, strong bool) (Receipt, error) {
 }
 
 func receiptMatchesBinary(receipt Receipt, runtimeDigest, modelDigest string, files []ModelFile, runner []byte) bool {
-	expectedArtifact := "oci://development.invalid/idleloom/qwen3.5-0.8b-4bit@sha256:" + modelDigest
+	expectedArtifact := lockedModelArtifactIdentity(modelDigest)
 	return receipt.Version == receiptVersion && receipt.DevelopmentOnly &&
 		receipt.ArtifactIdentity == expectedArtifact && receipt.ManifestDigest == "sha256:"+modelDigest &&
 		receipt.RuntimeLockDigest == "sha256:"+runtimeDigest && receipt.ModelRepository == ModelRepository &&

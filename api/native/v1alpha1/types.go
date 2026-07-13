@@ -10,6 +10,7 @@ import (
 
 const (
 	WorkloadModeServer = "Server"
+	WorkloadModeBatch  = "Batch"
 	WorkloadModeShell  = "Shell"
 
 	RuntimeProfileMLXLMV1       = "mlx-lm-v1"
@@ -17,6 +18,7 @@ const (
 	ModelFamilyQwen35           = "qwen3.5"
 	ArtifactFormatSafetensorsV1 = "mlx-safetensors-v1"
 	AgentProtocolV1Alpha1       = "native.ai.idleloom.io/v1alpha1"
+	CapabilityBatchInferenceV1  = "BatchInferenceV1"
 
 	KrunkitStateStopped = "Stopped"
 	KrunkitStateRunning = "Running"
@@ -58,9 +60,10 @@ const (
 const HeartbeatClockSkewAllowance = time.Minute
 
 type IdleloomWorkloadSpec struct {
-	// +kubebuilder:validation:Enum=Server;Shell
+	// +kubebuilder:validation:Enum=Server;Batch;Shell
 	Mode      string                  `json:"mode"`
 	Model     *WorkloadModelReference `json:"model,omitempty"`
+	Batch     *WorkloadBatchInference `json:"batch,omitempty"`
 	Shell     *WorkloadShell          `json:"shell,omitempty"`
 	Resources WorkloadResources       `json:"resources"`
 }
@@ -70,6 +73,18 @@ type WorkloadModelReference struct {
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	CatalogRef string `json:"catalogRef"`
+}
+
+type WorkloadBatchInference struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=16384
+	Prompt string `json:"prompt"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=512
+	MaxTokens int32 `json:"maxTokens"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3600
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }
 
 type WorkloadShell struct {
@@ -119,7 +134,7 @@ type WorkloadSchedulingIntent struct {
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=`.status.phase`
 // +kubebuilder:validation:XValidation:rule="self.spec == oldSelf.spec",message="spec is immutable; create a new workload to change it"
 // +kubebuilder:validation:XValidation:rule="quantity(self.spec.resources.unifiedMemoryRequest).isGreaterThan(quantity('0'))",message="unifiedMemoryRequest must be positive"
-// +kubebuilder:validation:XValidation:rule="(self.spec.mode == 'Server' && has(self.spec.model) && !has(self.spec.shell)) || (self.spec.mode == 'Shell' && !has(self.spec.model) && has(self.spec.shell))",message="Server requires model and Shell requires shell"
+// +kubebuilder:validation:XValidation:rule="(self.spec.mode == 'Server' && has(self.spec.model) && !has(self.spec.batch) && !has(self.spec.shell)) || (self.spec.mode == 'Batch' && has(self.spec.model) && has(self.spec.batch) && !has(self.spec.shell)) || (self.spec.mode == 'Shell' && !has(self.spec.model) && !has(self.spec.batch) && has(self.spec.shell))",message="mode-specific model, batch, and shell fields are inconsistent"
 // +kubebuilder:validation:XValidation:rule="!has(self.spec.shell) || self.spec.shell.isolation != 'Host' || !has(self.spec.shell.network) || self.spec.shell.network == 'Outbound'",message="Host shell isolation requires outbound network access"
 type IdleloomWorkload struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -215,6 +230,7 @@ type IdleloomHostStatus struct {
 	ProtocolVersion          string            `json:"protocolVersion,omitempty"`
 	RuntimeProfiles          []string          `json:"runtimeProfiles,omitempty"`
 	ModelFamilies            []string          `json:"modelFamilies,omitempty"`
+	Capabilities             []string          `json:"capabilities,omitempty"`
 	AllocatableUnifiedMemory resource.Quantity `json:"allocatableUnifiedMemory,omitempty"`
 	AvailableUnifiedMemory   resource.Quantity `json:"availableUnifiedMemory,omitempty"`
 	// +kubebuilder:validation:Enum=Stopped;Running;Unknown
@@ -296,7 +312,8 @@ type ResolvedModel struct {
 	MaxContextLength int32 `json:"maxContextLength"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1
-	MaxConcurrentRequests int32 `json:"maxConcurrentRequests"`
+	MaxConcurrentRequests int32                   `json:"maxConcurrentRequests"`
+	Batch                 *WorkloadBatchInference `json:"batch,omitempty"`
 }
 
 type ResolvedShell struct {

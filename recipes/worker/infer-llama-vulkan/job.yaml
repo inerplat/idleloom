@@ -1,0 +1,147 @@
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: infer
+    ai.idleloom.io/backend: worker
+    ai.idleloom.io/runtime: llama-vulkan
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  devices:
+    requests:
+    - name: accelerator
+      exactly:
+        deviceClassName: {{ quote (index .Values "deviceClass") }}
+        allocationMode: ExactCount
+        count: 1
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: infer
+    ai.idleloom.io/backend: worker
+    ai.idleloom.io/runtime: llama-vulkan
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ integer (index .Values "timeoutSeconds") }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: idleloom
+        ai.idleloom.io/run: {{ quote .Name }}
+        ai.idleloom.io/task: infer
+        ai.idleloom.io/backend: worker
+        ai.idleloom.io/runtime: llama-vulkan
+      annotations:
+        ai.idleloom.io/recipe: {{ quote .RecipeID }}
+        ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+        ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/os: linux
+        idleloom-worker: "true"
+        idleloom-accelerator: apple-vulkan
+      securityContext:
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      resourceClaims:
+      - name: gpu
+        resourceClaimName: {{ quote .Name }}
+      initContainers:
+      - name: model-fetch
+        image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:6f1a66f0576550c5145cd240d1c4dc5ee4cc08d9492551bbfaf4202efd3a0d95
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -ec
+        - |
+          curl --fail --location --retry 3 --output /models/model.gguf "$MODEL_URL"
+          echo "$MODEL_SHA256  /models/model.gguf" | sha256sum -c -
+        env:
+        - name: MODEL_URL
+          value: {{ quote (index .Values "modelURL") }}
+        - name: MODEL_SHA256
+          value: {{ quote (index .Values "modelSHA256") }}
+        resources:
+          requests:
+            cpu: 100m
+            memory: 64Mi
+          limits:
+            cpu: 500m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+          runAsGroup: 65532
+          runAsNonRoot: true
+          runAsUser: 65532
+        volumeMounts:
+        - name: model
+          mountPath: /models
+      containers:
+      - name: inference
+        image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:6f1a66f0576550c5145cd240d1c4dc5ee4cc08d9492551bbfaf4202efd3a0d95
+        imagePullPolicy: IfNotPresent
+        command:
+        - /app/llama
+        - completion
+        args:
+        - --model
+        - /models/model.gguf
+        - --prompt
+        - {{ quote (index .Values "prompt") }}
+        - --predict
+        - {{ quote (index .Values "maxTokens") }}
+        - --gpu-layers
+        - "99"
+        - --ctx-size
+        - "2048"
+        - --no-display-prompt
+        env:
+        - name: VK_ICD_FILENAMES
+          value: /usr/share/vulkan/icd.d/virtio_icd.aarch64.json
+        resources:
+          requests:
+            cpu: {{ quote (index .Values "cpu") }}
+            memory: {{ quote (index .Values "memory") }}
+          limits:
+            cpu: {{ quote (index .Values "cpu") }}
+            memory: {{ quote (index .Values "memory") }}
+          claims:
+          - name: gpu
+            request: accelerator
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: model
+          mountPath: /models
+          readOnly: true
+      volumes:
+      - name: model
+        emptyDir:
+          sizeLimit: {{ quote (index .Values "modelStorage") }}

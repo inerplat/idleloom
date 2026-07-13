@@ -38,9 +38,30 @@ spec:
             type: object
           spec:
             properties:
+              batch:
+                properties:
+                  maxTokens:
+                    format: int32
+                    maximum: 512
+                    minimum: 1
+                    type: integer
+                  prompt:
+                    maxLength: 16384
+                    minLength: 1
+                    type: string
+                  timeoutSeconds:
+                    format: int32
+                    maximum: 3600
+                    minimum: 1
+                    type: integer
+                required:
+                - maxTokens
+                - prompt
+                type: object
               mode:
                 enum:
                 - Server
+                - Batch
                 - Shell
                 type: string
               model:
@@ -196,9 +217,11 @@ spec:
           rule: self.spec == oldSelf.spec
         - message: unifiedMemoryRequest must be positive
           rule: quantity(self.spec.resources.unifiedMemoryRequest).isGreaterThan(quantity('0'))
-        - message: Server requires model and Shell requires shell
-          rule: (self.spec.mode == 'Server' && has(self.spec.model) && !has(self.spec.shell))
-            || (self.spec.mode == 'Shell' && !has(self.spec.model) && has(self.spec.shell))
+        - message: mode-specific model, batch, and shell fields are inconsistent
+          rule: (self.spec.mode == 'Server' && has(self.spec.model) && !has(self.spec.batch)
+            && !has(self.spec.shell)) || (self.spec.mode == 'Batch' && has(self.spec.model)
+            && has(self.spec.batch) && !has(self.spec.shell)) || (self.spec.mode ==
+            'Shell' && !has(self.spec.model) && !has(self.spec.batch) && has(self.spec.shell))
         - message: Host shell isolation requires outbound network access
           rule: '!has(self.spec.shell) || self.spec.shell.isolation != ''Host'' ||
             !has(self.spec.shell.network) || self.spec.shell.network == ''Outbound'''

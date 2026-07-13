@@ -2,12 +2,14 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
 	nativekube "github.com/inerplat/idleloom/internal/native/kube"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -140,6 +142,55 @@ func TestReconcileOnceReusesModelAndHostSnapshot(t *testing.T) {
 	if modelGets != 1 || hostLists != 1 {
 		t.Fatalf("model gets/host lists = %d/%d, want 1/1 per reconciliation cycle", modelGets, hostLists)
 	}
+}
+
+func TestBatchWorkloadResolvesModelCatalog(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := nativev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("a", 64)
+	model := &nativev1alpha1.IdleloomModel{
+		TypeMeta:   metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomModel"},
+		ObjectMeta: metav1.ObjectMeta{Name: "batch-model", UID: types.UID("model-uid")},
+		Spec: nativev1alpha1.IdleloomModelSpec{
+			Family: nativev1alpha1.ModelFamilyQwen35, RuntimeProfile: nativev1alpha1.RuntimeProfileMLXLMV1,
+			Artifact: nativev1alpha1.ModelArtifact{
+				OCIReference: "oci://registry.example/model@" + digest, ManifestDigest: digest,
+				Format: nativev1alpha1.ArtifactFormatSafetensorsV1, SizeBytes: 1024,
+				Signature: nativev1alpha1.SignaturePolicy{Issuer: "https://issuer.example", Subject: "publisher"},
+			},
+			MinimumUnifiedMemory: resource.MustParse("8Gi"), MaxContextLength: 2048, MaxConcurrentRequests: 1,
+		},
+	}
+	workload := &nativev1alpha1.IdleloomWorkload{
+		TypeMeta: metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomWorkload"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "batch", Namespace: "tenant", UID: types.UID("workload-uid"), Generation: 1,
+			Finalizers: []string{nativev1alpha1.WorkloadFinalizer},
+		},
+		Spec: nativev1alpha1.IdleloomWorkloadSpec{
+			Mode:      nativev1alpha1.WorkloadModeBatch,
+			Model:     &nativev1alpha1.WorkloadModelReference{CatalogRef: model.Name},
+			Batch:     &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: 32},
+			Resources: nativev1alpha1.WorkloadResources{UnifiedMemoryRequest: resource.MustParse("8Gi")},
+		},
+	}
+	listKinds := map[schema.GroupVersionResource]string{
+		nativekube.ModelsGVR: "IdleloomModelList", nativekube.HostsGVR: "IdleloomHostList",
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds, model, workload)
+	reconciler := &Reconciler{Dynamic: client, Coordination: kubernetesfake.NewSimpleClientset().CoordinationV1()}
+	err := reconciler.reconcileWorkload(context.Background(), workload.DeepCopy())
+	if err == nil {
+		t.Fatal("batch reconcile unexpectedly found an eligible host")
+	}
+	for _, action := range client.Actions() {
+		if action.GetVerb() == "get" && action.GetResource() == nativekube.ModelsGVR {
+			return
+		}
+	}
+	t.Fatal("batch reconcile did not resolve its model catalog entry")
 }
 
 func TestDeletingWorkloadStopsAssignmentFromSchedulingIntent(t *testing.T) {

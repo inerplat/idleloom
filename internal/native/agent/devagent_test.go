@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -14,9 +15,13 @@ import (
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
 	"github.com/inerplat/idleloom/internal/native/devruntime"
 	"github.com/inerplat/idleloom/internal/native/execution"
+	nativekube "github.com/inerplat/idleloom/internal/native/kube"
 	"github.com/inerplat/idleloom/internal/native/kubeletbridge"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 )
 
 func TestEnsureProcessRejectsExitedProcess(t *testing.T) {
@@ -102,11 +107,33 @@ func TestCompletedShellIsTerminalAndKeepsLogsAddressable(t *testing.T) {
 		},
 	}
 	agent := &DevAgent{config: DevAgentConfig{AgentID: "studio.native"}, assignment: assignment}
-	if phase, terminal := agent.completedShellPhase(assignment); !terminal || phase != nativev1alpha1.PhaseSucceeded {
-		t.Fatalf("completedShellPhase = %q, %t", phase, terminal)
+	if phase, terminal := agent.completedAssignmentPhase(assignment); !terminal || phase != nativev1alpha1.PhaseSucceeded {
+		t.Fatalf("completedAssignmentPhase = %q, %t", phase, terminal)
 	}
 	if target, ok := agent.resolveLogTarget(); !ok || target.AssignmentUID != string(assignment.UID) {
 		t.Fatalf("resolveLogTarget = %#v, %t", target, ok)
+	}
+}
+
+func TestCompletedBatchIsTerminalButServerCanRetry(t *testing.T) {
+	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{
+		ObjectMeta: metav1.ObjectMeta{Generation: 2},
+		Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+			Model:       &nativev1alpha1.ResolvedModel{Batch: &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: 8}},
+			ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 4,
+		},
+		Status: nativev1alpha1.IdleloomWorkloadAssignmentStatus{
+			ObservedGeneration: 2, Phase: nativev1alpha1.PhaseFailed, AgentID: "studio.native",
+			ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 4,
+		},
+	}
+	agent := &DevAgent{config: DevAgentConfig{AgentID: "studio.native"}}
+	if phase, terminal := agent.completedAssignmentPhase(assignment); !terminal || phase != nativev1alpha1.PhaseFailed {
+		t.Fatalf("completed batch phase = %q, %t", phase, terminal)
+	}
+	assignment.Spec.Model.Batch = nil
+	if phase, terminal := agent.completedAssignmentPhase(assignment); terminal || phase != "" {
+		t.Fatalf("completed server phase = %q, %t", phase, terminal)
 	}
 }
 
@@ -144,6 +171,168 @@ func TestEnsureProcessDoesNotReplayDurablyCompletedShell(t *testing.T) {
 	agent := &DevAgent{store: store}
 	if err := agent.ensureProcess(context.Background(), assignment); !errors.Is(err, ErrProcessCompleted) {
 		t.Fatalf("ensureProcess error = %v, want durable completion", err)
+	}
+}
+
+func TestEnsureProcessPreparesLockedModelOnFirstUse(t *testing.T) {
+	store, err := execution.Open(filepath.Join(t.TempDir(), "execution.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := devruntime.LockedModel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepareCalls := 0
+	startCalls := 0
+	agent := &DevAgent{
+		store: store,
+		logs:  kubeletbridge.NewLogBuffer(1 << 20),
+		config: DevAgentConfig{
+			AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()),
+			PrepareRuntime: func(context.Context, func(string)) (devruntime.Receipt, error) {
+				prepareCalls++
+				return devruntime.Receipt{
+					ArtifactIdentity: descriptor.ArtifactIdentity, ManifestDigest: descriptor.ManifestDigest,
+					RuntimeVersion: devruntime.RuntimeVersion,
+				}, nil
+			},
+			StartProcess: func(_ context.Context, _ devruntime.ProcessConfig) (Process, error) {
+				startCalls++
+				return &fakeProcess{alive: true}, nil
+			},
+		},
+	}
+	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("assignment-uid"), Generation: 1},
+		Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+			DesiredState: nativev1alpha1.AssignmentDesiredRunning,
+			WorkloadRef: nativev1alpha1.WorkloadObjectReference{
+				Namespace: "default", Name: "inference", UID: types.UID("workload-uid"), Generation: 1,
+			},
+			Model: &nativev1alpha1.ResolvedModel{
+				Family: nativev1alpha1.ModelFamilyQwen35, RuntimeProfile: nativev1alpha1.RuntimeProfileMLXLMV1,
+				Artifact: nativev1alpha1.ModelArtifact{OCIReference: descriptor.ArtifactIdentity, ManifestDigest: descriptor.ManifestDigest},
+			},
+			ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 1, LeaseDurationSeconds: 30,
+		},
+	}
+	if err := agent.ensureProcess(context.Background(), assignment); err != nil {
+		t.Fatal(err)
+	}
+	if prepareCalls != 1 || startCalls != 1 || agent.process == nil || !agent.process.Alive() {
+		t.Fatalf("prepareCalls=%d startCalls=%d process=%#v", prepareCalls, startCalls, agent.process)
+	}
+	if err := agent.stopProcess(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHostAdvertisesModelCapabilityWhenRuntimeIsPreparable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := nativev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	host := &nativev1alpha1.IdleloomHost{
+		TypeMeta:   metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomHost"},
+		ObjectMeta: metav1.ObjectMeta{Name: "host", Namespace: "idleloom-host-studio", Generation: 1},
+		Spec:       nativev1alpha1.IdleloomHostSpec{AgentID: "studio.native"},
+	}
+	client := dynamicfake.NewSimpleDynamicClient(scheme, host)
+	agent := &DevAgent{config: DevAgentConfig{
+		Dynamic: client, AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()), Platform: fakeAgentPlatform{},
+		PrepareRuntime: func(context.Context, func(string)) (devruntime.Receipt, error) { return devruntime.Receipt{}, nil },
+	}}
+	if err := agent.updateHostStatus(context.Background(), host, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	object, err := client.Resource(nativekube.HostsGVR).Namespace(host.Namespace).Get(context.Background(), host.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated nativev1alpha1.IdleloomHost
+	if err := nativekube.FromUnstructured(object, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(updated.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXLMV1) || !slices.Contains(updated.Status.ModelFamilies, nativev1alpha1.ModelFamilyQwen35) || !slices.Contains(updated.Status.Capabilities, nativev1alpha1.CapabilityBatchInferenceV1) {
+		t.Fatalf("preparable capabilities = %#v", updated.Status)
+	}
+}
+
+func TestBatchInferenceCompletesDurablyAndRetainsResultLog(t *testing.T) {
+	store, err := execution.Open(filepath.Join(t.TempDir(), "execution.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	descriptor, err := devruntime.LockedModel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &fakeBatchRunner{
+		alive: true, pid: 123,
+		result: devruntime.GenerateResponse{Text: "batch-answer", ElapsedMillis: 7},
+	}
+	agent := &DevAgent{
+		store: store,
+		logs:  kubeletbridge.NewLogBuffer(1 << 20),
+		config: DevAgentConfig{
+			AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()), Platform: fakeAgentPlatform{},
+			PrepareRuntime: func(context.Context, func(string)) (devruntime.Receipt, error) {
+				return devruntime.Receipt{
+					ArtifactIdentity: descriptor.ArtifactIdentity, ManifestDigest: descriptor.ManifestDigest,
+					RuntimeVersion: devruntime.RuntimeVersion,
+				}, nil
+			},
+			StartProcess: func(_ context.Context, config devruntime.ProcessConfig) (Process, error) {
+				if err := config.OnSpawn(runner.pid); err != nil {
+					return nil, err
+				}
+				return runner, nil
+			},
+		},
+	}
+	assignment := batchAssignment(t, descriptor)
+	if err := agent.ensureProcess(context.Background(), assignment); err != nil {
+		t.Fatal(err)
+	}
+	waitForBatch(t, agent.process)
+	if err := agent.ensureProcess(context.Background(), assignment); !errors.Is(err, ErrProcessCompleted) {
+		t.Fatalf("completion error = %v", err)
+	}
+	current := store.Current()
+	if current == nil || !current.Completed || current.ExitError != "" {
+		t.Fatalf("execution journal = %#v", current)
+	}
+	entries := agent.logs.Snapshot(string(assignment.UID), time.Time{}, -1)
+	found := false
+	for _, entry := range entries {
+		if strings.Contains(entry.Message, `"text":"batch-answer"`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("batch result log = %#v", entries)
+	}
+}
+
+func batchAssignment(t *testing.T, descriptor devruntime.LockedModelDescriptor) *nativev1alpha1.IdleloomWorkloadAssignment {
+	t.Helper()
+	return &nativev1alpha1.IdleloomWorkloadAssignment{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("assignment-uid"), Generation: 1},
+		Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+			DesiredState: nativev1alpha1.AssignmentDesiredRunning,
+			WorkloadRef: nativev1alpha1.WorkloadObjectReference{
+				Namespace: "default", Name: "batch", UID: types.UID("workload-uid"), Generation: 1,
+			},
+			Model: &nativev1alpha1.ResolvedModel{
+				Family: nativev1alpha1.ModelFamilyQwen35, RuntimeProfile: nativev1alpha1.RuntimeProfileMLXLMV1,
+				Artifact: nativev1alpha1.ModelArtifact{OCIReference: descriptor.ArtifactIdentity, ManifestDigest: descriptor.ManifestDigest},
+				Batch:    &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: 8, TimeoutSeconds: 30},
+			},
+			ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 1, LeaseDurationSeconds: 30,
+		},
 	}
 }
 
@@ -208,3 +397,16 @@ func (p *fakeProcess) Generate(context.Context, devruntime.GenerateRequest) (dev
 func (p *fakeProcess) Stderr() string { return "" }
 
 func (p *fakeProcess) WaitError() error { return nil }
+
+type fakeAgentPlatform struct{}
+
+func (fakeAgentPlatform) KrunkitRunning(context.Context) (bool, error) { return false, nil }
+func (fakeAgentPlatform) AllocatableMemory(context.Context) (resource.Quantity, error) {
+	return resource.MustParse("16Gi"), nil
+}
+func (fakeAgentPlatform) ProcessStartToken(int) (string, error) { return "start", nil }
+func (fakeAgentPlatform) ProcessAlive(int) (bool, error)        { return false, nil }
+func (fakeAgentPlatform) FindRunnerPIDs(context.Context, string, string) ([]int, error) {
+	return nil, nil
+}
+func (fakeAgentPlatform) KillProcessGroupAndWait(context.Context, int) error { return nil }

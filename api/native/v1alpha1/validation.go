@@ -29,14 +29,23 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 	specPath := field.NewPath("spec")
 	switch workload.Spec.Mode {
 	case WorkloadModeServer:
-		if workload.Spec.Model == nil || workload.Spec.Shell != nil {
-			errs = append(errs, field.Invalid(specPath, workload.Spec, "Server mode requires model and forbids shell"))
+		if workload.Spec.Model == nil || workload.Spec.Batch != nil || workload.Spec.Shell != nil {
+			errs = append(errs, field.Invalid(specPath, workload.Spec, "Server mode requires model and forbids batch and shell"))
 		} else if problems := validation.IsDNS1123Subdomain(workload.Spec.Model.CatalogRef); len(problems) > 0 {
 			errs = append(errs, field.Invalid(specPath.Child("model", "catalogRef"), workload.Spec.Model.CatalogRef, strings.Join(problems, "; ")))
 		}
+	case WorkloadModeBatch:
+		if workload.Spec.Model == nil || workload.Spec.Batch == nil || workload.Spec.Shell != nil {
+			errs = append(errs, field.Invalid(specPath, workload.Spec, "Batch mode requires model and batch and forbids shell"))
+		} else {
+			if problems := validation.IsDNS1123Subdomain(workload.Spec.Model.CatalogRef); len(problems) > 0 {
+				errs = append(errs, field.Invalid(specPath.Child("model", "catalogRef"), workload.Spec.Model.CatalogRef, strings.Join(problems, "; ")))
+			}
+			errs = append(errs, validateBatchInference(workload.Spec.Batch, specPath.Child("batch"))...)
+		}
 	case WorkloadModeShell:
-		if workload.Spec.Shell == nil || workload.Spec.Model != nil {
-			errs = append(errs, field.Invalid(specPath, workload.Spec, "Shell mode requires shell and forbids model"))
+		if workload.Spec.Shell == nil || workload.Spec.Model != nil || workload.Spec.Batch != nil {
+			errs = append(errs, field.Invalid(specPath, workload.Spec, "Shell mode requires shell and forbids model and batch"))
 		} else {
 			if strings.TrimSpace(workload.Spec.Shell.Script) == "" || strings.ContainsRune(workload.Spec.Shell.Script, '\x00') {
 				errs = append(errs, field.Invalid(specPath.Child("shell", "script"), workload.Spec.Shell.Script, "must contain a non-empty script without NUL bytes"))
@@ -58,7 +67,7 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 			}
 		}
 	default:
-		errs = append(errs, field.NotSupported(specPath.Child("mode"), workload.Spec.Mode, []string{WorkloadModeServer, WorkloadModeShell}))
+		errs = append(errs, field.NotSupported(specPath.Child("mode"), workload.Spec.Mode, []string{WorkloadModeServer, WorkloadModeBatch, WorkloadModeShell}))
 	}
 	if workload.Spec.Resources.UnifiedMemoryRequest.Sign() <= 0 {
 		errs = append(errs, field.Invalid(specPath.Child("resources", "unifiedMemoryRequest"), workload.Spec.Resources.UnifiedMemoryRequest.String(), "must be positive"))
@@ -149,6 +158,9 @@ func ValidateAssignment(assignment *IdleloomWorkloadAssignment) error {
 		if assignment.Spec.Model.CatalogRef.Name == "" || assignment.Spec.Model.CatalogRef.UID == "" {
 			errs = append(errs, field.Invalid(specPath.Child("model", "catalogRef"), assignment.Spec.Model.CatalogRef, "name and UID are required"))
 		}
+		if assignment.Spec.Model.Batch != nil {
+			errs = append(errs, validateBatchInference(assignment.Spec.Model.Batch, specPath.Child("model", "batch"))...)
+		}
 	} else {
 		if strings.TrimSpace(assignment.Spec.Shell.Script) == "" || strings.ContainsRune(assignment.Spec.Shell.Script, '\x00') {
 			errs = append(errs, field.Invalid(specPath.Child("shell", "script"), assignment.Spec.Shell.Script, "must contain a non-empty script without NUL bytes"))
@@ -170,6 +182,26 @@ func ValidateAssignment(assignment *IdleloomWorkloadAssignment) error {
 		}
 	}
 	return errs.ToAggregate()
+}
+
+func validateBatchInference(batch *WorkloadBatchInference, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if batch == nil {
+		return append(errs, field.Required(path, "batch inference is required"))
+	}
+	if strings.TrimSpace(batch.Prompt) == "" || strings.ContainsRune(batch.Prompt, '\x00') {
+		errs = append(errs, field.Invalid(path.Child("prompt"), batch.Prompt, "must contain a non-empty prompt without NUL bytes"))
+	}
+	if len([]byte(batch.Prompt)) > 16<<10 {
+		errs = append(errs, field.TooLong(path.Child("prompt"), "", 16<<10))
+	}
+	if batch.MaxTokens < 1 || batch.MaxTokens > 512 {
+		errs = append(errs, field.Invalid(path.Child("maxTokens"), batch.MaxTokens, "must be between 1 and 512"))
+	}
+	if batch.TimeoutSeconds < 0 || batch.TimeoutSeconds > 3600 {
+		errs = append(errs, field.Invalid(path.Child("timeoutSeconds"), batch.TimeoutSeconds, "must be between 1 and 3600 when set"))
+	}
+	return errs
 }
 
 func ValidateStopAcknowledgement(assignment *IdleloomWorkloadAssignment) error {

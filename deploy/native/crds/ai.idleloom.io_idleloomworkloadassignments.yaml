@@ -106,6 +106,26 @@ spec:
                     - signature
                     - sizeBytes
                     type: object
+                  batch:
+                    properties:
+                      maxTokens:
+                        format: int32
+                        maximum: 512
+                        minimum: 1
+                        type: integer
+                      prompt:
+                        maxLength: 16384
+                        minLength: 1
+                        type: string
+                      timeoutSeconds:
+                        format: int32
+                        maximum: 3600
+                        minimum: 1
+                        type: integer
+                    required:
+                    - maxTokens
+                    - prompt
+                    type: object
                   catalogRef:
                     properties:
                       name:

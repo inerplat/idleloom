@@ -48,7 +48,9 @@ func TestNativeCRDsExposeOnlyTheRestrictedWorkloadIntent(t *testing.T) {
 	workload := decodeObjects(t, filepath.Join(crdDir, "ai.idleloom.io_idleloomworkloads.yaml"))[0]
 	rootSchema := crdSchema(t, workload)
 	specProperties := nestedMap(t, rootSchema, "properties", "spec", "properties")
-	assertKeys(t, specProperties, []string{"mode", "model", "resources", "shell"})
+	assertKeys(t, specProperties, []string{"batch", "mode", "model", "resources", "shell"})
+	batchProperties := nestedMap(t, specProperties, "batch", "properties")
+	assertKeys(t, batchProperties, []string{"maxTokens", "prompt", "timeoutSeconds"})
 	modelProperties := nestedMap(t, specProperties, "model", "properties")
 	assertKeys(t, modelProperties, []string{"catalogRef"})
 	resourceProperties := nestedMap(t, specProperties, "resources", "properties")

@@ -249,6 +249,10 @@ func runJoin(ctx context.Context, args []string) error {
 	if err := waitForNativeAPI(ctx, dynamicClient); err != nil {
 		return err
 	}
+	fmt.Fprintln(os.Stderr, "installing locked Native model catalog")
+	if err := install.ApplyCatalog(ctx, dynamicClient, *forceConflicts); err != nil {
+		return err
+	}
 	result, err := enroll.Run(ctx, enroll.Config{
 		REST: credentialConfig, Dynamic: dynamicClient, Kubernetes: clientset, HostID: hostID,
 		StateDirectory: *stateDirectory, TokenDuration: *tokenDuration, Connectivity: *link,

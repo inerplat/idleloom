@@ -1,0 +1,13 @@
+name: infer/llama-vulkan
+version: v1
+description: Run one prompt with llama.cpp and a DRA-allocated Apple Vulkan device on an Idleloom worker.
+task: infer
+backend: worker
+runtime: llama-vulkan
+manifest: job.yaml
+parametersSchema: parameters.schema.json
+example: example.yaml
+prerequisites:
+- A joined Idleloom Linux worker with the Apple Vulkan DRA driver running.
+- A resource.k8s.io/v1 DeviceClass named apple-vulkan.
+- Outbound HTTPS access to the pinned model URL.

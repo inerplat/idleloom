@@ -44,6 +44,20 @@ func TestValidateShellWorkload(t *testing.T) {
 	}
 }
 
+func TestValidateBatchInferenceWorkload(t *testing.T) {
+	workload := validWorkload()
+	workload.Spec.Mode = WorkloadModeBatch
+	workload.Spec.Batch = &WorkloadBatchInference{Prompt: "Explain Kubernetes in one sentence.", MaxTokens: 64}
+	if err := ValidateWorkload(&workload); err != nil {
+		t.Fatalf("ValidateWorkload: %v", err)
+	}
+	workload.Spec.Batch.Prompt = ""
+	workload.Spec.Batch.MaxTokens = 0
+	if err := ValidateWorkload(&workload); err == nil {
+		t.Fatal("ValidateWorkload accepted an empty batch request")
+	}
+}
+
 func TestValidateModelRejectsMutableOrCredentialedArtifact(t *testing.T) {
 	model := validModel()
 	if err := ValidateModel(&model); err != nil {

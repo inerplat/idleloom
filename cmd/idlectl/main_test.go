@@ -104,6 +104,11 @@ func TestRecipeCommandsExposeBothBackendsAndRenderYAML(t *testing.T) {
 			t.Fatalf("recipe list does not contain %q: %s", expected, output.String())
 		}
 	}
+	for _, expected := range []string{"infer/mlx-batch@v1", "infer/llama-vulkan@v1"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("recipe list does not contain %q: %s", expected, output.String())
+		}
+	}
 
 	output.Reset()
 	if err := runRecipe([]string{"show", "train/mlx-linear-regression@v1"}, strings.NewReader(""), &output); err != nil {
@@ -123,6 +128,28 @@ func TestRecipeCommandsExposeBothBackendsAndRenderYAML(t *testing.T) {
 	for _, expected := range []string{"apiVersion: batch/v1", "kind: Job", `name: "worker-train"`, `namespace: "training"`, `value: "140"`} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("recipe render does not contain %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestRecipeCommandsRenderPairedBatchInference(t *testing.T) {
+	var output bytes.Buffer
+	if err := runRecipe([]string{"render", "infer/mlx-batch@v1", "--name", "native-infer"}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"kind: IdleloomWorkload", "mode: Batch", `catalogRef: "qwen3-5-0-8b-mlx"`} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("Native inference manifest does not contain %q: %s", expected, output.String())
+		}
+	}
+
+	output.Reset()
+	if err := runRecipe([]string{"render", "infer/llama-vulkan@v1", "--name", "worker-infer"}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"kind: ResourceClaim", "kind: Job", "resourceClaimName:", "@sha256:", "sha256sum -c -"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("Worker inference manifest does not contain %q: %s", expected, output.String())
 		}
 	}
 }

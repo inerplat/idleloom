@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -34,6 +35,8 @@ type propertySchema struct {
 	Minimum          *float64 `json:"minimum,omitempty"`
 	ExclusiveMinimum *float64 `json:"exclusiveMinimum,omitempty"`
 	Maximum          *float64 `json:"maximum,omitempty"`
+	MinLength        *int     `json:"minLength,omitempty"`
+	MaxLength        *int     `json:"maxLength,omitempty"`
 }
 
 func parseParameterSchema(data []byte) (parameterSchema, error) {
@@ -99,11 +102,20 @@ func validatePropertySchema(name string, property propertySchema) error {
 			return fmt.Errorf("parameter %q has invalid pattern: %w", name, err)
 		}
 	}
-	if property.Format != "" && property.Format != "namespace" && property.Format != "positiveQuantity" {
+	if property.Format != "" && property.Format != "namespace" && property.Format != "dnsSubdomain" && property.Format != "positiveQuantity" && property.Format != "httpsURL" && property.Format != "sha256Hex" {
 		return fmt.Errorf("parameter %q has unsupported format %q", name, property.Format)
 	}
 	if property.Format != "" && property.Type != "string" {
 		return fmt.Errorf("parameter %q uses a string format with type %q", name, property.Type)
+	}
+	if (property.MinLength != nil || property.MaxLength != nil) && property.Type != "string" {
+		return fmt.Errorf("parameter %q uses string length limits with type %q", name, property.Type)
+	}
+	if (property.MinLength != nil && *property.MinLength < 0) || (property.MaxLength != nil && *property.MaxLength < 0) {
+		return fmt.Errorf("parameter %q has a negative string length limit", name)
+	}
+	if property.MinLength != nil && property.MaxLength != nil && *property.MinLength > *property.MaxLength {
+		return fmt.Errorf("parameter %q has minLength greater than maxLength", name)
 	}
 	return nil
 }
@@ -184,15 +196,34 @@ func validateParameter(name string, value any, property propertySchema) error {
 		if property.Pattern != "" && !regexp.MustCompile(property.Pattern).MatchString(text) {
 			return fmt.Errorf("parameter %q does not match %s", name, property.Pattern)
 		}
+		if property.MinLength != nil && len([]byte(text)) < *property.MinLength {
+			return fmt.Errorf("parameter %q must contain at least %d UTF-8 bytes", name, *property.MinLength)
+		}
+		if property.MaxLength != nil && len([]byte(text)) > *property.MaxLength {
+			return fmt.Errorf("parameter %q must contain at most %d UTF-8 bytes", name, *property.MaxLength)
+		}
 		switch property.Format {
 		case "namespace":
 			if problems := validation.IsDNS1123Label(text); len(problems) > 0 {
 				return fmt.Errorf("parameter %q must be a Kubernetes namespace: %s", name, strings.Join(problems, "; "))
 			}
+		case "dnsSubdomain":
+			if problems := validation.IsDNS1123Subdomain(text); len(problems) > 0 {
+				return fmt.Errorf("parameter %q must be a Kubernetes DNS subdomain: %s", name, strings.Join(problems, "; "))
+			}
 		case "positiveQuantity":
 			quantity, err := resource.ParseQuantity(text)
 			if err != nil || quantity.Sign() <= 0 {
 				return fmt.Errorf("parameter %q must be a positive Kubernetes quantity", name)
+			}
+		case "httpsURL":
+			parsed, err := url.Parse(text)
+			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+				return fmt.Errorf("parameter %q must be a credential-free HTTPS URL without a fragment", name)
+			}
+		case "sha256Hex":
+			if matched, _ := regexp.MatchString(`^[a-f0-9]{64}$`, text); !matched {
+				return fmt.Errorf("parameter %q must contain 64 lowercase SHA-256 hexadecimal characters", name)
 			}
 		}
 		return nil

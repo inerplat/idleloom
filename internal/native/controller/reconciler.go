@@ -75,9 +75,9 @@ func (r *Reconciler) reconcileWorkloadWithCycle(ctx context.Context, workload *n
 		return r.reflectAssignment(ctx, workload)
 	}
 	var model *nativev1alpha1.IdleloomModel
-	if workload.Spec.Mode == nativev1alpha1.WorkloadModeServer {
+	if workload.Spec.Mode == nativev1alpha1.WorkloadModeServer || workload.Spec.Mode == nativev1alpha1.WorkloadModeBatch {
 		if workload.Spec.Model == nil {
-			return fmt.Errorf("server workload has no model reference")
+			return fmt.Errorf("model workload has no model reference")
 		}
 		var err error
 		model, err = cycle.model(ctx, workload.Spec.Model.CatalogRef)
