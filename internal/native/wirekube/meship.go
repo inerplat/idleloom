@@ -54,28 +54,30 @@ func validateMeshIPAvailability(ctx context.Context, client dynamic.Interface, p
 	expectedIP, _, _ := net.ParseCIDR(expected)
 
 	externalPeers, err := client.Resource(ExternalPeersGVR).List(ctx, metav1.ListOptions{})
-	if err != nil {
+	if err != nil && !apierrors.IsNotFound(err) {
 		return "", fmt.Errorf("list WireKubeExternalPeer resources for address collision check: %w", err)
 	}
-	for index := range externalPeers.Items {
-		peer := &externalPeers.Items[index]
-		if peer.GetName() == peerName {
-			continue
-		}
-		assigned, _, _ := unstructured.NestedString(peer.Object, "status", "assignedMeshIP")
-		if assigned != "" && sameIP(assigned, expectedIP) {
-			return "", fmt.Errorf("deterministic mesh address %s is already assigned to WireKubeExternalPeer/%s", expected, peer.GetName())
-		}
-		otherDisplayName, _, _ := unstructured.NestedString(peer.Object, "spec", "displayName")
-		if otherDisplayName == "" {
-			continue
-		}
-		candidate, candidateErr := meshIPForName(otherDisplayName, meshCIDR)
-		if candidateErr != nil {
-			return "", fmt.Errorf("derive address for WireKubeExternalPeer/%s: %w", peer.GetName(), candidateErr)
-		}
-		if candidate == expected {
-			return "", fmt.Errorf("deterministic mesh address %s collides with pending WireKubeExternalPeer/%s", expected, peer.GetName())
+	if err == nil {
+		for index := range externalPeers.Items {
+			peer := &externalPeers.Items[index]
+			if peer.GetName() == peerName {
+				continue
+			}
+			assigned, _, _ := unstructured.NestedString(peer.Object, "status", "assignedMeshIP")
+			if assigned != "" && sameIP(assigned, expectedIP) {
+				return "", fmt.Errorf("deterministic mesh address %s is already assigned to WireKubeExternalPeer/%s", expected, peer.GetName())
+			}
+			otherDisplayName, _, _ := unstructured.NestedString(peer.Object, "spec", "displayName")
+			if otherDisplayName == "" {
+				continue
+			}
+			candidate, candidateErr := meshIPForName(otherDisplayName, meshCIDR)
+			if candidateErr != nil {
+				return "", fmt.Errorf("derive address for WireKubeExternalPeer/%s: %w", peer.GetName(), candidateErr)
+			}
+			if candidate == expected {
+				return "", fmt.Errorf("deterministic mesh address %s collides with pending WireKubeExternalPeer/%s", expected, peer.GetName())
+			}
 		}
 	}
 
@@ -85,6 +87,9 @@ func validateMeshIPAvailability(ctx context.Context, client dynamic.Interface, p
 	}
 	for index := range peers.Items {
 		peer := &peers.Items[index]
+		if peer.GetName() == peerName {
+			continue
+		}
 		allowedIPs, _, _ := unstructured.NestedStringSlice(peer.Object, "spec", "allowedIPs")
 		for _, allowed := range allowedIPs {
 			if routeContainsIP(allowed, expectedIP) {

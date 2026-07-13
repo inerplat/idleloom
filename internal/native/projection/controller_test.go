@@ -286,9 +286,16 @@ func TestValidateManagedPodAllowsKnownAPIServerDefaults(t *testing.T) {
 	actual.Spec.Tolerations = append(actual.Spec.Tolerations,
 		corev1.Toleration{Key: corev1.TaintNodeNotReady, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &seconds},
 		corev1.Toleration{Key: corev1.TaintNodeUnreachable, Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoExecute, TolerationSeconds: &seconds},
+		corev1.Toleration{Key: "native.idleloom.io/execution-slot", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
 	)
 	if err := validateManagedPod(actual, desired, assignment); err != nil {
 		t.Fatalf("known API server defaults were rejected: %v", err)
+	}
+	actual.Spec.Tolerations = append(actual.Spec.Tolerations,
+		corev1.Toleration{Key: "native.idleloom.io/foreign-resource", Operator: corev1.TolerationOpExists, Effect: corev1.TaintEffectNoSchedule},
+	)
+	if err := validateManagedPod(actual, desired, assignment); err == nil {
+		t.Fatal("unrelated extended resource toleration was accepted")
 	}
 }
 

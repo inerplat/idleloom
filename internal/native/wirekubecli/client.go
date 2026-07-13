@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const CompatibleVersion = "v0.0.14"
+const CompatibleVersion = "v0.0.15"
 
 const compatibleSchemaVersion = "v1alpha1"
 
@@ -69,7 +69,7 @@ func (c Client) Plan(ctx context.Context) (Plan, error) {
 	args := []string{
 		"install",
 		"--relay", "load-balancer",
-		"--relay-udp",
+		"--relay-udp=false",
 		"--node-addresses", "internal-ip",
 		"--dry-run",
 		"--output", "json",
@@ -84,7 +84,7 @@ func (c Client) Plan(ctx context.Context) (Plan, error) {
 	if plan.WireKubeVersion != c.compatibleVersion() {
 		return Plan{}, fmt.Errorf("WireKube plan version %q is incompatible; Idleloom requires %s", plan.WireKubeVersion, c.compatibleVersion())
 	}
-	if plan.Relay != "load-balancer" || !plan.RelayUDP || plan.NodeAddresses != "internal-ip" {
+	if plan.Relay != "load-balancer" || plan.RelayUDP || plan.NodeAddresses != "internal-ip" {
 		return Plan{}, fmt.Errorf("WireKube returned an incompatible connected-host plan")
 	}
 	if strings.TrimSpace(plan.MeshCIDR) == "" || !hasSHA256Digest(plan.Image) {
@@ -100,7 +100,7 @@ func (c Client) Install(ctx context.Context, plan Plan) (Result, error) {
 	args := []string{
 		"install",
 		"--relay", "load-balancer",
-		"--relay-udp",
+		"--relay-udp=false",
 		"--mesh-cidr", plan.MeshCIDR,
 		"--node-addresses", "internal-ip",
 		"--yes",

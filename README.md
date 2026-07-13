@@ -26,11 +26,32 @@ the native resource semantics of that backend. See
 
 ## Native Metal quick start
 
-Install the complete macOS bundle from the public Homebrew tap:
+Install the complete macOS bundle and Kubernetes CLI from Homebrew:
 
 ```sh
+brew install kubectl
 brew install inerplat/tap/idleloom
 idlectl version
+kubectl version --client
+kubectl cluster-info
+```
+
+This documentation follows the current repository checkout. Before joining a
+host, verify that the installed release contains the manifest recipe surface:
+
+```sh
+idlectl recipe list
+```
+
+If that command reports `unknown command "recipe"`, the Homebrew release is
+older than this checkout. Build the current checkout instead and keep its
+bundle first on `PATH` for the rest of the guide:
+
+```sh
+brew install go
+make build-idlectl
+export PATH="$PWD/bin:$PATH"
+idlectl recipe list
 ```
 
 Join the current Kubernetes context and run a sandboxed command:
@@ -51,7 +72,7 @@ return from the Mac.
 
 | Link mode | Inbound path to the Mac | Administrator authorization | Logs |
 | --- | --- | --- | --- |
-| `wirekube` (default) | WireKube relay and root-owned route service | Required during join and deletion | Standard Kubernetes logs, including follow |
+| `wirekube` (default) | Restricted WireKube peer and root-owned route service | Required during join and deletion | Standard Kubernetes logs, including follow |
 | `api-only` | None; the agent makes outbound Kubernetes API requests | Not required | Completed local snapshots with `idlectl logs --local` |
 
 For API-only hosts, `--projection=false` is recommended because projected
@@ -73,6 +94,13 @@ idleloom init --kubeconfig ~/.kube/config
 # Native Metal host; WireKube is the default link
 idlectl join HOST --kubeconfig ~/.kube/config
 ```
+
+The default connected path needs either a public TCP `LoadBalancer` that the
+cluster can provision or an existing WireKube installation with a reachable
+`wss://` control endpoint. `join` shows the infrastructure plan before making
+changes. Use `--link api-only --projection=false` when the cluster cannot
+provide an inbound relay path; workloads still run, but logs are read locally
+after completion.
 
 The administrator kubeconfig remains on the Mac. The Linux worker receives
 only the cluster CA, API endpoint, and a short-lived bootstrap token. Native
@@ -126,9 +154,15 @@ separate sparse data disk. This keeps the root image simple and avoids a
 Install the host runtime with Homebrew:
 
 ```sh
+brew install go
 brew tap libkrun/krun
 brew install krunkit
 ```
+
+The current Idleloom Homebrew formula installs the Native Metal bundle only.
+Build `idleloom` from this checkout for the Linux worker path. WireKube must be
+installed separately with its released easy installer before enrollment; see
+[`docs/worker-bootstrap.md`](docs/worker-bootstrap.md).
 
 `WireKubeMesh/default` must advertise Node InternalIPs:
 
@@ -147,8 +181,9 @@ from other cluster nodes.
 
 ```sh
 make build
-./bin/idleloom version
-./bin/idlectl version
+export PATH="$PWD/bin:$PATH"
+idleloom version
+idlectl version
 ```
 
 For development:
@@ -163,13 +198,13 @@ go vet ./...
 Interactive setup:
 
 ```sh
-./bin/idleloom init --kubeconfig ~/.kube/config --context my-cluster
+idleloom init --kubeconfig ~/.kube/config --context my-cluster
 ```
 
 Non-interactive setup:
 
 ```sh
-./bin/idleloom init \
+idleloom init \
   --yes \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
@@ -183,7 +218,7 @@ Run read-only preflight checks without downloading an image, creating a token,
 or starting a VM:
 
 ```sh
-./bin/idleloom init --yes --dry-run --kubeconfig ~/.kube/config
+idleloom init --yes --dry-run --kubeconfig ~/.kube/config
 ```
 
 The advanced `--runtime-dir` flag changes where VM disks, SSH keys, sockets,
@@ -254,13 +289,49 @@ Kubernetes Dynamic Resource Allocation:
 - kubelet DRA v1 prepare/unprepare service;
 - exclusive Claim leases and stable CDI device injection.
 
-Build the development image and deploy it after choosing a driver domain you
-control:
+The Vulkan recipes require Kubernetes 1.35 or later with the stable
+`resource.k8s.io/v1` API enabled on the API server, scheduler, and kubelet.
+Verify the API before building or deploying the driver:
 
 ```sh
-docker build -t idleloom-vulkan-dra:dev .
+kubectl version
+kubectl api-resources --api-group=resource.k8s.io
+```
+
+The second command must list `DeviceClass`, `ResourceClaim`,
+`ResourceClaimTemplate`, and `ResourceSlice`. A basic Linux worker can be used
+for ordinary Pods on a cluster without DRA, but the Vulkan recipes cannot.
+
+The development driver is not published as a ready-to-pull image. Install
+Docker Desktop, choose a container registry reachable by the worker, and push
+an ARM64 image before applying the DaemonSet:
+
+```sh
+brew install --cask docker
+open -a Docker
+docker info
+
+export DRA_IMAGE=registry.example.com/your-project/idleloom-vulkan-dra:dev
+docker login registry.example.com
+docker buildx build --platform linux/arm64 --push -t "${DRA_IMAGE}" .
+
 kubectl apply -k deploy/base
+kubectl -n kube-system set image \
+  daemonset/apple-vulkan-dra-node \
+  dra-node="${DRA_IMAGE}"
+kubectl -n kube-system rollout status \
+  daemonset/apple-vulkan-dra-node \
+  --timeout=5m
 kubectl apply -f deploy/examples/deviceclass.yaml
+```
+
+Replace the example registry with one the cluster can authenticate to. If the
+registry is private, configure the worker's image-pull credentials before the
+rollout. Verify publication before using a Vulkan recipe:
+
+```sh
+kubectl get resourceslices -o wide
+kubectl get deviceclass/apple-vulkan
 ```
 
 The public manifests use the development driver name
@@ -291,6 +362,7 @@ Contributors can build the same bundle from source:
 
 ```sh
 make build-idlectl
+export PATH="$PWD/bin:$PATH"
 ```
 
 The public CLI contains only Kubernetes-style resource operations:
@@ -333,7 +405,7 @@ default WireKube mode it also installs the root link LaunchDaemon and
 waits until the host is ready and connected:
 
 ```sh
-./bin/idlectl join studio-idle \
+idlectl join studio-idle \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 ```
@@ -341,22 +413,40 @@ waits until the host is ready and connected:
 The default WireKube join asks for macOS administrator authorization once when
 it installs the root-owned link helper. API-only mode does not install
 that helper and does not require administrator authorization. Neither mode
-runs the agent or shell workloads as root. The WireKube private key used by the
-helper is copied into a root-owned state directory; the long-running
+runs the agent or shell workloads as root. The link is registered as a normal
+`WireKubePeer`, not as an external peer. Its peer-specific ServiceAccount can
+read mesh peers, refresh only its own short-lived credentials, and update only
+its own peer status. The WireKube private key and restricted kubeconfig used by
+the helper are copied into a root-owned state directory; the long-running
 privileged service does not trust the user-writable enrollment directory for
 tunnel configuration.
 
+Hosts enrolled by an earlier connected-mode build as external peers must be
+deleted and joined once with the new bundle. The delete path retains legacy
+cleanup support, but the link service does not continue running the old peer
+contract.
+
 If WireKube is missing, interactive join first displays the detected cluster,
 compatible WireKube version and image digest, selected mesh CIDR, privileged
-DaemonSet requirement, and the public TCP and UDP LoadBalancers needed for the
-connected leaf. One confirmation approves both dependency installation and the
-host join. The successful WireKube installation remains available for other
-hosts if a later Idleloom enrollment step fails.
+DaemonSet requirement, and the public TCP relay LoadBalancer needed for the
+connected host. Idleloom does not request the optional public UDP relay used by
+external peers. When the mesh exposes a `wss://` control endpoint, the same
+peer client uses WSS with an audience-scoped, short-lived token instead; WSS is
+recommended for internet-facing relays. One confirmation approves both
+dependency installation and the host join. The successful WireKube
+installation remains available for other hosts if a later Idleloom enrollment
+step fails.
+
+If the plan selects a public TCP relay, confirm that the cluster has a working
+`LoadBalancer` controller and that the assigned address is reachable from the
+Mac. If the cluster cannot provide one, cancel the plan and use API-only mode,
+or have the cluster operator configure WireKube WSS first. A WSS endpoint,
+certificate, Gateway, or Ingress is not created by Idleloom.
 
 For non-interactive onboarding, explicitly authorize dependency installation:
 
 ```sh
-./bin/idlectl join studio-idle \
+idlectl join studio-idle \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   --install-dependencies \
@@ -367,7 +457,7 @@ If the source kubeconfig disables TLS verification, explicitly pin the API
 certificate observed during the first connection:
 
 ```sh
-./bin/idlectl join studio-idle \
+idlectl join studio-idle \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   --allow-tofu
@@ -381,7 +471,7 @@ legitimate API certificate rotation, repeat the command with both
 
 Use `--link api-only` when inbound cluster-to-host access is not required.
 API-only hosts can execute work but do not provide Kubernetes log streaming.
-Run `./bin/idlectl logs --local workload/NAME` on the joined Mac to read a
+Run `idlectl logs --local workload/NAME` on the joined Mac to read a
 completed log snapshot from agent state. Use `--projection=false` to disable
 ephemeral Node and Pod projection.
 
@@ -407,11 +497,11 @@ Commands use the namespace from the selected kubeconfig context unless `-n`
 is supplied:
 
 ```sh
-./bin/idlectl get host/studio-idle \
+idlectl get host/studio-idle \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 
-./bin/idlectl run inventory \
+idlectl run inventory \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   -n default \
@@ -419,11 +509,11 @@ is supplied:
   --isolation sandbox \
   --network none
 
-./bin/idlectl get workloads -A \
+idlectl get workloads -A \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 
-./bin/idlectl logs -f workload/inventory \
+idlectl logs -f workload/inventory \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   -n default
@@ -432,7 +522,16 @@ is supplied:
 Check the installed binary without contacting a cluster:
 
 ```sh
-./bin/idlectl version
+idlectl version
+```
+
+After `join`, `idlectl get host/studio-idle` must show `READY=True`. The
+default WireKube mode must also show `CONNECTED=True`; API-only mode reports
+`CONNECTED=False` or `Unknown` by design. While a projected workload is
+running, inspect its observability-only Node and Pod with:
+
+```sh
+kubectl get nodes,pods -A -l native.idleloom.io/projection=true
 ```
 
 Projected Nodes are unschedulable, carry dedicated `NoSchedule` and
@@ -447,7 +546,7 @@ forwarding.
 Delete a workload with Kubernetes resource syntax:
 
 ```sh
-./bin/idlectl delete workload/inventory \
+idlectl delete workload/inventory \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   -n default
@@ -457,7 +556,7 @@ Delete every workload that references the host, wait for its assignment to be
 removed, and then delete the joined Mac:
 
 ```sh
-./bin/idlectl delete host/studio-idle \
+idlectl delete host/studio-idle \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 ```
@@ -469,6 +568,20 @@ helper requires macOS administrator authorization. Deletion fails closed while
 a workload or assignment still references the host. Before any local or root
 cleanup, the selected cluster namespace must match the enrollment nonce stored
 in local state, which prevents deleting a same-named host from another context.
+
+If host deletion says an assignment is still being cleaned up, inspect it and
+retry after it disappears:
+
+```sh
+kubectl get idleloomworkloadassignments -A
+```
+
+Deleting an Idleloom host never uninstalls the shared WireKube deployment,
+relay Services, mesh, or agents. Those resources may serve other nodes and are
+owned by the cluster operator. A dependency installation that succeeded before
+a later host-enrollment failure is intentionally retained; remove it only with
+WireKube's own ownership-aware lifecycle command after confirming that no
+other peer depends on it.
 
 Joining over an existing local installation is rejected. Delete the current
 host first, then join it again when changing immutable enrollment settings.

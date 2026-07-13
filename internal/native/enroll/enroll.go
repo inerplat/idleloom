@@ -57,6 +57,7 @@ type Result struct {
 	AgentID              string
 	ControllerKubeconfig string
 	AgentKubeconfig      string
+	LinkKubeconfig       string
 	ExpiresAt            time.Time
 	Connectivity         string
 	WireKubePeer         string
@@ -244,8 +245,10 @@ func Run(ctx context.Context, config Config) (Result, error) {
 	var wireKubeState nativewirekube.State
 	if connectivity == nativewirekube.ConnectivityWireKube {
 		wireKubeState, err = nativewirekube.Enroll(ctx, nativewirekube.EnrollConfig{
-			Dynamic: config.Dynamic, HostID: hostID, EnrollmentID: intent.Nonce,
-			StateDirectory: stateDirectory, APIEndpoint: config.REST.Host, WaitTimeout: time.Minute,
+			Dynamic: config.Dynamic, Kubernetes: config.Kubernetes, REST: config.REST,
+			HostID: hostID, EnrollmentID: intent.Nonce, Namespace: namespace,
+			StateDirectory: stateDirectory, APIEndpoint: config.REST.Host,
+			TokenDuration: config.TokenDuration, WaitTimeout: time.Minute,
 		})
 		if err != nil {
 			return Result{}, fmt.Errorf("enroll WireKube connected leaf: %w", err)
@@ -290,7 +293,8 @@ func Run(ctx context.Context, config Config) (Result, error) {
 	}
 	return Result{
 		Namespace: namespace, AgentID: agentID, ControllerKubeconfig: controllerPath,
-		AgentKubeconfig: agentPath, ExpiresAt: expires, Connectivity: connectivity,
+		AgentKubeconfig: agentPath, LinkKubeconfig: wireKubeState.LinkKubeconfig,
+		ExpiresAt: expires, Connectivity: connectivity,
 		WireKubePeer: wireKubeState.PeerName, WireKubeAddress: wireKubeState.AssignedMeshIP,
 		ShellAccess: shellAccess,
 	}, nil

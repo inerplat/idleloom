@@ -34,6 +34,7 @@ type Config struct {
 	LinkMode                   string
 	ControllerKubeconfig       string
 	AgentKubeconfig            string
+	LinkKubeconfig             string
 	ProjectionKubeconfig       string
 	BinaryDirectory            string
 	PublicBinary               []byte
@@ -184,13 +185,19 @@ func Install(ctx context.Context, config Config) (Receipt, error) {
 		if !sameBinary(config.PublicBinary, publicBinaryData) || !sameBinary(config.PublicBinary, companionData) {
 			return Receipt{}, fmt.Errorf("native bundle binaries do not match the running public binary")
 		}
-		stateData, err := json.MarshalIndent(state, "", "  ")
+		rootState := state
+		rootState.LinkKubeconfig = nativewirekube.LinkKubeconfigPath(rootStateDirectory)
+		stateData, err := json.MarshalIndent(rootState, "", "  ")
 		if err != nil {
 			return Receipt{}, err
 		}
 		rootService := service{
 			label: rootLabel, program: rootHelper,
-			arguments:   []string{"--state-dir", rootStateDirectory, "--enable-wirekube-connected-leaf"},
+			arguments: []string{
+				"--state-dir", rootStateDirectory,
+				"--kubeconfig", nativewirekube.LinkKubeconfigPath(rootStateDirectory),
+				"--enable-wirekube-connected-leaf",
+			},
 			environment: []string{"HOME=/var/root", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR=/tmp", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"},
 			stdout:      filepath.Join(rootStateDirectory, "link.log"), stderr: filepath.Join(rootStateDirectory, "link.log"),
 		}
@@ -233,6 +240,15 @@ func Install(ctx context.Context, config Config) (Receipt, error) {
 			_ = Remove(ctx, config.StateDirectory)
 			return Receipt{}, fmt.Errorf("install privileged link state: %w", err)
 		}
+		linkKubeconfig, err := readRegularFile(config.LinkKubeconfig, 1<<20)
+		if err != nil {
+			_ = Remove(ctx, config.StateDirectory)
+			return Receipt{}, fmt.Errorf("read restricted WireKube peer kubeconfig: %w", err)
+		}
+		if err := sudoWriteFile(ctx, nativewirekube.LinkKubeconfigPath(rootStateDirectory), linkKubeconfig, 0o600); err != nil {
+			_ = Remove(ctx, config.StateDirectory)
+			return Receipt{}, fmt.Errorf("install restricted WireKube peer kubeconfig: %w", err)
+		}
 		if err := sudoWriteFile(ctx, rootHelper, config.PublicBinary, 0o755); err != nil {
 			_ = Remove(ctx, config.StateDirectory)
 			return Receipt{}, fmt.Errorf("install privileged link helper: %w", err)
@@ -241,7 +257,7 @@ func Install(ctx context.Context, config Config) (Receipt, error) {
 			_ = Remove(ctx, config.StateDirectory)
 			return Receipt{}, fmt.Errorf("install link LaunchDaemon: %w", err)
 		}
-		_ = sudo(ctx, "launchctl", "bootout", "system/"+rootLabel)
+		_ = sudoQuiet(ctx, "launchctl", "bootout", "system/"+rootLabel)
 		time.Sleep(250 * time.Millisecond)
 		if err := retry(10, 250*time.Millisecond, func() error { return sudo(ctx, "launchctl", "bootstrap", "system", rootPlist) }); err != nil {
 			_ = Remove(ctx, config.StateDirectory)
@@ -431,7 +447,7 @@ func removeRoot(ctx context.Context, stateDirectory string, receipt Receipt) err
 		return nil
 	}
 	var errs []error
-	if err := sudo(ctx, "launchctl", "bootout", "system/"+receipt.RootLabel); err != nil && !isNotLoaded(err) {
+	if err := sudoQuiet(ctx, "launchctl", "bootout", "system/"+receipt.RootLabel); err != nil && !isNotLoaded(err) {
 		errs = append(errs, err)
 	}
 	if err := sudo(ctx, "rm", "-f", rootPlist, rootHelper); err != nil {
@@ -798,30 +814,52 @@ func command(ctx context.Context, name string, arguments ...string) error {
 }
 
 func sudo(ctx context.Context, arguments ...string) error {
-	if len(arguments) == 0 {
-		return fmt.Errorf("sudo command is required")
+	resolved, err := resolveSudoArguments(arguments)
+	if err != nil {
+		return err
 	}
-	if !filepath.IsAbs(arguments[0]) {
-		path, ok := map[string]string{
-			"install":   "/usr/bin/install",
-			"launchctl": "/bin/launchctl",
-			"rm":        "/bin/rm",
-			"chown":     "/usr/sbin/chown",
-			"chmod":     "/bin/chmod",
-			"mv":        "/bin/mv",
-			"rmdir":     "/bin/rmdir",
-		}[arguments[0]]
-		if !ok {
-			return fmt.Errorf("unsupported privileged command %q", arguments[0])
-		}
-		arguments = append([]string{path}, arguments[1:]...)
-	}
-	cmd := exec.CommandContext(ctx, "/usr/bin/sudo", arguments...)
+	cmd := exec.CommandContext(ctx, "/usr/bin/sudo", resolved...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("sudo %s: %w", strings.Join(arguments, " "), err)
+		return fmt.Errorf("sudo %s: %w", strings.Join(resolved, " "), err)
 	}
 	return nil
+}
+
+func sudoQuiet(ctx context.Context, arguments ...string) error {
+	resolved, err := resolveSudoArguments(arguments)
+	if err != nil {
+		return err
+	}
+	cmd := exec.CommandContext(ctx, "/usr/bin/sudo", resolved...)
+	var output bytes.Buffer
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, &output, &output
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("sudo %s: %w: %s", strings.Join(resolved, " "), err, strings.TrimSpace(output.String()))
+	}
+	return nil
+}
+
+func resolveSudoArguments(arguments []string) ([]string, error) {
+	if len(arguments) == 0 {
+		return nil, fmt.Errorf("sudo command is required")
+	}
+	if filepath.IsAbs(arguments[0]) {
+		return arguments, nil
+	}
+	path, ok := map[string]string{
+		"install":   "/usr/bin/install",
+		"launchctl": "/bin/launchctl",
+		"rm":        "/bin/rm",
+		"chown":     "/usr/sbin/chown",
+		"chmod":     "/bin/chmod",
+		"mv":        "/bin/mv",
+		"rmdir":     "/bin/rmdir",
+	}[arguments[0]]
+	if !ok {
+		return nil, fmt.Errorf("unsupported privileged command %q", arguments[0])
+	}
+	return append([]string{path}, arguments[1:]...), nil
 }
 
 func copyFile(source, destination string, mode os.FileMode) error {

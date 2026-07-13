@@ -16,6 +16,7 @@ import (
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
 	"github.com/inerplat/idleloom/internal/native/enroll"
 	nativekube "github.com/inerplat/idleloom/internal/native/kube"
+	nativeprojection "github.com/inerplat/idleloom/internal/native/projection"
 	nativewirekube "github.com/inerplat/idleloom/internal/native/wirekube"
 	"github.com/inerplat/idleloom/internal/native/wirekubecli"
 	"github.com/spf13/pflag"
@@ -24,7 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -231,6 +234,63 @@ func TestLocalLogsRejectsFollowBeforeClusterAccess(t *testing.T) {
 	}
 }
 
+func TestWaitForProjectedLogEndpointUsesReadyProjection(t *testing.T) {
+	uid := types.UID("workload-uid")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "projected", Namespace: "default",
+			Labels: map[string]string{nativeprojection.LabelWorkloadUID: string(uid)},
+			Annotations: map[string]string{
+				nativeprojection.AnnotationLogs: "supported", nativeprojection.AnnotationKubeletAPI: "logs-only",
+			},
+		},
+		Spec: corev1.PodSpec{NodeName: "projected-node"},
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "projected-node"},
+		Status: corev1.NodeStatus{
+			Addresses:       []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "198.18.0.10"}},
+			DaemonEndpoints: corev1.NodeDaemonEndpoints{KubeletEndpoint: corev1.DaemonEndpoint{Port: 10250}},
+		},
+	}
+	client := kubernetesfake.NewSimpleClientset(pod, node)
+	name, err := waitForProjectedLogEndpoint(context.Background(), client, "default", "job", uid, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != pod.Name {
+		t.Fatalf("projected Pod = %q, want %q", name, pod.Name)
+	}
+}
+
+func TestWaitForProjectedLogEndpointReportsConvergenceTimeout(t *testing.T) {
+	uid := types.UID("workload-uid")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "projected", Namespace: "default",
+			Labels:      map[string]string{nativeprojection.LabelWorkloadUID: string(uid)},
+			Annotations: map[string]string{nativeprojection.AnnotationLogs: "unsupported"},
+		},
+		Spec: corev1.PodSpec{NodeName: "projected-node"},
+	}
+	client := kubernetesfake.NewSimpleClientset(pod)
+	_, err := waitForProjectedLogEndpoint(context.Background(), client, "default", "job", uid, 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "projection log probe has not succeeded") {
+		t.Fatalf("wait error = %v", err)
+	}
+}
+
+func TestPreferredNodeAddressUsesKubernetesPreferenceOrder(t *testing.T) {
+	addresses := []corev1.NodeAddress{
+		{Type: corev1.NodeHostName, Address: "node.example"},
+		{Type: corev1.NodeExternalIP, Address: "203.0.113.10"},
+		{Type: corev1.NodeInternalIP, Address: "198.18.0.10"},
+	}
+	if got := preferredNodeAddress(addresses); got != "198.18.0.10" {
+		t.Fatalf("preferred address = %q", got)
+	}
+}
+
 func TestJoinRejectsEmptyNormalizedHostBeforeClusterAccess(t *testing.T) {
 	err := runJoin(context.Background(), []string{"___"})
 	if err == nil || !strings.Contains(err.Error(), "letter or digit") {
@@ -252,7 +312,9 @@ func TestJoinRejectsExistingLocalInstallationBeforeClusterAccess(t *testing.T) {
 func TestMissingWireKubeRequiresExplicitNonInteractiveDependencyInstall(t *testing.T) {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+		nativewirekube.ServicesGVR:      "ServiceList",
 	})
 	called := false
 	original := newWireKubeLifecycle
@@ -280,13 +342,18 @@ func TestExistingCompatibleWireKubeSkipsDependencyResolver(t *testing.T) {
 		"metadata":   map[string]any{"name": "default"},
 		"spec": map[string]any{
 			"meshCIDR": "172.31.240.0/20",
-			"relay":    map[string]any{"mode": "auto", "provider": "managed"},
+			"relay": map[string]any{
+				"mode": "auto", "provider": "managed",
+				"managed": map[string]any{"transport": "wss", "controlEndpoint": "wss://relay.example.test/relay"},
+			},
 		},
 		"status": map[string]any{"readyPeers": int64(1)},
 	}}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+		nativewirekube.ServicesGVR:      "ServiceList",
 	})
 	if err := client.Tracker().Create(nativewirekube.MeshesGVR, mesh, ""); err != nil {
 		t.Fatal(err)
@@ -317,13 +384,15 @@ func TestExistingCompatibleWireKubeSkipsDependencyResolver(t *testing.T) {
 func TestMissingWireKubePlansInstallsAndContinuesJoin(t *testing.T) {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+		nativewirekube.ServicesGVR:      "ServiceList",
 	})
 	lifecycle := &fakeWireKubeLifecycle{plan: wirekubecli.Plan{
 		Context: "cluster", WireKubeVersion: wirekubecli.CompatibleVersion,
 		Image: "example.test/wirekube@sha256:" + strings.Repeat("a", 64),
-		Relay: "load-balancer", RelayUDP: true, MeshCIDR: "100.96.0.0/11", NodeAddresses: "internal-ip",
-		Impact: []string{"one public TCP LoadBalancer", "one separate public UDP LoadBalancer"},
+		Relay: "load-balancer", RelayUDP: false, MeshCIDR: "100.96.0.0/11", NodeAddresses: "internal-ip",
+		Impact: []string{"one public TCP LoadBalancer"},
 	}}
 	lifecycle.plan.Detection.KubernetesVersion = "v1.35.3"
 	lifecycle.plan.Detection.CNI = "cilium"
@@ -342,7 +411,7 @@ func TestMissingWireKubePlansInstallsAndContinuesJoin(t *testing.T) {
 	if lifecycle.planCalls != 1 || lifecycle.installCalls != 1 {
 		t.Fatalf("plan calls=%d install calls=%d", lifecycle.planCalls, lifecycle.installCalls)
 	}
-	for _, text := range []string{"Idleloom connected-host plan", "one separate public UDP LoadBalancer", "continuing host enrollment"} {
+	for _, text := range []string{"Idleloom connected-host plan", "one public TCP LoadBalancer", "continuing host enrollment"} {
 		if !strings.Contains(output.String(), text) {
 			t.Fatalf("output does not contain %q: %s", text, output.String())
 		}
@@ -498,5 +567,22 @@ func TestSecureClusterConfigPreservesVerifiedTLS(t *testing.T) {
 	}
 	if secured != config {
 		t.Fatal("verified Kubernetes config was unnecessarily copied")
+	}
+}
+
+func TestAssignedMeshIPv4AcceptsAddressAndHostPrefix(t *testing.T) {
+	for _, value := range []string{"198.18.0.10", "198.18.0.10/32"} {
+		got, err := assignedMeshIPv4(value)
+		if err != nil {
+			t.Fatalf("assignedMeshIPv4(%q): %v", value, err)
+		}
+		if got != "198.18.0.10" {
+			t.Fatalf("assignedMeshIPv4(%q) = %q", value, got)
+		}
+	}
+	for _, value := range []string{"", "not-an-ip", "198.18.0.0/24", "2001:db8::1/128"} {
+		if _, err := assignedMeshIPv4(value); err == nil {
+			t.Fatalf("assignedMeshIPv4(%q) succeeded", value)
+		}
 	}
 }

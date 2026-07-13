@@ -649,7 +649,7 @@ func normalizedProjectionSpec(spec corev1.PodSpec) corev1.PodSpec {
 	}
 	filtered := copy.Tolerations[:0]
 	for _, toleration := range copy.Tolerations {
-		if isDefaultNodeToleration(toleration) {
+		if isDefaultNodeToleration(toleration) || isDefaultExtendedResourceToleration(toleration, copy) {
 			continue
 		}
 		filtered = append(filtered, toleration)
@@ -663,6 +663,22 @@ func isDefaultNodeToleration(toleration corev1.Toleration) bool {
 		return false
 	}
 	return toleration.Key == corev1.TaintNodeNotReady || toleration.Key == corev1.TaintNodeUnreachable
+}
+
+func isDefaultExtendedResourceToleration(toleration corev1.Toleration, spec corev1.PodSpec) bool {
+	if toleration.Operator != corev1.TolerationOpExists || toleration.Effect != corev1.TaintEffectNoSchedule || toleration.Value != "" || toleration.TolerationSeconds != nil {
+		return false
+	}
+	resourceName := corev1.ResourceName(toleration.Key)
+	for _, container := range append(spec.InitContainers, spec.Containers...) {
+		if _, ok := container.Resources.Requests[resourceName]; ok {
+			return true
+		}
+		if _, ok := container.Resources.Limits[resourceName]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func podConditions(state projectionState, now metav1.Time, existing []corev1.PodCondition) []corev1.PodCondition {

@@ -14,6 +14,37 @@ rendered YAML is the durable interface: it can be reviewed, stored, changed
 under source control, and applied with `kubectl` without a separate Idleloom
 run service.
 
+Install `kubectl` and define the kubeconfig, context, and namespace used for
+enrollment. The helper keeps selection explicit without changing the
+kubeconfig's persistent `current-context`:
+
+```sh
+brew install kubectl
+export IDLELOOM_KUBECONFIG="${HOME}/.kube/config"
+export IDLELOOM_CONTEXT=my-cluster
+export IDLELOOM_NAMESPACE=default
+
+kube() {
+  kubectl \
+    --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+    --context "${IDLELOOM_CONTEXT}" \
+    "$@"
+}
+
+idlectl version
+idlectl recipe list
+kube cluster-info
+```
+
+The examples render `namespace: default`, matching `IDLELOOM_NAMESPACE` above.
+To use another namespace, change the variable and pass the same `namespace`
+value through each recipe's `--values` file; edit the standalone client Pod
+manifest to match.
+
+If `idlectl recipe list` reports `unknown command "recipe"`, the installed
+release predates this guide. Build the current repository checkout and put its
+`bin` directory first on `PATH`, as described in the main README.
+
 ## Discover recipes
 
 List the immutable recipe versions included in the current `idlectl` binary:
@@ -63,8 +94,8 @@ idlectl recipe render train/mlx-linear-regression@v1 \
   --name native-train \
   -o yaml > native-train.yaml
 
-kubectl apply --dry-run=client -f native-train.yaml
-kubectl apply -f native-train.yaml
+kube -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f native-train.yaml
+kube -n "${IDLELOOM_NAMESPACE}" apply -f native-train.yaml
 ```
 
 The output is an `ai.idleloom.io/v1alpha1` `IdleloomWorkload`, so it follows
@@ -74,9 +105,18 @@ written by hand.
 Observe and remove the run with the Native resource commands:
 
 ```sh
-idlectl get workload/native-train -n default
-idlectl logs -f workload/native-train -n default
-idlectl delete workload/native-train -n default
+idlectl get workload/native-train \
+  --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+  --context "${IDLELOOM_CONTEXT}" \
+  -n "${IDLELOOM_NAMESPACE}"
+idlectl logs -f workload/native-train \
+  --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+  --context "${IDLELOOM_CONTEXT}" \
+  -n "${IDLELOOM_NAMESPACE}"
+idlectl delete workload/native-train \
+  --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+  --context "${IDLELOOM_CONTEXT}" \
+  -n "${IDLELOOM_NAMESPACE}"
 ```
 
 For an API-only host, use `idlectl logs --local` on the joined Mac after the
@@ -105,18 +145,18 @@ idlectl recipe render train/container-linear-regression@v1 \
   --name worker-train \
   -o yaml > worker-train.yaml
 
-kubectl apply --dry-run=client -f worker-train.yaml
-kubectl apply -f worker-train.yaml
+kube -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-train.yaml
+kube -n "${IDLELOOM_NAMESPACE}" apply -f worker-train.yaml
 ```
 
 Because this backend is a normal Job, standard Kubernetes operations retain
 their usual meaning:
 
 ```sh
-kubectl wait --for=condition=complete job/worker-train --timeout=2m
-kubectl logs job/worker-train
-kubectl describe job/worker-train
-kubectl delete job/worker-train
+kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=complete job/worker-train --timeout=2m
+kube -n "${IDLELOOM_NAMESPACE}" logs job/worker-train
+kube -n "${IDLELOOM_NAMESPACE}" describe job/worker-train
+kube -n "${IDLELOOM_NAMESPACE}" delete job/worker-train
 ```
 
 The same contract supports Pod networking, `ConfigMap`, `Secret`, PVC and CSI
@@ -136,9 +176,23 @@ idlectl recipe render infer/mlx-batch@v1 \
   --name native-infer \
   -o yaml > native-infer.yaml
 
-kubectl apply -f native-infer.yaml
-idlectl get workload/native-infer -n default
-idlectl logs -f workload/native-infer -n default
+kube -n "${IDLELOOM_NAMESPACE}" apply -f native-infer.yaml
+idlectl get workload/native-infer \
+  --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+  --context "${IDLELOOM_CONTEXT}" \
+  -n "${IDLELOOM_NAMESPACE}"
+idlectl logs -f workload/native-infer \
+  --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+  --context "${IDLELOOM_CONTEXT}" \
+  -n "${IDLELOOM_NAMESPACE}"
+```
+
+Wait for a terminal success state when running this in automation:
+
+```sh
+kube -n "${IDLELOOM_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded \
+  idleloomworkload/native-infer \
+  --timeout=20m
 ```
 
 The first execution requires outbound HTTPS access from the Mac and downloads
@@ -148,6 +202,23 @@ and reports progress through the normal workload log.
 
 Prompts are stored in the Kubernetes API as part of the immutable workload.
 Do not put credentials or other secrets in a prompt.
+
+A successful log ends with one structured result record. The generated text
+varies, but the envelope is stable:
+
+```json
+{"type":"result","text":"...","elapsedMillis":1234}
+```
+
+Remove the workload after inspecting the result:
+
+```sh
+idlectl delete workload/native-infer \
+  --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+  --context "${IDLELOOM_CONTEXT}" \
+  -n "${IDLELOOM_NAMESPACE}"
+rm -f native-infer.yaml
+```
 
 Native API and catalog installation currently happens during `idlectl join`.
 A host joined by an older binary must be deleted and joined again with the
@@ -166,15 +237,17 @@ idlectl recipe render infer/llama-vulkan@v1 \
   --name worker-infer \
   -o yaml > worker-infer.yaml
 
-kubectl apply --dry-run=client -f worker-infer.yaml
-kubectl apply -f worker-infer.yaml
-kubectl wait --for=condition=complete job/worker-infer --timeout=30m
-kubectl logs job/worker-infer
-kubectl delete -f worker-infer.yaml
+kube -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-infer.yaml
+kube -n "${IDLELOOM_NAMESPACE}" apply -f worker-infer.yaml
+kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=complete job/worker-infer --timeout=30m
+kube -n "${IDLELOOM_NAMESPACE}" logs job/worker-infer
+kube -n "${IDLELOOM_NAMESPACE}" delete -f worker-infer.yaml
 ```
 
 The target cluster must already have the Idleloom Apple Vulkan DRA driver and
-an `apple-vulkan` `DeviceClass`. Override `modelURL`, `modelSHA256`,
+an `apple-vulkan` `DeviceClass`. Follow the registry push, DaemonSet rollout,
+and `ResourceSlice` verification steps in the main README before this recipe.
+Override `modelURL`, `modelSHA256`,
 `modelStorage`, and `memory` together when using a larger operator-approved
 model; `deviceClass` selects another DRA configuration. The inference image
 currently runs as its default root user because the Worker CDI path does not
@@ -196,37 +269,68 @@ idlectl recipe render serve/mlx-qwen@v1 \
   --name native-serve \
   -o yaml > native-serve.yaml
 
-kubectl apply -f native-serve.yaml
-kubectl wait --for=condition=Ready \
+kube -n "${IDLELOOM_NAMESPACE}" apply -f native-serve.yaml
+kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
   idleloomworkload/native-serve --timeout=15m
-kubectl get endpointslice/native-serve
+kube -n "${IDLELOOM_NAMESPACE}" get endpointslice/native-serve
 ```
 
 The controller generates `Secret/native-serve-auth` in the workload namespace
 and copies the same API key into a fixed, agent-readable Secret in the selected
 host namespace. Secret values never enter the Workload or Assignment CRs.
-Start a local Kubernetes API proxy:
+The client must run on a normal schedulable Linux node that participates in the
+WireKube mesh. The Native projection Node is deliberately unschedulable and
+cannot run this Pod.
 
-```sh
-kubectl proxy --port=8001
+Create a one-shot in-cluster client that mounts the generated Secret and calls
+the normal ClusterIP Service:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: native-serve-client
+  namespace: default
+spec:
+  restartPolicy: Never
+  containers:
+    - name: curl
+      image: curlimages/curl@sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          API_KEY="$(cat /var/run/secrets/idleloom/api-key)"
+          curl --fail-with-body \
+            http://native-serve.default.svc:8000/v1/chat/completions \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"qwen3-5-0-8b","messages":[{"role":"user","content":"Why is idle compute useful?"}],"max_tokens":64}'
+      volumeMounts:
+        - name: auth
+          mountPath: /var/run/secrets/idleloom
+          readOnly: true
+  volumes:
+    - name: auth
+      secret:
+        secretName: native-serve-auth
 ```
 
-Read the client key and send a smoke request from another terminal through the
-standard Service proxy:
+Apply the client manifest, wait for completion, and read the response:
 
 ```sh
-API_KEY="$(kubectl get secret native-serve-auth \
-  -o jsonpath='{.data.api-key}' | openssl base64 -d -A)"
-
-curl --fail-with-body \
-  http://127.0.0.1:8001/api/v1/namespaces/default/services/native-serve:http/proxy/v1/chat/completions \
-  -H "X-Idleloom-API-Key: ${API_KEY}" \
-  -H 'Content-Type: application/json' \
-  -d '{"model":"qwen3-5-0-8b","messages":[{"role":"user","content":"Why is idle compute useful?"}],"max_tokens":64}'
+kube -n "${IDLELOOM_NAMESPACE}" apply -f native-serve-client.yaml
+kube -n "${IDLELOOM_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded \
+  pod/native-serve-client \
+  --timeout=5m
+kube -n "${IDLELOOM_NAMESPACE}" logs pod/native-serve-client
 ```
 
-In-cluster clients use `http://native-serve.default.svc:8000` with the normal
-`Authorization: Bearer API_KEY` header. The current adapter implements
+The Kubernetes API Service proxy accepts only Pod-backed endpoints, while this
+alpha path publishes the Mac through a WireKube `EndpointSlice`; `kubectl
+proxy` therefore cannot expose this Service. The logs-only projection also
+does not implement `kubectl port-forward` yet.
+
+The current adapter implements
 non-streaming chat completions, `GET /v1/models`, and a 512-token response
 limit. Traffic to the Mac is encrypted by WireGuard and authenticated with the
 generated API key; this slice does not add application-layer TLS or expose an
@@ -237,7 +341,9 @@ Delete the manifest to stop the process and remove its EndpointSlice and
 managed Secrets:
 
 ```sh
-kubectl delete -f native-serve.yaml
+kube -n "${IDLELOOM_NAMESPACE}" delete pod/native-serve-client --ignore-not-found
+kube -n "${IDLELOOM_NAMESPACE}" delete -f native-serve.yaml
+rm -f native-serve.yaml native-serve-client.yaml
 ```
 
 ## Linux worker Vulkan serving
@@ -245,17 +351,20 @@ kubectl delete -f native-serve.yaml
 The serving recipe renders a `resource.k8s.io/v1` `ResourceClaimTemplate`, an
 `apps/v1` `Deployment`, and a ClusterIP `Service`. It uses one replica with a
 `Recreate` strategy so two Pods cannot contend for the single DRA device during
-a rollout. The llama.cpp OpenAI-compatible API requires a key from an existing
-Kubernetes Secret; the key is never placed in recipe values or generated YAML.
+a rollout. Complete the same registry-published DRA driver and `apple-vulkan`
+`DeviceClass` setup required by Worker batch inference first. The llama.cpp
+OpenAI-compatible API requires a key from an existing Kubernetes Secret; the
+key is never placed in recipe values or generated YAML.
 
 Create the Secret and a values file:
 
 ```sh
-openssl rand -hex 32 | kubectl create secret generic worker-serve-auth \
+openssl rand -hex 32 | kube -n "${IDLELOOM_NAMESPACE}" create secret generic worker-serve-auth \
   --from-file=api-key=/dev/stdin
 ```
 
 ```yaml
+namespace: default
 apiKeySecret: worker-serve-auth
 ```
 
@@ -267,21 +376,21 @@ idlectl recipe render serve/llama-vulkan@v1 \
   --values worker-serve-values.yaml \
   -o yaml > worker-serve.yaml
 
-kubectl apply --dry-run=client -f worker-serve.yaml
-kubectl apply -f worker-serve.yaml
-kubectl rollout status deployment/worker-serve --timeout=30m
+kube -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-serve.yaml
+kube -n "${IDLELOOM_NAMESPACE}" apply -f worker-serve.yaml
+kube -n "${IDLELOOM_NAMESPACE}" rollout status deployment/worker-serve --timeout=30m
 ```
 
 Forward the cluster-private Service in one terminal:
 
 ```sh
-kubectl port-forward service/worker-serve 8080:8080
+kube -n "${IDLELOOM_NAMESPACE}" port-forward service/worker-serve 8080:8080
 ```
 
 Read the key and call the endpoint from another terminal:
 
 ```sh
-API_KEY="$(kubectl get secret worker-serve-auth \
+API_KEY="$(kube -n "${IDLELOOM_NAMESPACE}" get secret worker-serve-auth \
   -o jsonpath='{.data.api-key}' | openssl base64 -d -A)"
 
 curl --fail-with-body http://127.0.0.1:8080/v1/chat/completions \
@@ -297,8 +406,8 @@ Service is cluster-private and does not configure Ingress, external TLS, or
 tenant authorization. Remove the generated resources and Secret explicitly:
 
 ```sh
-kubectl delete -f worker-serve.yaml
-kubectl delete secret worker-serve-auth
+kube -n "${IDLELOOM_NAMESPACE}" delete -f worker-serve.yaml
+kube -n "${IDLELOOM_NAMESPACE}" delete secret worker-serve-auth
 ```
 
 ## Manifest contract
@@ -327,7 +436,7 @@ deterministic defaults, pinned assets, and consistent metadata.
 Query runs across both backends with the shared labels:
 
 ```sh
-kubectl get idleloomworkloads,jobs,deployments \
+kube -A get idleloomworkloads,jobs,deployments \
   -l app.kubernetes.io/managed-by=idleloom
 ```
 

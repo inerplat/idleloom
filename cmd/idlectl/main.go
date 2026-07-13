@@ -39,6 +39,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -275,14 +276,19 @@ func runJoin(ctx context.Context, args []string) error {
 		HostID: hostID, StateDirectory: *stateDirectory, RuntimeRoot: *runtimeRoot,
 		Namespace: result.Namespace, AgentID: result.AgentID, LinkMode: result.Connectivity,
 		ControllerKubeconfig: result.ControllerKubeconfig, AgentKubeconfig: result.AgentKubeconfig,
-		ProjectionKubeconfig: projectionKubeconfig, PublicBinary: publicBinary,
+		LinkKubeconfig: result.LinkKubeconfig, ProjectionKubeconfig: projectionKubeconfig, PublicBinary: publicBinary,
 		KubeletClientCommonNames: *kubeletClientCNs, KubeletClientOrganizations: *kubeletClientOrganizations,
 	}); err != nil {
 		rollbackErr := rollbackJoin(context.Background(), dynamicClient, clientset, *stateDirectory, result.Namespace)
 		return errors.Join(fmt.Errorf("install native services: %w", err), rollbackErr)
 	}
+	// Exec-plugin credentials may expire while sudo waits for user input.
+	readyClient, _, err := loadClusterClients(ctx, *kubeconfig, *kubeContext, *stateDirectory, *allowTOFU, *resetTrust)
+	if err != nil {
+		return fmt.Errorf("refresh cluster credentials after installing native services: %w", err)
+	}
 	fmt.Fprintln(os.Stderr, "waiting for host readiness")
-	if err := waitForHostReady(ctx, dynamicClient, result.Namespace, result.Connectivity == nativewirekube.ConnectivityWireKube, 2*time.Minute); err != nil {
+	if err := waitForHostReady(ctx, readyClient, result.Namespace, result.Connectivity == nativewirekube.ConnectivityWireKube, 2*time.Minute); err != nil {
 		return fmt.Errorf("wait for joined host: %w", err)
 	}
 	fmt.Printf("host/%s joined\n", hostID)
@@ -486,6 +492,7 @@ func parseShellAccess(value string) (string, error) {
 func runLink(ctx context.Context, args []string) (returnErr error) {
 	flags := flag.NewFlagSet("link", flag.ContinueOnError)
 	stateDirectory := flags.String("state-dir", "", "enrolled private state directory")
+	kubeconfig := flags.String("kubeconfig", "", "restricted WireKube peer kubeconfig")
 	interval := flags.Duration("interval", 5*time.Second, "runtime status update interval")
 	enabled := flags.Bool("enable-wirekube-connected-leaf", false, "run the development-only privileged WireKube leaf tunnel")
 	if err := flags.Parse(args); err != nil {
@@ -507,6 +514,50 @@ func runLink(ctx context.Context, args []string) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	if state.PeerNamespace == "" || state.PeerServiceAccount == "" || state.LinkKubeconfig == "" {
+		return fmt.Errorf("legacy WireKube external-peer enrollment is not supported by this link service; delete and rejoin the host")
+	}
+	if *kubeconfig == "" {
+		return fmt.Errorf("--kubeconfig is required for the WireKube peer link")
+	}
+	clusterConfig, err := loadConfig(*kubeconfig, "")
+	if err != nil {
+		return err
+	}
+	clusterConfig, err = credential.Configure(clusterConfig, credential.Options{
+		Namespace: state.PeerNamespace, ServiceAccount: state.PeerServiceAccount,
+		KubeconfigPath: *kubeconfig, TokenDuration: 8 * time.Hour,
+		Logf: func(format string, values ...any) { fmt.Fprintf(os.Stderr, "link: "+format+"\n", values...) },
+	})
+	if err != nil {
+		return fmt.Errorf("configure WireKube peer credential: %w", err)
+	}
+	dynamicClient, err := dynamic.NewForConfig(clusterConfig)
+	if err != nil {
+		return err
+	}
+	kubernetesClient, err := kubernetes.NewForConfig(clusterConfig)
+	if err != nil {
+		return err
+	}
+	relayTokenExpiry := time.Time{}
+	refreshRelayToken := func(force bool) error {
+		if state.RelayTransport != "wss" {
+			return nil
+		}
+		if !force && time.Now().Before(relayTokenExpiry.Add(-15*time.Minute)) {
+			return nil
+		}
+		expires, err := nativewirekube.WriteRelayToken(ctx, kubernetesClient, state, *stateDirectory, time.Hour)
+		if err != nil {
+			return err
+		}
+		relayTokenExpiry = expires
+		return nil
+	}
+	if err := refreshRelayToken(true); err != nil {
+		return err
+	}
 	runtimeDirectory, err := nativewirekube.DefaultRuntimeDirectory(state)
 	if err != nil {
 		return err
@@ -526,16 +577,36 @@ func runLink(ctx context.Context, args []string) (returnErr error) {
 	defer func() {
 		returnErr = errors.Join(returnErr, nativewirekube.RemoveRuntimeStatus(runtimeDirectory, lock.InstanceID))
 	}()
-	tunnel, err := nativewirekube.StartTunnel(ctx, state, func(format string, values ...any) {
+	tunnel, err := nativewirekube.StartTunnel(ctx, state, nativewirekube.TunnelConfig{
+		RelayTokenFile: nativewirekube.RelayTokenPath(*stateDirectory),
+	}, func(format string, values ...any) {
 		fmt.Fprintf(os.Stderr, "link: "+format+"\n", values...)
 	})
 	if err != nil {
 		return err
 	}
 	defer func() { returnErr = errors.Join(returnErr, tunnel.Close()) }()
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := nativewirekube.UpdatePeerStatus(cleanupCtx, dynamicClient, state, nativewirekube.TunnelSnapshot{}, false); err != nil {
+			fmt.Fprintf(os.Stderr, "link: clear peer status: %v\n", err)
+		}
+	}()
 	writeStatus := func() error {
+		var statusErr error
+		if err := refreshRelayToken(false); err != nil {
+			if relayTokenExpiry.IsZero() || !time.Now().Before(relayTokenExpiry) {
+				statusErr = errors.Join(statusErr, err)
+			} else {
+				fmt.Fprintf(os.Stderr, "link: relay token refresh deferred: %v\n", err)
+			}
+		}
+		if err := tunnel.SyncPeers(ctx, dynamicClient); err != nil {
+			fmt.Fprintf(os.Stderr, "link: peer synchronization deferred: %v\n", err)
+		}
 		if err := tunnel.Validate(ctx); err != nil {
-			return err
+			statusErr = errors.Join(statusErr, err)
 		}
 		snapshot, snapshotErr := tunnel.Snapshot()
 		status := nativewirekube.RuntimeStatus{
@@ -544,10 +615,17 @@ func runLink(ctx context.Context, args []string) (returnErr error) {
 			LastHandshakeTime: snapshot.LastHandshake, BytesReceived: snapshot.BytesReceived,
 			BytesSent: snapshot.BytesSent, ObservedAt: time.Now().UTC(),
 		}
-		if snapshotErr != nil {
-			status.Error = snapshotErr.Error()
+		statusErr = errors.Join(statusErr, snapshotErr)
+		if statusErr != nil {
+			status.Error = statusErr.Error()
 		}
-		return nativewirekube.WriteRuntimeStatus(runtimeDirectory, status)
+		if err := nativewirekube.WriteRuntimeStatus(runtimeDirectory, status); err != nil {
+			return err
+		}
+		if err := nativewirekube.UpdatePeerStatus(ctx, dynamicClient, state, snapshot, statusErr == nil); err != nil {
+			fmt.Fprintf(os.Stderr, "link: %v\n", err)
+		}
+		return nil
 	}
 	if err := writeStatus(); err != nil {
 		return err
@@ -595,7 +673,7 @@ func runController(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := verifyRestrictedIdentity(ctx, clientset, "system:serviceaccount:idleloom-system:idleloom-controller", "idleloom-system"); err != nil {
+	if err := verifyIdentity(ctx, clientset, "system:serviceaccount:idleloom-system:idleloom-controller"); err != nil {
 		return err
 	}
 	reconciler := &nativecontroller.Reconciler{Dynamic: dynamicClient, Kubernetes: clientset, Coordination: clientset.CoordinationV1()}
@@ -782,10 +860,11 @@ func runAgent(ctx context.Context, args []string) error {
 		connectivityStatus = func() (nativev1alpha1.HostConnectivityStatus, error) {
 			return nativewirekube.ReadRuntimeStatus(runtimeDirectory, state, time.Now().UTC(), 15*time.Second)
 		}
-		if ip := net.ParseIP(state.AssignedMeshIP); ip == nil || ip.To4() == nil {
-			return fmt.Errorf("WireKube connected leaf has no valid assigned IPv4 address")
+		meshIP, err := assignedMeshIPv4(state.AssignedMeshIP)
+		if err != nil {
+			return err
 		}
-		serveListenAddress = net.JoinHostPort(state.AssignedMeshIP, fmt.Sprint(nativev1alpha1.NativeServingPort))
+		serveListenAddress = net.JoinHostPort(meshIP, fmt.Sprint(nativev1alpha1.NativeServingPort))
 		clientCA, err := os.ReadFile(kubeletbridge.ClientCAPath(*stateDirectory))
 		if err != nil {
 			return fmt.Errorf("read enrolled Kubernetes client CA: %w", err)
@@ -819,6 +898,22 @@ func splitNonEmpty(value string) []string {
 		}
 	}
 	return values
+}
+
+func assignedMeshIPv4(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if ip := net.ParseIP(value); ip != nil && ip.To4() != nil {
+		return ip.String(), nil
+	}
+	ip, network, err := net.ParseCIDR(value)
+	if err != nil || ip.To4() == nil {
+		return "", fmt.Errorf("WireKube connected leaf has no valid assigned IPv4 address")
+	}
+	ones, bits := network.Mask.Size()
+	if bits != 32 || ones != 32 {
+		return "", fmt.Errorf("WireKube connected leaf must have a single assigned IPv4 address")
+	}
+	return ip.String(), nil
 }
 
 func runWorkload(ctx context.Context, args []string) error {
@@ -1106,15 +1201,9 @@ func runLogs(ctx context.Context, args []string) error {
 		}
 		return nil
 	}
-	pods, err := clientset.CoreV1().Pods(resolvedNamespace).List(ctx, metav1.ListOptions{LabelSelector: nativeprojection.LabelWorkloadUID + "=" + string(workload.UID)})
+	podName, err := waitForProjectedLogEndpoint(ctx, clientset, resolvedNamespace, workload.Name, workload.UID, 30*time.Second)
 	if err != nil {
 		return err
-	}
-	if len(pods.Items) == 0 {
-		return fmt.Errorf("projected Pod for workload %s/%s is not ready", resolvedNamespace, workload.Name)
-	}
-	if len(pods.Items) != 1 {
-		return fmt.Errorf("workload %s/%s has %d projected Pods", resolvedNamespace, workload.Name, len(pods.Items))
 	}
 	options := &corev1.PodLogOptions{Container: "native-metal", Follow: *follow, Timestamps: *timestamps}
 	if *tail >= 0 {
@@ -1124,13 +1213,76 @@ func runLogs(ctx context.Context, args []string) error {
 		seconds := int64(*since / time.Second)
 		options.SinceSeconds = &seconds
 	}
-	stream, err := clientset.CoreV1().Pods(resolvedNamespace).GetLogs(pods.Items[0].Name, options).Stream(ctx)
+	stream, err := clientset.CoreV1().Pods(resolvedNamespace).GetLogs(podName, options).Stream(ctx)
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
 	_, err = io.Copy(os.Stdout, stream)
 	return err
+}
+
+func waitForProjectedLogEndpoint(ctx context.Context, client kubernetes.Interface, namespace, workloadName string, workloadUID types.UID, timeout time.Duration) (string, error) {
+	if timeout <= 0 {
+		return "", fmt.Errorf("projected log endpoint wait must be positive")
+	}
+	selector := nativeprojection.LabelWorkloadUID + "=" + string(workloadUID)
+	lastState := "projected Pod has not been created"
+	var podName string
+	err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, timeout, true, func(ctx context.Context) (bool, error) {
+		pods, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			return false, err
+		}
+		if len(pods.Items) > 1 {
+			return false, fmt.Errorf("workload %s/%s has %d projected Pods", namespace, workloadName, len(pods.Items))
+		}
+		if len(pods.Items) == 0 {
+			lastState = "projected Pod has not been created"
+			return false, nil
+		}
+		pod := &pods.Items[0]
+		podName = pod.Name
+		if pod.Annotations[nativeprojection.AnnotationLogs] != "supported" || pod.Annotations[nativeprojection.AnnotationKubeletAPI] != "logs-only" {
+			lastState = "projection log probe has not succeeded"
+			return false, nil
+		}
+		if pod.Spec.NodeName == "" {
+			lastState = "projected Pod has no Node"
+			return false, nil
+		}
+		node, err := client.CoreV1().Nodes().Get(ctx, pod.Spec.NodeName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				lastState = "projected Node has not been created"
+				return false, nil
+			}
+			return false, err
+		}
+		if node.Status.DaemonEndpoints.KubeletEndpoint.Port == 0 || preferredNodeAddress(node.Status.Addresses) == "" {
+			lastState = "projected Node log address has not converged"
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return "", fmt.Errorf("projected log endpoint for workload %s/%s did not become ready within %s: %s", namespace, workloadName, timeout, lastState)
+		}
+		return "", err
+	}
+	return podName, nil
+}
+
+func preferredNodeAddress(addresses []corev1.NodeAddress) string {
+	for _, addressType := range []corev1.NodeAddressType{corev1.NodeInternalIP, corev1.NodeExternalIP, corev1.NodeHostName} {
+		for _, address := range addresses {
+			if address.Type == addressType && strings.TrimSpace(address.Address) != "" {
+				return address.Address
+			}
+		}
+	}
+	return ""
 }
 
 func runDelete(ctx context.Context, args []string) error {
@@ -1203,23 +1355,11 @@ func deleteHost(ctx context.Context, kubeconfig, kubeContext, stateDirectory, re
 	if enroll.NormalizeHostID(requestedHostID) != stateHostID {
 		return fmt.Errorf("state belongs to host %q, not %q", stateHostID, requestedHostID)
 	}
-	config, err := loadConfig(kubeconfig, kubeContext)
-	if err != nil {
-		return err
-	}
-	config, err = secureClusterConfig(ctx, config, stateDirectory, allowTOFU, resetTrust)
-	if err != nil {
-		return err
-	}
-	dynamicClient, err := dynamic.NewForConfig(config)
+	dynamicClient, clientset, err := loadClusterClients(ctx, kubeconfig, kubeContext, stateDirectory, allowTOFU, resetTrust)
 	if err != nil {
 		return err
 	}
 	namespace := "idleloom-host-" + stateHostID
-	clientset, err := kubernetes.NewForConfig(config)
-	if err != nil {
-		return err
-	}
 	namespaceObject, err := clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("verify host namespace in selected cluster: %w", err)
@@ -1232,6 +1372,21 @@ func deleteHost(ctx context.Context, kubeconfig, kubeContext, stateDirectory, re
 	}
 	if err := serviceinstall.Remove(ctx, stateDirectory); err != nil {
 		return fmt.Errorf("remove native services: %w", err)
+	}
+	// Exec-plugin credentials may expire while sudo waits for user input.
+	dynamicClient, clientset, err = loadClusterClients(ctx, kubeconfig, kubeContext, stateDirectory, allowTOFU, resetTrust)
+	if err != nil {
+		return fmt.Errorf("refresh cluster credentials after removing native services: %w", err)
+	}
+	namespaceObject, err = clientset.CoreV1().Namespaces().Get(ctx, namespace, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("reverify host namespace in selected cluster: %w", err)
+	}
+	if !namespaceOwnedByEnrollment(namespaceObject, identity) {
+		return fmt.Errorf("selected cluster namespace %s no longer belongs to this local enrollment", namespace)
+	}
+	if err := ensureHostUnused(ctx, dynamicClient, namespace); err != nil {
+		return err
 	}
 	hasWireKubeState, err := nativewirekube.HasState(stateDirectory)
 	if err != nil {
@@ -1261,6 +1416,26 @@ func deleteHost(ctx context.Context, kubeconfig, kubeContext, stateDirectory, re
 	}
 	fmt.Printf("host/%s deleted\n", stateHostID)
 	return nil
+}
+
+func loadClusterClients(ctx context.Context, kubeconfig, kubeContext, stateDirectory string, allowTOFU, resetTrust bool) (dynamic.Interface, kubernetes.Interface, error) {
+	config, err := loadConfig(kubeconfig, kubeContext)
+	if err != nil {
+		return nil, nil, err
+	}
+	config, err = secureClusterConfig(ctx, config, stateDirectory, allowTOFU, resetTrust)
+	if err != nil {
+		return nil, nil, err
+	}
+	dynamicClient, err := dynamic.NewForConfig(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, nil, err
+	}
+	return dynamicClient, clientset, nil
 }
 
 func namespaceOwnedByEnrollment(namespace *corev1.Namespace, identity enroll.EnrollmentIdentity) bool {
@@ -1546,13 +1721,20 @@ func waitForNativeAPI(ctx context.Context, client dynamic.Interface) error {
 	}
 }
 
-func verifyRestrictedIdentity(ctx context.Context, client kubernetes.Interface, expectedUser, namespace string) error {
+func verifyIdentity(ctx context.Context, client kubernetes.Interface, expectedUser string) error {
 	review, err := client.AuthenticationV1().SelfSubjectReviews().Create(ctx, &authenticationv1.SelfSubjectReview{}, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("verify restricted Kubernetes identity: %w", err)
 	}
 	if review.Status.UserInfo.Username != expectedUser {
 		return fmt.Errorf("kubeconfig authenticates as %q, expected %q", review.Status.UserInfo.Username, expectedUser)
+	}
+	return nil
+}
+
+func verifyRestrictedIdentity(ctx context.Context, client kubernetes.Interface, expectedUser, namespace string) error {
+	if err := verifyIdentity(ctx, client, expectedUser); err != nil {
+		return err
 	}
 	access, err := client.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, &authorizationv1.SelfSubjectAccessReview{Spec: authorizationv1.SelfSubjectAccessReviewSpec{ResourceAttributes: &authorizationv1.ResourceAttributes{Namespace: namespace, Verb: "get", Resource: "secrets"}}}, metav1.CreateOptions{})
 	if err != nil {

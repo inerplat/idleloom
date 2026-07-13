@@ -3,6 +3,7 @@ package serviceinstall
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -157,6 +158,27 @@ func TestPrivilegedHelperMustMatchPublicBinary(t *testing.T) {
 	}
 	if sameBinary([]byte("public"), []byte("replaced")) {
 		t.Fatal("replaced link companion matched public binary")
+	}
+}
+
+func TestResolveSudoArgumentsUsesAbsoluteAllowlist(t *testing.T) {
+	arguments, err := resolveSudoArguments([]string{"launchctl", "bootout", "system/io.idleloom.link.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(arguments) != 3 || arguments[0] != "/bin/launchctl" {
+		t.Fatalf("resolved arguments = %#v", arguments)
+	}
+	if _, err := resolveSudoArguments([]string{"sh", "-c", "true"}); err == nil {
+		t.Fatal("unsupported privileged command was accepted")
+	}
+}
+
+func TestLaunchdNotLoadedErrorsAreExpected(t *testing.T) {
+	for _, message := range []string{"Could not find specified service", "Boot-out failed: 3: No such process"} {
+		if !isNotLoaded(errors.New(message)) {
+			t.Fatalf("not-loaded error %q was not recognized", message)
+		}
 	}
 }
 
