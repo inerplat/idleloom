@@ -16,8 +16,8 @@ return to the operator:
 ## Prerequisites
 
 - An Apple Silicon Mac.
-- A kubeconfig allowed to install the Idleloom Native CRDs and RBAC.
-- WireKube installed in the cluster when testing `--link wirekube`.
+- A kubeconfig allowed to install the Idleloom Native CRDs, RBAC, and
+  connected-mode WireKube resources.
 - Python 3.12 and MLX 0.32.0 in a host-readable virtual environment.
 
 Build the complete Native bundle:
@@ -133,7 +133,10 @@ Join with the default relay link and Kubernetes log projection:
 
 The join requests macOS administrator authorization to install the root link
 service. The agent and training process continue to run as the regular login
-user.
+user. If WireKube is missing, the same command downloads a compatible
+checksum-verified `wirekubectl`, displays its installation plan, installs the
+cluster dependency, and resumes enrollment. Add `--install-dependencies
+--yes` when running this flow non-interactively.
 
 Create the same workload:
 

@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +16,8 @@ import (
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
 	"github.com/inerplat/idleloom/internal/native/enroll"
 	nativekube "github.com/inerplat/idleloom/internal/native/kube"
+	nativewirekube "github.com/inerplat/idleloom/internal/native/wirekube"
+	"github.com/inerplat/idleloom/internal/native/wirekubecli"
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -86,6 +90,15 @@ func TestPublicUsageIsResourceOriented(t *testing.T) {
 	for _, legacy := range []string{" admin ", " serve ", " debug ", "enroll", "connectivity-run"} {
 		if strings.Contains(usageText, legacy) {
 			t.Fatalf("usage still exposes legacy command %q", legacy)
+		}
+	}
+}
+
+func TestVersionTextIncludesBuildIdentity(t *testing.T) {
+	text := versionText()
+	for _, expected := range []string{"idlectl ", version, commit, buildDate, goruntime.GOOS + "/" + goruntime.GOARCH} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("version text %q does not contain %q", text, expected)
 		}
 	}
 }
@@ -164,6 +177,137 @@ func TestJoinRejectsExistingLocalInstallationBeforeClusterAccess(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already joined") {
 		t.Fatalf("runJoin existing installation error = %v", err)
 	}
+}
+
+func TestMissingWireKubeRequiresExplicitNonInteractiveDependencyInstall(t *testing.T) {
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+	})
+	called := false
+	original := newWireKubeLifecycle
+	newWireKubeLifecycle = func(context.Context, string, string) (wireKubeLifecycle, error) {
+		called = true
+		return nil, errors.New("unexpected resolver call")
+	}
+	t.Cleanup(func() { newWireKubeLifecycle = original })
+
+	err := ensureWireKubeForJoin(context.Background(), wireKubeJoinConfig{
+		Dynamic: client, HostID: "studio", Interactive: false, Input: &bytes.Buffer{}, Output: &bytes.Buffer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "--install-dependencies --yes") {
+		t.Fatalf("error=%v", err)
+	}
+	if called {
+		t.Fatal("dependency resolver ran before non-interactive authorization")
+	}
+}
+
+func TestExistingCompatibleWireKubeSkipsDependencyResolver(t *testing.T) {
+	mesh := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "wirekube.io/v1alpha1",
+		"kind":       "WireKubeMesh",
+		"metadata":   map[string]any{"name": "default"},
+		"spec": map[string]any{
+			"meshCIDR": "172.31.240.0/20",
+			"relay":    map[string]any{"mode": "auto", "provider": "managed"},
+		},
+		"status": map[string]any{"readyPeers": int64(1)},
+	}}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+	})
+	if err := client.Tracker().Create(nativewirekube.MeshesGVR, mesh, ""); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	original := newWireKubeLifecycle
+	newWireKubeLifecycle = func(context.Context, string, string) (wireKubeLifecycle, error) {
+		called = true
+		return nil, errors.New("unexpected resolver call")
+	}
+	t.Cleanup(func() { newWireKubeLifecycle = original })
+	var output bytes.Buffer
+
+	err := ensureWireKubeForJoin(context.Background(), wireKubeJoinConfig{
+		Dynamic: client, HostID: "studio", Interactive: false, Input: &bytes.Buffer{}, Output: &output,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("dependency resolver ran for an existing compatible WireKube installation")
+	}
+	if !strings.Contains(output.String(), "using existing WireKube mesh default") {
+		t.Fatalf("output=%q", output.String())
+	}
+}
+
+func TestMissingWireKubePlansInstallsAndContinuesJoin(t *testing.T) {
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
+		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+	})
+	lifecycle := &fakeWireKubeLifecycle{plan: wirekubecli.Plan{
+		Context: "cluster", WireKubeVersion: wirekubecli.CompatibleVersion,
+		Image: "example.test/wirekube@sha256:" + strings.Repeat("a", 64),
+		Relay: "load-balancer", RelayUDP: true, MeshCIDR: "100.96.0.0/11", NodeAddresses: "internal-ip",
+		Impact: []string{"one public TCP LoadBalancer", "one separate public UDP LoadBalancer"},
+	}}
+	lifecycle.plan.Detection.KubernetesVersion = "v1.35.3"
+	lifecycle.plan.Detection.CNI = "cilium"
+	original := newWireKubeLifecycle
+	newWireKubeLifecycle = func(context.Context, string, string) (wireKubeLifecycle, error) { return lifecycle, nil }
+	t.Cleanup(func() { newWireKubeLifecycle = original })
+	var output bytes.Buffer
+
+	err := ensureWireKubeForJoin(context.Background(), wireKubeJoinConfig{
+		Dynamic: client, HostID: "studio", ShellAccess: nativev1alpha1.ShellAccessSandboxed, Projection: true,
+		Yes: true, InstallDependencies: true, Interactive: false, Input: &bytes.Buffer{}, Output: &output,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lifecycle.planCalls != 1 || lifecycle.installCalls != 1 {
+		t.Fatalf("plan calls=%d install calls=%d", lifecycle.planCalls, lifecycle.installCalls)
+	}
+	for _, text := range []string{"Idleloom connected-host plan", "one separate public UDP LoadBalancer", "continuing host enrollment"} {
+		if !strings.Contains(output.String(), text) {
+			t.Fatalf("output does not contain %q: %s", text, output.String())
+		}
+	}
+}
+
+func TestDependencyConfirmationDefaultsToYes(t *testing.T) {
+	var output bytes.Buffer
+	confirmed, err := confirmDefaultYes(strings.NewReader("\n"), &output, "Continue? [Y/n] ")
+	if err != nil || !confirmed {
+		t.Fatalf("confirmed=%t err=%v", confirmed, err)
+	}
+	confirmed, err = confirmDefaultYes(strings.NewReader("no\n"), &output, "Continue? [Y/n] ")
+	if err != nil || confirmed {
+		t.Fatalf("confirmed=%t err=%v", confirmed, err)
+	}
+}
+
+type fakeWireKubeLifecycle struct {
+	plan         wirekubecli.Plan
+	planCalls    int
+	installCalls int
+}
+
+func (f *fakeWireKubeLifecycle) Plan(context.Context) (wirekubecli.Plan, error) {
+	f.planCalls++
+	return f.plan, nil
+}
+
+func (f *fakeWireKubeLifecycle) Install(_ context.Context, plan wirekubecli.Plan) (wirekubecli.Result, error) {
+	f.installCalls++
+	if plan.MeshCIDR != f.plan.MeshCIDR {
+		return wirekubecli.Result{}, fmt.Errorf("unexpected mesh CIDR %s", plan.MeshCIDR)
+	}
+	return wirekubecli.Result{InstallationID: "install-1", Ready: true}, nil
 }
 
 func TestWorkloadHostReferenceBlocksHostDeletion(t *testing.T) {

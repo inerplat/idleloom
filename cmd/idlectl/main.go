@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,7 +29,9 @@ import (
 	nativeprojection "github.com/inerplat/idleloom/internal/native/projection"
 	"github.com/inerplat/idleloom/internal/native/serviceinstall"
 	nativewirekube "github.com/inerplat/idleloom/internal/native/wirekube"
+	"github.com/inerplat/idleloom/internal/native/wirekubecli"
 	"github.com/spf13/pflag"
+	"golang.org/x/term"
 	authenticationv1 "k8s.io/api/authentication/v1"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -55,6 +58,31 @@ Usage:
   idlectl delete ((host|workload) NAME | (host|workload)/NAME) [flags]
   idlectl version
 `
+
+var (
+	version   = "development"
+	commit    = "unknown"
+	buildDate = "unknown"
+)
+
+type wireKubeLifecycle interface {
+	Plan(context.Context) (wirekubecli.Plan, error)
+	Install(context.Context, wirekubecli.Plan) (wirekubecli.Result, error)
+}
+
+var newWireKubeLifecycle = func(ctx context.Context, kubeconfig, kubeContext string) (wireKubeLifecycle, error) {
+	binary, err := (wirekubecli.Resolver{
+		Version:        wirekubecli.CompatibleVersion,
+		BinaryOverride: os.Getenv("IDLELOOM_WIREKUBECTL"),
+	}).Resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return wirekubecli.Client{
+		Binary: binary, ExpectedVersion: wirekubecli.CompatibleVersion,
+		Kubeconfig: kubeconfig, Context: kubeContext, Timeout: 10 * time.Minute,
+	}, nil
+}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -102,7 +130,7 @@ func runPublicCommand(ctx context.Context, command string, args []string) (bool,
 	case "delete":
 		return true, runDelete(ctx, args)
 	case "version":
-		fmt.Println("idlectl development")
+		fmt.Println(versionText())
 		return true, nil
 	case "help", "-h", "--help":
 		fmt.Print(usageText)
@@ -110,6 +138,10 @@ func runPublicCommand(ctx context.Context, command string, args []string) (bool,
 	default:
 		return false, nil
 	}
+}
+
+func versionText() string {
+	return fmt.Sprintf("idlectl %s (%s, %s, %s/%s)", version, commit, buildDate, runtime.GOOS, runtime.GOARCH)
 }
 
 func runInternalBinary(ctx context.Context, binary string, args []string) (bool, error) {
@@ -139,6 +171,8 @@ func runJoin(ctx context.Context, args []string) error {
 	resetTrust := flags.Bool("reset-trust", false, "replace the persisted API certificate identity after manual verification")
 	forceConflicts := flags.Bool("force-conflicts", false, "take ownership of conflicting cluster API fields")
 	link := flags.String("link", nativewirekube.ConnectivityWireKube, "cluster link: api-only or wirekube")
+	yes := flags.Bool("yes", false, "approve the displayed join plan without prompting")
+	installDependencies := flags.Bool("install-dependencies", false, "install missing cluster dependencies in non-interactive mode")
 	shellAccess := flags.String("shell-access", "sandboxed", "maximum remote shell access: disabled, sandboxed, or host")
 	projectionEnabled := flags.Bool("projection", true, "publish ephemeral Kubernetes Nodes and Pods with logs support")
 	kubeletClientCNs := flags.String("kubelet-client-cn", "kube-apiserver-kubelet-client", "comma-separated kubelet client certificate common names")
@@ -188,6 +222,16 @@ func runJoin(ctx context.Context, args []string) error {
 	clientset, err := kubernetes.NewForConfig(credentialConfig)
 	if err != nil {
 		return err
+	}
+	if *link == nativewirekube.ConnectivityWireKube {
+		if err := ensureWireKubeForJoin(ctx, wireKubeJoinConfig{
+			Dynamic: dynamicClient, Kubeconfig: *kubeconfig, Context: *kubeContext,
+			HostID: hostID, ShellAccess: resolvedShellAccess, Projection: *projectionEnabled,
+			Yes: *yes, InstallDependencies: *installDependencies,
+			Interactive: term.IsTerminal(int(os.Stdin.Fd())), Input: os.Stdin, Output: os.Stderr,
+		}); err != nil {
+			return err
+		}
 	}
 	fmt.Fprintln(os.Stderr, "installing Native API and restricted identities")
 	if err := install.Apply(ctx, dynamicClient, *forceConflicts); err != nil {
@@ -240,6 +284,118 @@ func runJoin(ctx context.Context, args []string) error {
 	fmt.Printf("credentials expire: %s\n", result.ExpiresAt.Format(time.RFC3339))
 	fmt.Printf("status: idlectl get host/%s\n", hostID)
 	return nil
+}
+
+type wireKubeJoinConfig struct {
+	Dynamic             dynamic.Interface
+	Kubeconfig          string
+	Context             string
+	HostID              string
+	ShellAccess         string
+	Projection          bool
+	Yes                 bool
+	InstallDependencies bool
+	Interactive         bool
+	Input               io.Reader
+	Output              io.Writer
+}
+
+func ensureWireKubeForJoin(ctx context.Context, config wireKubeJoinConfig) error {
+	if config.Dynamic == nil {
+		return fmt.Errorf("dynamic Kubernetes client is required")
+	}
+	if config.Input == nil {
+		config.Input = strings.NewReader("")
+	}
+	if config.Output == nil {
+		config.Output = io.Discard
+	}
+	_, err := config.Dynamic.Resource(nativewirekube.MeshesGVR).Get(ctx, "default", metav1.GetOptions{})
+	if err == nil {
+		report, inspectErr := nativewirekube.Inspect(ctx, config.Dynamic)
+		if inspectErr != nil {
+			return fmt.Errorf("existing WireKube installation is incompatible: %w", inspectErr)
+		}
+		fmt.Fprintf(config.Output, "using existing WireKube mesh %s (%s)\n", report.MeshName, report.MeshCIDR)
+		for _, warning := range report.Warnings {
+			fmt.Fprintln(config.Output, "warning:", warning)
+		}
+		return nil
+	}
+	if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("inspect WireKube installation: %w", err)
+	}
+	if config.Yes && !config.InstallDependencies {
+		return fmt.Errorf("WireKube is not installed; rerun with --install-dependencies --yes, or use --link api-only")
+	}
+	if !config.Interactive && (!config.Yes || !config.InstallDependencies) {
+		return fmt.Errorf("WireKube is not installed and input is non-interactive; rerun with --install-dependencies --yes, or use --link api-only")
+	}
+
+	fmt.Fprintf(config.Output, "WireKube is not installed; resolving compatible release %s\n", wirekubecli.CompatibleVersion)
+	lifecycle, err := newWireKubeLifecycle(ctx, config.Kubeconfig, config.Context)
+	if err != nil {
+		return fmt.Errorf("prepare WireKube installer: %w", err)
+	}
+	plan, err := lifecycle.Plan(ctx)
+	if err != nil {
+		return fmt.Errorf("plan WireKube installation: %w", err)
+	}
+	writeWireKubeJoinPlan(config.Output, config, plan)
+	if !config.Yes {
+		confirmed, err := confirmDefaultYes(config.Input, config.Output, "Install WireKube and join this host? [Y/n] ")
+		if err != nil {
+			return err
+		}
+		if !confirmed {
+			return fmt.Errorf("join cancelled; rerun with --link api-only to join without inbound Kubernetes connectivity")
+		}
+	}
+	fmt.Fprintln(config.Output, "installing WireKube cluster dependencies")
+	result, err := lifecycle.Install(ctx, plan)
+	if err != nil {
+		return fmt.Errorf("install WireKube: %w", err)
+	}
+	fmt.Fprintf(config.Output, "WireKube installation %s is ready; continuing host enrollment\n", result.InstallationID)
+	return nil
+}
+
+func writeWireKubeJoinPlan(out io.Writer, config wireKubeJoinConfig, plan wirekubecli.Plan) {
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Idleloom connected-host plan")
+	fmt.Fprintf(out, "  Host:          %s\n", config.HostID)
+	fmt.Fprintf(out, "  Shell access:  %s\n", config.ShellAccess)
+	fmt.Fprintf(out, "  Projection:    %t\n", config.Projection)
+	fmt.Fprintf(out, "  Cluster:       %s\n", plan.Context)
+	fmt.Fprintf(out, "  Kubernetes:    %s\n", plan.Detection.KubernetesVersion)
+	fmt.Fprintf(out, "  CNI:           %s\n", plan.Detection.CNI)
+	fmt.Fprintf(out, "  WireKube:      %s\n", plan.WireKubeVersion)
+	fmt.Fprintf(out, "  Mesh CIDR:     %s\n", plan.MeshCIDR)
+	fmt.Fprintf(out, "  Image:         %s\n", plan.Image)
+	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "Infrastructure impact")
+	for _, impact := range plan.Impact {
+		fmt.Fprintf(out, "  - %s\n", impact)
+	}
+	for _, warning := range plan.Warnings {
+		fmt.Fprintf(out, "  warning: %s\n", warning)
+	}
+}
+
+func confirmDefaultYes(in io.Reader, out io.Writer, prompt string) (bool, error) {
+	fmt.Fprint(out, prompt)
+	response, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && len(response) == 0 {
+		return false, err
+	}
+	switch strings.ToLower(strings.TrimSpace(response)) {
+	case "", "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return false, fmt.Errorf("answer yes or no")
+	}
 }
 
 func rollbackJoin(ctx context.Context, dynamicClient dynamic.Interface, clientset kubernetes.Interface, stateDirectory, namespace string) error {

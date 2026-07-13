@@ -1,0 +1,80 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test ./... -count=1
+      - run: go vet ./...
+
+  package:
+    needs: test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build signed Native Metal bundle
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          package="dist/idleloom-${VERSION}-darwin-arm64"
+          mkdir -p "$package"
+          ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${build_date}"
+          CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$ldflags" -o "$package/idlectl" ./cmd/idlectl
+          codesign --force --sign - "$package/idlectl"
+          for helper in idleloom-controller idleloom-agent idleloom-link idleloom-projection; do
+            cp "$package/idlectl" "$package/$helper"
+          done
+          cp LICENSE "$package/LICENSE"
+          codesign --verify --strict "$package/idlectl"
+          "$package/idlectl" version
+          archive="${PWD}/dist/idleloom-${VERSION}-darwin-arm64.tar.gz"
+          tar -C "$package" -czf "$archive" .
+          cd dist
+          shasum -a 256 "idleloom-${VERSION}-darwin-arm64.tar.gz" > idleloom-checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: idleloom-release
+          path: |
+            dist/idleloom-*.tar.gz
+            dist/idleloom-checksums.txt
+          if-no-files-found: error
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: idleloom-release
+          path: dist
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          options=(--verify-tag --generate-notes --title "Idleloom ${TAG}")
+          if [[ "$TAG" == *-* ]]; then
+            options+=(--prerelease)
+          fi
+          gh release create "$TAG" dist/* "${options[@]}" --repo "${GITHUB_REPOSITORY}"
