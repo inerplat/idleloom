@@ -123,7 +123,7 @@ func TestPersistentLogBufferRepairsTruncatedFinalRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := file.WriteString(`{"type":"entry","assignment":"assignment-one"`); err != nil {
-		file.Close()
+		_ = file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {

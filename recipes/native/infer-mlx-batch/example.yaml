@@ -1,0 +1,6 @@
+namespace: default
+model: qwen3-5-0-8b-mlx
+prompt: Explain why idle compute is useful in one sentence.
+maxTokens: 128
+timeoutSeconds: 600
+unifiedMemory: 8Gi

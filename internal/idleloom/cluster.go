@@ -8,9 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/kubernetes"
@@ -90,9 +92,9 @@ func LoadCluster(ctx context.Context, kubeconfigPath, contextName string) (*Clus
 		}
 	}
 	secureConfig := rest.CopyConfig(restConfig)
-	secureConfig.TLSClientConfig.Insecure = false
-	secureConfig.TLSClientConfig.CAFile = ""
-	secureConfig.TLSClientConfig.CAData = caData
+	secureConfig.Insecure = false
+	secureConfig.CAFile = ""
+	secureConfig.CAData = caData
 	secureClient, err := kubernetes.NewForConfig(secureConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create CA-verified Kubernetes client: %w", err)
@@ -107,9 +109,9 @@ func LoadCluster(ctx context.Context, kubeconfigPath, contextName string) (*Clus
 		return nil, err
 	}
 
-	dns, err := client.CoreV1().Services("kube-system").Get(ctx, "kube-dns", metav1.GetOptions{})
+	dns, err := discoverClusterDNS(ctx, client)
 	if err != nil {
-		return nil, fmt.Errorf("discover cluster DNS service: %w", err)
+		return nil, err
 	}
 	clusterDomain := discoverClusterDomain(ctx, client)
 
@@ -117,7 +119,7 @@ func LoadCluster(ctx context.Context, kubeconfigPath, contextName string) (*Clus
 		KubeconfigPath: kubeconfigPath,
 		Context:        contextName,
 		Server:         selectedCluster.Server,
-		TLSServerName:  restConfig.TLSClientConfig.ServerName,
+		TLSServerName:  restConfig.ServerName,
 		CAData:         caData,
 		Version:        version.GitVersion,
 		KubeletVersion: kubeletVersion,
@@ -126,6 +128,34 @@ func LoadCluster(ctx context.Context, kubeconfigPath, contextName string) (*Clus
 		RESTConfig:     secureConfig,
 		Client:         client,
 	}, nil
+}
+
+func discoverClusterDNS(ctx context.Context, client kubernetes.Interface) (*corev1.Service, error) {
+	services := client.CoreV1().Services("kube-system")
+	for _, name := range []string{"kube-dns", "coredns"} {
+		service, err := services.Get(ctx, name, metav1.GetOptions{})
+		if err == nil && usableClusterIP(service) {
+			return service, nil
+		}
+		if err != nil && !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("discover cluster DNS Service %s: %w", name, err)
+		}
+	}
+	list, err := services.List(ctx, metav1.ListOptions{LabelSelector: "k8s-app=kube-dns"})
+	if err != nil {
+		return nil, fmt.Errorf("discover cluster DNS Service by label: %w", err)
+	}
+	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
+	for index := range list.Items {
+		if usableClusterIP(&list.Items[index]) {
+			return list.Items[index].DeepCopy(), nil
+		}
+	}
+	return nil, fmt.Errorf("discover cluster DNS Service: kube-system has no kube-dns/coredns Service with a usable ClusterIP")
+}
+
+func usableClusterIP(service *corev1.Service) bool {
+	return service != nil && service.Spec.ClusterIP != "" && service.Spec.ClusterIP != corev1.ClusterIPNone
 }
 
 var upstreamKubernetesVersionPattern = regexp.MustCompile(`^v([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+].*)?$`)

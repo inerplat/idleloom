@@ -12,10 +12,20 @@ import (
 )
 
 const (
+	LockedModelName = "qwen3-5-0-8b-mlx"
 	ModelRepository = "mlx-community/Qwen3.5-0.8B-4bit"
 	ModelRevision   = "da28692b5f139cb0ec58a356b437486b7dac7462"
 	RuntimeVersion  = "mlx-lm-0.31.3"
 )
+
+type LockedModelDescriptor struct {
+	Name             string
+	Repository       string
+	Revision         string
+	ArtifactIdentity string
+	ManifestDigest   string
+	SizeBytes        int64
+}
 
 //go:embed assets/runtime.lock.tsv assets/model.lock.tsv runner.py
 var embedded embed.FS
@@ -98,17 +108,41 @@ func ModelLock() ([]ModelFile, string, error) {
 	return files, digest(data), nil
 }
 
+func LockedModel() (LockedModelDescriptor, error) {
+	files, digest, err := ModelLock()
+	if err != nil {
+		return LockedModelDescriptor{}, err
+	}
+	return lockedModelDescriptor(files, digest), nil
+}
+
+func lockedModelDescriptor(files []ModelFile, digest string) LockedModelDescriptor {
+	var size int64
+	for _, file := range files {
+		size += file.Size
+	}
+	return LockedModelDescriptor{
+		Name: LockedModelName, Repository: ModelRepository, Revision: ModelRevision,
+		ArtifactIdentity: lockedModelArtifactIdentity(digest), ManifestDigest: "sha256:" + digest,
+		SizeBytes: size,
+	}
+}
+
+func lockedModelArtifactIdentity(modelDigest string) string {
+	return "oci://development.invalid/idleloom/qwen3.5-0.8b-4bit@sha256:" + modelDigest
+}
+
 func RunnerSource() ([]byte, error) {
 	return embedded.ReadFile("runner.py")
 }
 
 func validateDigest(value string) error {
 	if len(value) != sha256.Size*2 {
-		return fmt.Errorf("SHA-256 must contain 64 lowercase hex characters")
+		return fmt.Errorf("the SHA-256 must contain 64 lowercase hex characters")
 	}
 	decoded, err := hex.DecodeString(value)
 	if err != nil || hex.EncodeToString(decoded) != value {
-		return fmt.Errorf("SHA-256 must contain 64 lowercase hex characters")
+		return fmt.Errorf("the SHA-256 must contain 64 lowercase hex characters")
 	}
 	return nil
 }

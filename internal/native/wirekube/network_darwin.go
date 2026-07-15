@@ -49,7 +49,7 @@ func (n *darwinNetwork) Preflight(ctx context.Context, meshCIDR, assignedAddress
 		return fmt.Errorf("inspect existing route for %s: route output has no destination", assignedIP)
 	}
 	if destination != "default" {
-		return fmt.Errorf("WireKube mesh address %s already uses a more-specific route (%s)", assignedIP, destination)
+		return fmt.Errorf("the WireKube mesh address %s already uses a more-specific route (%s)", assignedIP, destination)
 	}
 
 	output, err = n.runner.Run(ctx, "/usr/sbin/netstat", "-rn", "-f", "inet")
@@ -59,7 +59,7 @@ func (n *darwinNetwork) Preflight(ctx context.Context, meshCIDR, assignedAddress
 	_, mesh, _ := net.ParseCIDR(meshCIDR)
 	for _, route := range darwinRouteNetworks(string(output)) {
 		if cidrsOverlap(mesh, route) {
-			return fmt.Errorf("WireKube mesh CIDR %s overlaps existing route %s", meshCIDR, route)
+			return fmt.Errorf("the WireKube mesh CIDR %s overlaps existing route %s", meshCIDR, route)
 		}
 	}
 	return nil
@@ -69,7 +69,7 @@ func (n *darwinNetwork) Configure(ctx context.Context, interfaceName, address st
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.iface != "" {
-		return fmt.Errorf("Darwin network is already configured")
+		return fmt.Errorf("darwin network is already configured")
 	}
 	ip, _, err := net.ParseCIDR(address)
 	if err != nil {
@@ -97,7 +97,7 @@ func (n *darwinNetwork) Validate(ctx context.Context) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if n.iface == "" || n.address == "" || len(n.routes) == 0 {
-		return fmt.Errorf("Darwin network is not configured")
+		return fmt.Errorf("darwin network is not configured")
 	}
 	assignedIP, _, err := net.ParseCIDR(n.address)
 	if err != nil {
@@ -108,14 +108,14 @@ func (n *darwinNetwork) Validate(ctx context.Context) error {
 		return commandError("validate WireKube interface", output, err)
 	}
 	if !strings.Contains(string(output), assignedIP.String()) {
-		return fmt.Errorf("WireKube interface %s no longer has address %s", n.iface, assignedIP)
+		return fmt.Errorf("the WireKube interface %s no longer has address %s", n.iface, assignedIP)
 	}
 	output, err = n.runner.Run(ctx, "/sbin/route", "-n", "get", "-inet", assignedIP.String())
 	if err != nil {
 		return commandError("validate WireKube route", output, err)
 	}
 	if routeGetInterface(string(output)) != n.iface {
-		return fmt.Errorf("WireKube route for %s is no longer owned by %s", assignedIP, n.iface)
+		return fmt.Errorf("the WireKube route for %s is no longer owned by %s", assignedIP, n.iface)
 	}
 	return nil
 }

@@ -11,9 +11,9 @@ import (
 )
 
 func TestRuntimeNetworkIsStableAndNodeSpecific(t *testing.T) {
-	firstIndex := runtimeNetworkIndex("studio-idle", 0)
-	first := runtimeNetworkFromIndex("studio-idle", firstIndex)
-	second := runtimeNetworkFromIndex("studio-idle", firstIndex)
+	firstIndex := runtimeNetworkIndex("evening-mac", 0)
+	first := runtimeNetworkFromIndex("evening-mac", firstIndex)
+	second := runtimeNetworkFromIndex("evening-mac", firstIndex)
 	other := runtimeNetworkFromIndex("render-idle", runtimeNetworkIndex("render-idle", 0))
 	if first != second {
 		t.Fatalf("runtime network is not stable: %#v != %#v", first, second)
@@ -27,12 +27,12 @@ func TestRuntimeNetworkIsStableAndNodeSpecific(t *testing.T) {
 }
 
 func TestRuntimeNetworkCanProbePastCollision(t *testing.T) {
-	first := runtimeNetworkIndex("studio-idle", 0)
-	second := runtimeNetworkIndex("studio-idle", 1)
+	first := runtimeNetworkIndex("evening-mac", 0)
+	second := runtimeNetworkIndex("evening-mac", 1)
 	if first == second {
 		t.Fatalf("network probing reused index %d", first)
 	}
-	if runtimeNetworkFromIndex("studio-idle", first).GuestIP == runtimeNetworkFromIndex("studio-idle", second).GuestIP {
+	if runtimeNetworkFromIndex("evening-mac", first).GuestIP == runtimeNetworkFromIndex("evening-mac", second).GuestIP {
 		t.Fatal("network probing did not change the guest IP")
 	}
 }
@@ -57,8 +57,8 @@ func TestKrunkitArgsUseDirectRuntimeDevices(t *testing.T) {
 }
 
 func TestCloudInitPreparesContainerStorageAndISCSI(t *testing.T) {
-	data := renderCloudInit("studio-idle", "ssh-ed25519 AAAA test")
-	for _, expected := range []string{"/dev/vdb", "/var/lib/idleloom/$name", "containerd:/var/lib/containerd", "apt-cache:/var/cache/apt", "open-iscsi"} {
+	data := renderCloudInit("evening-mac", "ssh-ed25519 AAAA test")
+	for _, expected := range []string{"/dev/vdb", "/var/lib/idleloom/$name", "containerd:/var/lib/containerd", "apt-cache:/var/cache/apt", "open-iscsi", "/usr/lib/cni/*", "/opt/cni/bin/${plugin##*/}"} {
 		if !strings.Contains(data, expected) {
 			t.Errorf("cloud-init is missing %q", expected)
 		}
@@ -113,7 +113,7 @@ func TestRuntimeLockSerializesLifecycleOperations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	if _, err := acquireRuntimeLock(ctx, state, false); err == nil {

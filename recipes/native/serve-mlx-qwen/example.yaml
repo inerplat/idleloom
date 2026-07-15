@@ -1,0 +1,5 @@
+namespace: default
+model: qwen3-5-0-8b-mlx
+modelAlias: qwen3-5-0-8b
+servicePort: 8000
+unifiedMemory: 8Gi

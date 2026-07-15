@@ -1,0 +1,77 @@
+apiVersion: ai.idleloom.io/v1alpha1
+kind: IdleloomWorkload
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: train
+    ai.idleloom.io/backend: native
+    ai.idleloom.io/runtime: mlx
+    ai.idleloom.io/experiment: {{ quote (index .Values "experiment") }}
+    ai.idleloom.io/attempt: {{ quote (integer (index .Values "attempt")) }}
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  mode: Train
+  run:
+    task: train
+    experiment: {{ quote (index .Values "experiment") }}
+    attempt: {{ integer (index .Values "attempt") }}
+    parameters:
+      LEARNING_RATE: {{ quote (index .Values "learningRate") }}
+      STEPS: {{ quote (integer (index .Values "steps")) }}
+  train:
+    runtimeProfile: mlx-train-v1
+    network: None
+    timeoutSeconds: {{ integer (index .Values "timeoutSeconds") }}
+    source:
+      inline: |
+        import hashlib
+        import json
+        import os
+        from pathlib import Path
+
+        import mlx.core as mx
+
+        learning_rate = float(os.environ["LEARNING_RATE"])
+        steps = int(os.environ["STEPS"])
+        mx.set_default_device(mx.gpu)
+        x = mx.linspace(-2.0, 2.0, 4096)
+        y = 3.0 * x + 2.0
+        weight = mx.array(0.0)
+        bias = mx.array(0.0)
+
+        def loss_fn(current_weight, current_bias):
+            prediction = current_weight * x + current_bias
+            return mx.mean(mx.square(prediction - y))
+
+        loss_and_grad = mx.value_and_grad(loss_fn, argnums=(0, 1))
+        report_every = max(1, steps // 5)
+        for step in range(1, steps + 1):
+            _, (weight_grad, bias_grad) = loss_and_grad(weight, bias)
+            weight = weight - learning_rate * weight_grad
+            bias = bias - learning_rate * bias_grad
+            mx.eval(weight, bias)
+            if step == 1 or step % report_every == 0 or step == steps:
+                loss = loss_fn(weight, bias)
+                mx.eval(loss)
+                print(f"step={step:04d} loss={float(loss):.8f}")
+                print("::idleloom-metric::" + json.dumps({"name": "loss", "value": float(loss), "step": step}))
+
+        checkpoint = Path("checkpoint.npz").resolve()
+        mx.savez(checkpoint, weight=weight, bias=bias)
+        digest = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
+        print("::idleloom-artifact::" + json.dumps({
+            "name": "checkpoint",
+            "uri": checkpoint.as_uri(),
+            "digest": "sha256:" + digest,
+            "sizeBytes": checkpoint.stat().st_size,
+        }))
+        print(f"device={mx.default_device()}")
+        print(f"weight={float(weight):.6f} bias={float(bias):.6f}")
+  resources:
+    unifiedMemoryRequest: {{ quote (index .Values "unifiedMemory") }}

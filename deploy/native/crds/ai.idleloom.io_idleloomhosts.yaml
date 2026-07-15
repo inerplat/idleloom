@@ -61,12 +61,54 @@ spec:
                 - type: string
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
+              availableModels:
+                items:
+                  properties:
+                    family:
+                      enum:
+                      - qwen3.5
+                      - ollama-gguf
+                      - gguf
+                      type: string
+                    format:
+                      enum:
+                      - gguf-v1
+                      type: string
+                    manifestDigest:
+                      pattern: ^sha256:[a-f0-9]{64}$
+                      type: string
+                    name:
+                      pattern: ^([a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}|[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf)$
+                      type: string
+                    runtimeProfile:
+                      enum:
+                      - ollama-gguf-v1
+                      - llama-cpp-metal-v1
+                      type: string
+                    sizeBytes:
+                      format: int64
+                      minimum: 1
+                      type: integer
+                  required:
+                  - family
+                  - format
+                  - manifestDigest
+                  - name
+                  - runtimeProfile
+                  - sizeBytes
+                  type: object
+                maxItems: 64
+                type: array
               availableUnifiedMemory:
                 anyOf:
                 - type: integer
                 - type: string
                 pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                 x-kubernetes-int-or-string: true
+              capabilities:
+                items:
+                  type: string
+                type: array
               conditions:
                 items:
                   properties:

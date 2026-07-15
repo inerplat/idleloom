@@ -2,8 +2,11 @@ package idleloom
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -20,7 +23,7 @@ import (
 )
 
 func TestCreateBootstrapToken(t *testing.T) {
-	client := fake.NewSimpleClientset(
+	client := fake.NewClientset(
 		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "system:node-bootstrapper"}},
 		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "system:certificates.k8s.io:certificatesigningrequests:nodeclient"}},
 		&rbacv1.ClusterRole{ObjectMeta: metav1.ObjectMeta{Name: "system:certificates.k8s.io:certificatesigningrequests:selfnodeclient"}},
@@ -60,6 +63,49 @@ func TestValidateKubeletServingCSR(t *testing.T) {
 	}
 }
 
+func TestValidateKubeletServingCSRAcceptsAlgorithmSpecificUsages(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		key    any
+		usages []certificatesv1.KeyUsage
+	}{
+		{name: "ed25519", key: newEd25519Key(t), usages: servingUsages()},
+		{name: "ecdsa", key: newECDSAKey(t), usages: servingUsages()},
+		{name: "rsa", key: newRSAKey(t), usages: append(servingUsages(), certificatesv1.UsageKeyEncipherment)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			csr := servingCSRWithKey(t, test.name, "worker-a", "172.20.10.2", []string{"system:nodes"}, test.usages, test.key)
+			if err := validateKubeletServingCSR(csr, "worker-a", "172.20.10.2"); err != nil {
+				t.Fatalf("valid %s serving CSR rejected: %v", test.name, err)
+			}
+		})
+	}
+}
+
+func TestValidateKubeletServingCSRRejectsRSAUsageOnECDSAKey(t *testing.T) {
+	usages := append(servingUsages(), certificatesv1.UsageKeyEncipherment)
+	csr := servingCSRWithKey(t, "ecdsa-extra", "worker-a", "172.20.10.2", []string{"system:nodes"}, usages, newECDSAKey(t))
+	if err := validateKubeletServingCSR(csr, "worker-a", "172.20.10.2"); err == nil {
+		t.Fatal("ECDSA serving CSR with RSA key encipherment usage was accepted")
+	}
+}
+
+func TestValidateKubeletServingCSRRejectsWeakKeyAndTrailingData(t *testing.T) {
+	weakRSA, err := rsa.GenerateKey(rand.Reader, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	csr := servingCSRWithKey(t, "weak-rsa", "worker-a", "172.20.10.2", []string{"system:nodes"}, append(servingUsages(), certificatesv1.UsageKeyEncipherment), weakRSA)
+	if err := validateKubeletServingCSR(csr, "worker-a", "172.20.10.2"); err == nil {
+		t.Fatal("serving CSR with a weak RSA key was accepted")
+	}
+	csr = servingCSR(t, "trailing", "worker-a", "172.20.10.2", []string{"system:nodes"}, servingUsages())
+	csr.Spec.Request = append(csr.Spec.Request, []byte("unexpected")...)
+	if err := validateKubeletServingCSR(csr, "worker-a", "172.20.10.2"); err == nil {
+		t.Fatal("serving CSR with trailing data was accepted")
+	}
+}
+
 func TestValidateKubeletServingCSRRejectsExtraOrganizationAndUsage(t *testing.T) {
 	extraOrganization := servingCSR(t, "extra-org", "worker-a", "172.20.10.2", []string{"system:nodes", "system:masters"}, servingUsages())
 	if err := validateKubeletServingCSR(extraOrganization, "worker-a", "172.20.10.2"); err == nil {
@@ -73,7 +119,7 @@ func TestValidateKubeletServingCSRRejectsExtraOrganizationAndUsage(t *testing.T)
 }
 
 func TestApproveKubeletServingCSRDoesNotWaitWhenNoCurrentRequestExists(t *testing.T) {
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 	start := time.Now()
 	if err := ApproveKubeletServingCSR(context.Background(), client, "worker-a", "172.20.10.2", start, false, time.Hour); err != nil {
 		t.Fatalf("ApproveKubeletServingCSR: %v", err)
@@ -95,7 +141,7 @@ func TestApproveKubeletServingCSRIgnoresOldCompletedRequests(t *testing.T) {
 	oldApproved.Status.Conditions = []certificatesv1.CertificateSigningRequestCondition{{
 		Type: certificatesv1.CertificateApproved, Status: corev1.ConditionTrue,
 	}}
-	client := fake.NewSimpleClientset(old, oldApproved)
+	client := fake.NewClientset(old, oldApproved)
 	if err := ApproveKubeletServingCSR(context.Background(), client, "worker-a", "172.20.10.2", notBefore, false, time.Hour); err != nil {
 		t.Fatalf("old completed request affected current start: %v", err)
 	}
@@ -107,7 +153,7 @@ func TestApproveKubeletServingCSRPrefersRecentPendingRequest(t *testing.T) {
 	old.CreationTimestamp = metav1.NewTime(notBefore.Add(-time.Minute))
 	recent := servingCSR(t, "recent-valid", "worker-a", "172.20.10.2", []string{"system:nodes"}, servingUsages())
 	recent.CreationTimestamp = metav1.NewTime(notBefore.Add(time.Second))
-	client := fake.NewSimpleClientset(old, recent)
+	client := fake.NewClientset(old, recent)
 	if err := ApproveKubeletServingCSR(context.Background(), client, "worker-a", "172.20.10.2", notBefore, false, time.Hour); err != nil {
 		t.Fatalf("ApproveKubeletServingCSR: %v", err)
 	}
@@ -124,7 +170,7 @@ func TestApproveKubeletServingCSRProcessesLongPendingRotation(t *testing.T) {
 	enrollment := time.Now().UTC().Add(-24 * time.Hour)
 	pending := servingCSR(t, "rotation-pending", "worker-a", "172.20.10.2", []string{"system:nodes"}, servingUsages())
 	pending.CreationTimestamp = metav1.NewTime(time.Now().UTC().Add(-2 * time.Hour))
-	client := fake.NewSimpleClientset(pending)
+	client := fake.NewClientset(pending)
 	if err := ApproveKubeletServingCSR(context.Background(), client, "worker-a", "172.20.10.2", enrollment, false, 0); err != nil {
 		t.Fatalf("ApproveKubeletServingCSR: %v", err)
 	}
@@ -144,12 +190,12 @@ func TestApproveKubeletServingCSRWaitsForCertificateIssuance(t *testing.T) {
 	approved.Status.Conditions = []certificatesv1.CertificateSigningRequestCondition{{
 		Type: certificatesv1.CertificateApproved, Status: corev1.ConditionTrue,
 	}}
-	client := fake.NewSimpleClientset(approved)
+	client := fake.NewClientset(approved)
 	if err := ApproveKubeletServingCSR(context.Background(), client, "worker-a", "172.20.10.2", notBefore, true, 20*time.Millisecond); err == nil {
 		t.Fatal("approved but unissued serving CSR was treated as complete")
 	}
 	approved.Status.Certificate = []byte("issued")
-	client = fake.NewSimpleClientset(approved)
+	client = fake.NewClientset(approved)
 	if err := ApproveKubeletServingCSR(context.Background(), client, "worker-a", "172.20.10.2", notBefore, true, time.Second); err != nil {
 		t.Fatalf("issued serving CSR was rejected: %v", err)
 	}
@@ -157,10 +203,11 @@ func TestApproveKubeletServingCSRWaitsForCertificateIssuance(t *testing.T) {
 
 func servingCSR(t *testing.T, name, nodeName, guestIP string, organizations []string, usages []certificatesv1.KeyUsage) *certificatesv1.CertificateSigningRequest {
 	t.Helper()
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
+	return servingCSRWithKey(t, name, nodeName, guestIP, organizations, usages, newEd25519Key(t))
+}
+
+func servingCSRWithKey(t *testing.T, name, nodeName, guestIP string, organizations []string, usages []certificatesv1.KeyUsage, key any) *certificatesv1.CertificateSigningRequest {
+	t.Helper()
 	request, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
 		Subject:     pkix.Name{CommonName: "system:node:" + nodeName, Organization: organizations},
 		DNSNames:    []string{nodeName},
@@ -183,13 +230,39 @@ func servingCSR(t *testing.T, name, nodeName, guestIP string, organizations []st
 func servingUsages() []certificatesv1.KeyUsage {
 	return []certificatesv1.KeyUsage{
 		certificatesv1.UsageDigitalSignature,
-		certificatesv1.UsageKeyEncipherment,
 		certificatesv1.UsageServerAuth,
 	}
 }
 
+func newEd25519Key(t *testing.T) ed25519.PrivateKey {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func newECDSAKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
+func newRSAKey(t *testing.T) *rsa.PrivateKey {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
+}
+
 func TestCreateBootstrapTokenRejectsNonPositiveTTL(t *testing.T) {
-	if _, err := CreateBootstrapToken(context.Background(), fake.NewSimpleClientset(), 0); err == nil {
+	if _, err := CreateBootstrapToken(context.Background(), fake.NewClientset(), 0); err == nil {
 		t.Fatal("expected an error")
 	}
 }

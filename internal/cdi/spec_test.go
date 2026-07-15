@@ -36,4 +36,9 @@ func TestEnsureWritesStableSpec(t *testing.T) {
 	if !strings.Contains(string(data), "/dev/dri/renderD128") {
 		t.Fatalf("CDI spec does not contain render node: %s", data)
 	}
+	for _, expected := range []string{"additionalGids:\n", "fileMode: 432", "gid: 65532", "- 65532"} {
+		if !strings.Contains(string(data), expected) {
+			t.Fatalf("CDI spec does not contain %s: %s", expected, data)
+		}
+	}
 }

@@ -30,7 +30,7 @@ func TestExpiredAPIDeadlineKillsJournaledProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	record := execution.Record{
 		SchemaVersion: execution.SchemaVersionV1, WorkloadUID: "workload", WorkloadGeneration: 1,
 		AssignmentUID: "assignment", ExecutionID: "11111111-1111-4111-8111-111111111111", FencingEpoch: 1,

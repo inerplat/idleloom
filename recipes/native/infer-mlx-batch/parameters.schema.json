@@ -1,0 +1,45 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "maxTokens": {
+      "type": "integer",
+      "description": "Maximum number of tokens to generate.",
+      "default": 128,
+      "minimum": 1,
+      "maximum": 512
+    },
+    "model": {
+      "type": "string",
+      "description": "Cluster-scoped IdleloomModel catalog entry.",
+      "default": "qwen3-5-0-8b-mlx",
+      "format": "dnsSubdomain"
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Namespace for the IdleloomWorkload.",
+      "default": "default",
+      "format": "namespace"
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Prompt passed to the locked MLX model.",
+      "default": "Explain why idle compute is useful in one sentence.",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "description": "Maximum inference runtime after the model process is ready.",
+      "default": 600,
+      "minimum": 1,
+      "maximum": 3600
+    },
+    "unifiedMemory": {
+      "type": "string",
+      "description": "Unified memory reservation for model loading and inference.",
+      "default": "8Gi",
+      "format": "positiveQuantity"
+    }
+  }
+}

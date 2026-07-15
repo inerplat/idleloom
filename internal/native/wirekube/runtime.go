@@ -3,6 +3,7 @@ package wirekube
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,7 +35,7 @@ type RuntimeStatus struct {
 
 func DefaultRuntimeDirectory(state State) (string, error) {
 	if state.PeerUID == "" {
-		return "", fmt.Errorf("WireKube leaf state has no peer UID")
+		return "", fmt.Errorf("the WireKube leaf state has no peer UID")
 	}
 	digest := sha256.Sum256([]byte(state.PeerUID))
 	return filepath.Join("/var/run", "idleloom", fmt.Sprintf("%x", digest[:16])), nil
@@ -42,7 +43,7 @@ func DefaultRuntimeDirectory(state State) (string, error) {
 
 func WriteRuntimeStatus(directory string, status RuntimeStatus) error {
 	if status.Version != RuntimeStatusVersion || status.InstanceID == "" || status.ProcessID <= 0 || status.PeerUID == "" || status.ObservedAt.IsZero() {
-		return fmt.Errorf("WireKube runtime status is incomplete")
+		return fmt.Errorf("the WireKube runtime status is incomplete")
 	}
 	data, err := json.MarshalIndent(status, "", "  ")
 	if err != nil {
@@ -62,14 +63,14 @@ func ReadRuntimeStatus(directory string, state State, now time.Time, maximumAge 
 		return connectivity, fmt.Errorf("read WireKube runtime status: %w", err)
 	}
 	if runtimeStatus.PeerUID != state.PeerUID {
-		return connectivity, fmt.Errorf("WireKube runtime status belongs to a different peer")
+		return connectivity, fmt.Errorf("the WireKube runtime status belongs to a different peer")
 	}
 	if maximumAge <= 0 {
 		maximumAge = 15 * time.Second
 	}
 	age := now.Sub(runtimeStatus.ObservedAt)
 	if age < -nativev1alpha1.HeartbeatClockSkewAllowance || age > maximumAge {
-		return connectivity, fmt.Errorf("WireKube runtime status is stale")
+		return connectivity, fmt.Errorf("the WireKube runtime status is stale")
 	}
 	connectivity.InterfaceName = runtimeStatus.InterfaceName
 	if !runtimeStatus.LastHandshakeTime.IsZero() {
@@ -77,7 +78,7 @@ func ReadRuntimeStatus(directory string, state State, now time.Time, maximumAge 
 		connectivity.LastHandshakeTime = &handshake
 	}
 	if runtimeStatus.Error != "" {
-		return connectivity, fmt.Errorf("WireKube runtime: %s", runtimeStatus.Error)
+		return connectivity, fmt.Errorf("the WireKube runtime failed: %s", runtimeStatus.Error)
 	}
 	return connectivity, nil
 }
@@ -98,7 +99,7 @@ func RuntimeStatusIsActive(directory string, state State) (bool, error) {
 		return false, fmt.Errorf("read WireKube runtime status: %w", err)
 	}
 	if status.PeerUID != state.PeerUID {
-		return false, fmt.Errorf("WireKube runtime status belongs to a different peer")
+		return false, fmt.Errorf("the WireKube runtime status belongs to a different peer")
 	}
 	return true, nil
 }
@@ -136,7 +137,7 @@ func readRuntimeStatus(directory string) (RuntimeStatus, error) {
 		return RuntimeStatus{}, fmt.Errorf("decode WireKube runtime status: %w", err)
 	}
 	if status.Version != RuntimeStatusVersion || status.InstanceID == "" || status.ProcessID <= 0 || status.PeerUID == "" || status.ObservedAt.IsZero() {
-		return RuntimeStatus{}, fmt.Errorf("WireKube runtime status is incomplete")
+		return RuntimeStatus{}, fmt.Errorf("the WireKube runtime status is incomplete")
 	}
 	return status, nil
 }
@@ -150,18 +151,15 @@ func writeReadable(name string, data []byte) error {
 		return err
 	}
 	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
+	defer func() { _ = os.Remove(temporaryName) }()
 	if err := temporary.Chmod(0o644); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return err

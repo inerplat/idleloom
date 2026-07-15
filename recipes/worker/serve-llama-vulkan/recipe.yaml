@@ -1,0 +1,14 @@
+name: serve/llama-vulkan
+version: v1
+description: Serve an OpenAI-compatible llama.cpp endpoint with a DRA-allocated Apple Vulkan device on an Idleloom worker.
+task: serve
+backend: worker
+runtime: llama-vulkan
+manifest: deployment.yaml
+parametersSchema: parameters.schema.json
+example: example.yaml
+prerequisites:
+- A joined Idleloom Linux worker with the Apple Vulkan DRA driver running.
+- A resource.k8s.io/v1 DeviceClass named apple-vulkan.
+- A Kubernetes Secret whose api-key entry contains one llama.cpp API key.
+- Outbound HTTPS access to the pinned model URL.

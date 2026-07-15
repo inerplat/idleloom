@@ -15,11 +15,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 	coordinationclient "k8s.io/client-go/kubernetes/typed/coordination/v1"
 )
 
 type Reconciler struct {
 	Dynamic      dynamic.Interface
+	Kubernetes   kubernetes.Interface
 	Coordination coordinationclient.CoordinationV1Interface
 	Planner      scheduler.Planner
 	Now          func() time.Time
@@ -42,14 +44,43 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	}
 	cycle := &reconcileCycle{reconciler: r, models: make(map[string]*nativev1alpha1.IdleloomModel)}
 	var errs []error
+	var servingWorkloads []*nativev1alpha1.IdleloomWorkload
 	for i := range list.Items {
 		var workload nativev1alpha1.IdleloomWorkload
 		if err := nativekube.FromUnstructured(&list.Items[i], &workload); err != nil {
 			errs = append(errs, err)
 			continue
 		}
+		if workload.Spec.Server != nil {
+			servingWorkloads = append(servingWorkloads, workload.DeepCopy())
+		}
 		if err := r.reconcileWorkloadWithCycle(ctx, &workload, cycle); err != nil {
 			errs = append(errs, fmt.Errorf("reconcile workload %s/%s: %w", workload.Namespace, workload.Name, err))
+		}
+	}
+	for _, workload := range servingWorkloads {
+		currentObject, err := r.Dynamic.Resource(nativekube.WorkloadsGVR).Namespace(workload.Namespace).Get(ctx, workload.Name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("refresh serving workload %s/%s: %w", workload.Namespace, workload.Name, err))
+			continue
+		}
+		var current nativev1alpha1.IdleloomWorkload
+		if err := nativekube.FromUnstructured(currentObject, &current); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		result, servingErr := r.reconcileServingEndpoint(ctx, &current)
+		if result.Reason == "" {
+			result = servingEndpointResult{Reason: "ServingEndpointUnavailable", Message: "the Native serving endpoint could not be reconciled"}
+		}
+		if err := r.updateServingReadyCondition(ctx, &current, result); err != nil {
+			errs = append(errs, fmt.Errorf("update Native serving readiness for workload %s/%s: %w", workload.Namespace, workload.Name, err))
+		}
+		if servingErr != nil {
+			errs = append(errs, fmt.Errorf("reconcile Native Service for workload %s/%s: %w", workload.Namespace, workload.Name, servingErr))
 		}
 	}
 	return errors.Join(errs...)
@@ -71,13 +102,16 @@ func (r *Reconciler) reconcileWorkloadWithCycle(ctx context.Context, workload *n
 		}
 		return nil
 	}
+	if terminalFiniteWorkload(workload) {
+		return nil
+	}
 	if workload.Status.AssignmentRef != nil {
 		return r.reflectAssignment(ctx, workload)
 	}
 	var model *nativev1alpha1.IdleloomModel
-	if workload.Spec.Mode == nativev1alpha1.WorkloadModeServer {
+	if workload.Spec.Mode == nativev1alpha1.WorkloadModeServer || workload.Spec.Mode == nativev1alpha1.WorkloadModeBatch {
 		if workload.Spec.Model == nil {
-			return fmt.Errorf("server workload has no model reference")
+			return fmt.Errorf("model workload has no model reference")
 		}
 		var err error
 		model, err = cycle.model(ctx, workload.Spec.Model.CatalogRef)
@@ -98,6 +132,10 @@ func (r *Reconciler) reconcileWorkloadWithCycle(ctx context.Context, workload *n
 func (r *Reconciler) persistSchedulingIntent(ctx context.Context, workload *nativev1alpha1.IdleloomWorkload, model *nativev1alpha1.IdleloomModel, hosts []nativev1alpha1.IdleloomHost, cycle *reconcileCycle) error {
 	host, err := r.Planner.SelectHost(workload, model, hosts)
 	if err != nil {
+		var noEligibleHosts *scheduler.NoEligibleHostsError
+		if errors.As(err, &noEligibleHosts) {
+			return r.markWorkloadWaiting(ctx, workload, "Queued", noEligibleHosts.Error())
+		}
 		return err
 	}
 	epoch, err := fencing.Allocate(ctx, r.Coordination.Leases(host.Namespace), host.UID)
@@ -145,6 +183,19 @@ func (r *Reconciler) createAssignmentFromIntent(ctx context.Context, workload *n
 			return err
 		}
 		if err := validateAssignmentIdentity(&assignment, workload, intent); err != nil {
+			if assignment.Spec.WorkloadRef.UID == workload.UID {
+				return err
+			}
+			reclaimed, reclaimErr := r.reclaimTerminalMailbox(ctx, &assignment)
+			if reclaimErr != nil {
+				return reclaimErr
+			}
+			if reclaimed {
+				return r.markWorkloadWaiting(ctx, workload, "MailboxReclaimed", "the previous completed run was archived; assignment will start on the next reconciliation")
+			}
+			return r.markWorkloadWaiting(ctx, workload, "HostBusy", fmt.Sprintf("host mailbox is still owned by workload %s/%s", assignment.Spec.WorkloadRef.Namespace, assignment.Spec.WorkloadRef.Name))
+		}
+		if err := r.ensureServingSecrets(ctx, workload, intent); err != nil {
 			return err
 		}
 		return r.persistAssignmentReference(ctx, workload, &assignment)
@@ -162,6 +213,9 @@ func (r *Reconciler) createAssignmentFromIntent(ctx context.Context, workload *n
 	}
 	if host.UID != intent.HostRef.UID {
 		return fmt.Errorf("persisted scheduling intent refers to a replaced host")
+	}
+	if err := r.ensureServingSecrets(ctx, workload, intent); err != nil {
+		return err
 	}
 	planner := r.Planner
 	planner.NewExecutionID = func() (string, error) { return intent.ExecutionID, nil }
@@ -225,6 +279,7 @@ func (r *Reconciler) reflectAssignment(ctx context.Context, workload *nativev1al
 	phase, stale := r.assignmentPhase(&assignment)
 	copy.Status.Phase = phase
 	copy.Status.ResolvedArtifactDigest = assignment.Status.ResolvedArtifactDigest
+	copy.Status.Run = cloneWorkloadRunStatus(assignment.Status.Run)
 	condition := metav1.Condition{
 		Type:               nativev1alpha1.WorkloadConditionReady,
 		ObservedGeneration: workload.Generation,
@@ -235,9 +290,28 @@ func (r *Reconciler) reflectAssignment(ctx context.Context, workload *nativev1al
 		condition.Reason = "AssignmentHeartbeatStale"
 		condition.Message = "the assigned native agent stopped renewing its execution lease"
 	} else if phase == nativev1alpha1.PhaseRunning {
-		condition.Status = metav1.ConditionTrue
-		condition.Reason = "AssignmentRunning"
-		condition.Message = "the native assignment is running with a fresh heartbeat"
+		if workload.Spec.Server != nil {
+			existing := apiMeta.FindStatusCondition(workload.Status.Conditions, nativev1alpha1.WorkloadConditionReady)
+			if existing != nil && existing.Status == metav1.ConditionTrue && existing.Reason == "ServingEndpointReady" && existing.ObservedGeneration == workload.Generation {
+				condition = *existing
+			} else {
+				condition.Status = metav1.ConditionFalse
+				condition.Reason = "ServingEndpointPending"
+				condition.Message = "the native assignment is running; waiting for its Service endpoint"
+			}
+		} else {
+			condition.Status = metav1.ConditionTrue
+			condition.Reason = "AssignmentRunning"
+			condition.Message = "the native assignment is running with a fresh heartbeat"
+		}
+	} else if phase == nativev1alpha1.PhaseSucceeded {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = "AssignmentSucceeded"
+		condition.Message = "the native run completed successfully"
+	} else if phase == nativev1alpha1.PhaseFailed {
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = "AssignmentFailed"
+		condition.Message = "the native run failed; inspect its logs and status"
 	} else {
 		condition.Status = metav1.ConditionFalse
 		condition.Reason = "AssignmentNotReady"
@@ -245,6 +319,106 @@ func (r *Reconciler) reflectAssignment(ctx context.Context, workload *nativev1al
 	}
 	apiMeta.SetStatusCondition(&copy.Status.Conditions, condition)
 	return r.updateWorkload(ctx, copy, true)
+}
+
+func (r *Reconciler) markWorkloadWaiting(ctx context.Context, workload *nativev1alpha1.IdleloomWorkload, reason, message string) error {
+	copy := workload.DeepCopy()
+	copy.Status.ObservedGeneration = workload.Generation
+	copy.Status.Phase = nativev1alpha1.PhaseScheduling
+	apiMeta.SetStatusCondition(&copy.Status.Conditions, metav1.Condition{
+		Type: nativev1alpha1.WorkloadConditionReady, Status: metav1.ConditionFalse,
+		ObservedGeneration: workload.Generation, LastTransitionTime: metav1.NewTime(r.now()),
+		Reason: reason, Message: message,
+	})
+	return r.updateWorkload(ctx, copy, true)
+}
+
+func (r *Reconciler) reclaimTerminalMailbox(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) (bool, error) {
+	if !terminalAssignment(assignment) {
+		return false, nil
+	}
+	ownerResource := r.Dynamic.Resource(nativekube.WorkloadsGVR).Namespace(assignment.Spec.WorkloadRef.Namespace)
+	ownerObject, err := ownerResource.Get(ctx, assignment.Spec.WorkloadRef.Name, metav1.GetOptions{})
+	if err == nil {
+		var owner nativev1alpha1.IdleloomWorkload
+		if err := nativekube.FromUnstructured(ownerObject, &owner); err != nil {
+			return false, err
+		}
+		if owner.UID == assignment.Spec.WorkloadRef.UID {
+			if owner.DeletionTimestamp != nil {
+				return false, nil
+			}
+			if owner.Generation != assignment.Spec.WorkloadRef.Generation {
+				return false, fmt.Errorf("terminal assignment refers to an unexpected workload generation")
+			}
+			copy := owner.DeepCopy()
+			copy.Status.ObservedGeneration = owner.Generation
+			copy.Status.Phase = assignment.Status.Phase
+			copy.Status.ResolvedArtifactDigest = assignment.Status.ResolvedArtifactDigest
+			copy.Status.Run = cloneWorkloadRunStatus(assignment.Status.Run)
+			copy.Status.SchedulingIntent = nil
+			copy.Status.AssignmentRef = nil
+			reason, message := "AssignmentSucceeded", "the native run completed successfully"
+			if assignment.Status.Phase == nativev1alpha1.PhaseFailed {
+				reason, message = "AssignmentFailed", "the native run failed; inspect its logs and status"
+			}
+			apiMeta.SetStatusCondition(&copy.Status.Conditions, metav1.Condition{
+				Type: nativev1alpha1.WorkloadConditionReady, Status: metav1.ConditionFalse,
+				ObservedGeneration: owner.Generation, LastTransitionTime: metav1.NewTime(r.now()),
+				Reason: reason, Message: message,
+			})
+			if err := r.updateWorkload(ctx, copy, true); err != nil {
+				return false, fmt.Errorf("archive completed workload before reclaiming host mailbox: %w", err)
+			}
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("get completed mailbox owner: %w", err)
+	}
+	uid := assignment.UID
+	if err := r.Dynamic.Resource(nativekube.AssignmentsGVR).Namespace(assignment.Namespace).Delete(ctx, assignment.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid},
+	}); err != nil && !apierrors.IsNotFound(err) {
+		return false, fmt.Errorf("reclaim completed assignment mailbox: %w", err)
+	}
+	return true, nil
+}
+
+func terminalAssignment(assignment *nativev1alpha1.IdleloomWorkloadAssignment) bool {
+	if assignment == nil || assignment.Spec.DesiredState != nativev1alpha1.AssignmentDesiredRunning {
+		return false
+	}
+	if assignment.Status.Phase != nativev1alpha1.PhaseSucceeded && assignment.Status.Phase != nativev1alpha1.PhaseFailed {
+		return false
+	}
+	if assignment.Status.ObservedGeneration != assignment.Generation || assignment.Status.ExecutionID != assignment.Spec.ExecutionID || assignment.Status.FencingEpoch != assignment.Spec.FencingEpoch || assignment.Status.AgentID == "" {
+		return false
+	}
+	return assignment.Spec.Shell != nil || assignment.Spec.Training != nil || assignment.Spec.Model != nil && assignment.Spec.Model.Batch != nil
+}
+
+func terminalFiniteWorkload(workload *nativev1alpha1.IdleloomWorkload) bool {
+	if workload == nil || workload.Spec.Mode == nativev1alpha1.WorkloadModeServer {
+		return false
+	}
+	return workload.Status.Phase == nativev1alpha1.PhaseSucceeded || workload.Status.Phase == nativev1alpha1.PhaseFailed
+}
+
+func cloneWorkloadRunStatus(status *nativev1alpha1.WorkloadRunStatus) *nativev1alpha1.WorkloadRunStatus {
+	if status == nil {
+		return nil
+	}
+	copy := *status
+	copy.Metrics = append([]nativev1alpha1.RunMetricSummary(nil), status.Metrics...)
+	copy.Artifacts = append([]nativev1alpha1.RunArtifactReference(nil), status.Artifacts...)
+	if status.StartedAt != nil {
+		value := *status.StartedAt
+		copy.StartedAt = &value
+	}
+	if status.FinishedAt != nil {
+		value := *status.FinishedAt
+		copy.FinishedAt = &value
+	}
+	return &copy
 }
 
 func (r *Reconciler) assignmentPhase(assignment *nativev1alpha1.IdleloomWorkloadAssignment) (string, bool) {
@@ -280,6 +454,9 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, workload *nativev1al
 	ref := workload.Status.AssignmentRef
 	intent := workload.Status.SchedulingIntent
 	if ref == nil && intent == nil {
+		if err := r.cleanupServingResources(ctx, workload, ""); err != nil {
+			return err
+		}
 		return r.removeFinalizer(ctx, workload)
 	}
 	namespace := ""
@@ -293,6 +470,9 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, workload *nativev1al
 	resource := r.Dynamic.Resource(nativekube.AssignmentsGVR).Namespace(namespace)
 	object, err := resource.Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
+		if err := r.cleanupServingResources(ctx, workload, namespace); err != nil {
+			return err
+		}
 		return r.removeFinalizer(ctx, workload)
 	}
 	if err != nil {
@@ -303,10 +483,16 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, workload *nativev1al
 		return err
 	}
 	if ref != nil {
-		if assignment.UID != ref.UID || assignment.Spec.WorkloadRef.UID != workload.UID {
+		if assignment.Spec.WorkloadRef.UID != workload.UID {
+			return r.finalizeWithoutAssignment(ctx, workload, namespace)
+		}
+		if assignment.UID != ref.UID {
 			return fmt.Errorf("refusing to stop a mailbox owned by another workload")
 		}
 	} else if err := validateAssignmentIdentity(&assignment, workload, intent); err != nil {
+		if assignment.Spec.WorkloadRef.UID != workload.UID {
+			return r.finalizeWithoutAssignment(ctx, workload, namespace)
+		}
 		return fmt.Errorf("refusing to stop mailbox from scheduling intent: %w", err)
 	}
 	if assignment.Spec.DesiredState != nativev1alpha1.AssignmentDesiredStopped {
@@ -325,6 +511,16 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, workload *nativev1al
 	}
 	if err := resource.Delete(ctx, assignment.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &assignment.UID}}); err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete stopped assignment: %w", err)
+	}
+	if err := r.cleanupServingResources(ctx, workload, namespace); err != nil {
+		return err
+	}
+	return r.removeFinalizer(ctx, workload)
+}
+
+func (r *Reconciler) finalizeWithoutAssignment(ctx context.Context, workload *nativev1alpha1.IdleloomWorkload, namespace string) error {
+	if err := r.cleanupServingResources(ctx, workload, namespace); err != nil {
+		return err
 	}
 	return r.removeFinalizer(ctx, workload)
 }

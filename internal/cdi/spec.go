@@ -29,6 +29,8 @@ func NewWriter(directory, driverName string) (*Writer, error) {
 
 func (w *Writer) Ensure(device discovery.Device) (string, error) {
 	kind := w.driverName + "/render"
+	deviceGroup := uint32(65532)
+	deviceMode := os.FileMode(0o660)
 	raw := &specs.Spec{
 		Version: specVersion,
 		Kind:    kind,
@@ -36,11 +38,14 @@ func (w *Writer) Ensure(device discovery.Device) (string, error) {
 			{
 				Name: device.Name,
 				ContainerEdits: specs.ContainerEdits{
+					AdditionalGIDs: []uint32{deviceGroup},
 					DeviceNodes: []*specs.DeviceNode{
 						{
 							Path:        device.Path,
 							HostPath:    device.Path,
 							Permissions: "rw",
+							GID:         &deviceGroup,
+							FileMode:    &deviceMode,
 						},
 					},
 				},

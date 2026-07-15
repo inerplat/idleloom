@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: idleloom-hostpath-reader
+  namespace: default
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/example: worker-hostpath
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: idleloom
+        ai.idleloom.io/example: worker-hostpath
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/os: linux
+        idleloom-worker: "true"
+      tolerations:
+        - key: idleloom-dedicated
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: reader
+          image: docker.io/library/python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+          command: ["/bin/sh", "-ec", "test \"$(cat /data/marker.txt)\" = 'persistent worker data'; cat /data/marker.txt"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+      volumes:
+        - name: data
+          hostPath:
+            path: /var/lib/idleloom/volumes/docs-smoke
+            type: Directory

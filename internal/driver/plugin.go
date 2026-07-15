@@ -59,7 +59,7 @@ func (p *Plugin) prepare(ctx context.Context, claim *resourceapi.ResourceClaim) 
 		return kubeletplugin.PrepareResult{Err: fmt.Errorf("no healthy Apple Vulkan device is discovered")}
 	}
 	if claim.Status.Allocation == nil {
-		return kubeletplugin.PrepareResult{Err: fmt.Errorf("ResourceClaim %s/%s has no allocation", claim.Namespace, claim.Name)}
+		return kubeletplugin.PrepareResult{Err: fmt.Errorf("the ResourceClaim %s/%s has no allocation", claim.Namespace, claim.Name)}
 	}
 
 	var devices []kubeletplugin.Device

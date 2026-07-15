@@ -16,6 +16,9 @@ func TestStateRoundTrip(t *testing.T) {
 		KubeconfigPath:       "/tmp/kubeconfig",
 		Context:              "test",
 		Network:              NetworkWireKube,
+		Taint:                "idleloom-dedicated=compute:NoSchedule",
+		TaintConfigured:      true,
+		TokenTTLSeconds:      1800,
 		NetworkLease:         "idleloom-network-00001",
 		NetworkLeaseUID:      "lease-uid",
 		NetworkReservationID: "reservation-a",
@@ -36,6 +39,22 @@ func TestStateRoundTrip(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("state = %#v, want %#v", got, want)
+	}
+}
+
+func TestLoadStateRejectsInvalidResumeMetadata(t *testing.T) {
+	for _, state := range []State{
+		{NodeName: "worker-a", Runtime: RuntimeState{NodeName: "worker-a"}, Taint: "invalid", TaintConfigured: true},
+		{NodeName: "worker-a", Runtime: RuntimeState{NodeName: "worker-a"}, TokenTTLSeconds: -1},
+		{NodeName: "worker-a", Runtime: RuntimeState{NodeName: "worker-a"}, Taint: "idleloom-dedicated=compute:NoSchedule"},
+	} {
+		path := filepath.Join(t.TempDir(), "state.json")
+		if err := SaveState(path, state); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadState(path); err == nil {
+			t.Fatalf("invalid state was accepted: %#v", state)
+		}
 	}
 }
 
@@ -76,7 +95,7 @@ func TestStateLockSerializesCommands(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer first.Close()
+	defer func() { _ = first.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	if _, err := AcquireStateLock(ctx, path); err == nil {

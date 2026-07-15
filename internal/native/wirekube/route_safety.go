@@ -33,7 +33,7 @@ func validateLocalNetworkOverlap(meshCIDR string, localNetworks []*net.IPNet) er
 			continue
 		}
 		if cidrsOverlap(mesh, local) {
-			return fmt.Errorf("WireKube mesh CIDR %s overlaps local interface network %s", meshCIDR, local.String())
+			return fmt.Errorf("the WireKube mesh CIDR %s overlaps local interface network %s", meshCIDR, local.String())
 		}
 	}
 	return nil

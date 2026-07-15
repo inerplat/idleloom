@@ -2,12 +2,16 @@ package idleloom
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 	"time"
 
 	certificatesv1 "k8s.io/api/certificates/v1"
@@ -68,7 +72,7 @@ func ApproveKubeletServingCSR(ctx context.Context, client kubernetes.Interface, 
 		}
 		if len(pending) > 0 {
 			sort.Slice(pending, func(i, j int) bool {
-				return pending[i].CreationTimestamp.Time.After(pending[j].CreationTimestamp.Time)
+				return pending[i].CreationTimestamp.After(pending[j].CreationTimestamp.Time)
 			})
 			csr := pending[0]
 			if err := validateKubeletServingCSR(csr, nodeName, guestIP); err != nil {
@@ -92,7 +96,7 @@ func ApproveKubeletServingCSR(ctx context.Context, client kubernetes.Interface, 
 		}
 		if len(approved) > 0 {
 			sort.Slice(approved, func(i, j int) bool {
-				return approved[i].CreationTimestamp.Time.After(approved[j].CreationTimestamp.Time)
+				return approved[i].CreationTimestamp.After(approved[j].CreationTimestamp.Time)
 			})
 			if err := validateKubeletServingCSR(approved[0], nodeName, guestIP); err != nil {
 				return fmt.Errorf("approved kubelet serving certificate request %s does not match Idleloom state: %w", approved[0].Name, err)
@@ -145,17 +149,12 @@ func waitForIssuedServingCertificate(ctx context.Context, client kubernetes.Inte
 }
 
 func validateKubeletServingCSR(csr *certificatesv1.CertificateSigningRequest, nodeName, guestIP string) error {
-	expectedUsages := []certificatesv1.KeyUsage{
-		certificatesv1.UsageDigitalSignature,
-		certificatesv1.UsageKeyEncipherment,
-		certificatesv1.UsageServerAuth,
-	}
-	if !sameKeyUsages(csr.Spec.Usages, expectedUsages) {
-		return fmt.Errorf("unexpected usages %v", csr.Spec.Usages)
-	}
-	block, _ := pem.Decode(csr.Spec.Request)
+	block, rest := pem.Decode(csr.Spec.Request)
 	if block == nil || block.Type != "CERTIFICATE REQUEST" {
 		return fmt.Errorf("request is not a PEM certificate request")
+	}
+	if len(strings.TrimSpace(string(rest))) != 0 {
+		return fmt.Errorf("request contains trailing PEM data")
 	}
 	request, err := x509.ParseCertificateRequest(block.Bytes)
 	if err != nil {
@@ -163,6 +162,30 @@ func validateKubeletServingCSR(csr *certificatesv1.CertificateSigningRequest, no
 	}
 	if err := request.CheckSignature(); err != nil {
 		return fmt.Errorf("verify certificate request signature: %w", err)
+	}
+	expectedUsages := []certificatesv1.KeyUsage{
+		certificatesv1.UsageDigitalSignature,
+		certificatesv1.UsageServerAuth,
+	}
+	switch key := request.PublicKey.(type) {
+	case *rsa.PublicKey:
+		if key.N.BitLen() < 2048 {
+			return fmt.Errorf("the RSA public key must contain at least 2048 bits")
+		}
+		expectedUsages = append(expectedUsages, certificatesv1.UsageKeyEncipherment)
+	case *ecdsa.PublicKey:
+		if key.Curve == nil || key.Curve.Params().BitSize < 256 {
+			return fmt.Errorf("the ECDSA public key must use a curve with at least 256 bits")
+		}
+	case ed25519.PublicKey:
+		if len(key) != ed25519.PublicKeySize {
+			return fmt.Errorf("the Ed25519 public key has an invalid size")
+		}
+	default:
+		return fmt.Errorf("unsupported public key algorithm %T", request.PublicKey)
+	}
+	if !sameKeyUsages(csr.Spec.Usages, expectedUsages) {
+		return fmt.Errorf("unexpected usages %v for %s public key", csr.Spec.Usages, request.PublicKeyAlgorithm)
 	}
 	if request.Subject.CommonName != "system:node:"+nodeName || !reflect.DeepEqual(request.Subject.Organization, []string{"system:nodes"}) {
 		return fmt.Errorf("unexpected subject %q organizations=%v", request.Subject.CommonName, request.Subject.Organization)
@@ -315,7 +338,7 @@ func ensureBootstrapRBAC(ctx context.Context, client kubernetes.Interface) error
 			return fmt.Errorf("get ClusterRoleBinding %s: %w", desired.Name, err)
 		}
 		if existing.RoleRef != desired.RoleRef {
-			return fmt.Errorf("ClusterRoleBinding %s has an unexpected immutable roleRef", desired.Name)
+			return fmt.Errorf("the ClusterRoleBinding %s has an unexpected immutable roleRef", desired.Name)
 		}
 		if reflect.DeepEqual(existing.Subjects, desired.Subjects) {
 			continue

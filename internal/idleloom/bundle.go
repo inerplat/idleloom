@@ -2,6 +2,7 @@ package idleloom
 
 import (
 	"archive/tar"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,13 +37,16 @@ func CreateWorkerBundle(cfg BundleConfig) (string, func(), error) {
 		return "", nil, fmt.Errorf("create worker bundle: %w", err)
 	}
 	tw := tar.NewWriter(file)
+	fail := func(cause error) (string, func(), error) {
+		closeErr := tw.Close()
+		fileErr := file.Close()
+		cleanup()
+		return "", nil, errors.Join(cause, closeErr, fileErr)
+	}
 
 	bootstrapConfig, err := renderBootstrapKubeconfig(cfg)
 	if err != nil {
-		tw.Close()
-		file.Close()
-		cleanup()
-		return "", nil, err
+		return fail(err)
 	}
 	entries := []struct {
 		Name string
@@ -58,22 +62,16 @@ func CreateWorkerBundle(cfg BundleConfig) (string, func(), error) {
 	}
 	for _, entry := range entries {
 		if err := writeTarBytes(tw, entry.Name, entry.Mode, entry.Data); err != nil {
-			tw.Close()
-			file.Close()
-			cleanup()
-			return "", nil, err
+			return fail(err)
 		}
 	}
 	if err := writeTarFile(tw, "bin/kubelet", 0o755, cfg.KubeletPath); err != nil {
-		tw.Close()
-		file.Close()
-		cleanup()
-		return "", nil, err
+		return fail(err)
 	}
 	if err := tw.Close(); err != nil {
-		file.Close()
+		closeErr := file.Close()
 		cleanup()
-		return "", nil, fmt.Errorf("finish worker bundle: %w", err)
+		return "", nil, errors.Join(fmt.Errorf("finish worker bundle: %w", err), closeErr)
 	}
 	if err := file.Close(); err != nil {
 		cleanup()
@@ -214,7 +212,7 @@ func writeTarFile(tw *tar.Writer, name string, mode int64, path string) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", path, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", path, err)

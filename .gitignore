@@ -5,6 +5,5 @@ coverage.out
 
 # Local-only design notes and environment-specific overlays.
 /ARCHITECTURE.md
-/docs/worker-bootstrap.md
 /deploy/local/
 /hack/

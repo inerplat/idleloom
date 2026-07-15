@@ -83,7 +83,9 @@ func TestVerifyWheelInstallationDetectsModuleTampering(t *testing.T) {
 	if err := verifyWheelInstallation(sitePackages, opened.File, allowed); err != nil {
 		t.Fatal(err)
 	}
-	opened.Close()
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(modulePath, []byte("value = 2\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +93,7 @@ func TestVerifyWheelInstallationDetectsModuleTampering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer opened.Close()
+	defer func() { _ = opened.Close() }()
 	if err := verifyWheelInstallation(sitePackages, opened.File, make(map[string]struct{})); err == nil {
 		t.Fatal("modified Python module passed wheel verification")
 	}
@@ -100,5 +102,38 @@ func TestVerifyWheelInstallationDetectsModuleTampering(t *testing.T) {
 func TestGeneratedRuntimeFileDoesNotAllowBytecode(t *testing.T) {
 	if generatedRuntimeFile("example/__pycache__/module.cpython-312.pyc") {
 		t.Fatal("unverified Python bytecode was treated as generated metadata")
+	}
+}
+
+func TestLockedFileVerificationRejectsSymbolicAndHardLinks(t *testing.T) {
+	content := []byte("locked-content")
+	digestValue := sha256.Sum256(content)
+	digestText := hex.EncodeToString(digestValue[:])
+	root := t.TempDir()
+	original := filepath.Join(root, "original.bin")
+	if err := os.WriteFile(original, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(root, "symlink.bin")
+	if err := os.Symlink(original, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFile(symlink, digestText, int64(len(content))); err == nil {
+		t.Fatal("locked file verification followed a symbolic link")
+	}
+	hardlink := filepath.Join(root, "hardlink.bin")
+	if err := os.Link(original, hardlink); err != nil {
+		t.Fatal(err)
+	}
+	for name, verify := range map[string]func() error{
+		"verifyFile":        func() error { return verifyFile(original, digestText, int64(len(content))) },
+		"verifyDigestOnly":  func() error { return verifyDigestOnly(original, digestText) },
+		"verifyRegularFile": func() error { return verifyRegularFile(original, int64(len(content))) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := verify(); err == nil {
+				t.Fatal("locked file verification accepted a multiply-linked file")
+			}
+		})
 	}
 }

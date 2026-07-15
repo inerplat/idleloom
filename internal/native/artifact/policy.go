@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -164,7 +165,7 @@ func (p Policy) VerifyExtractedTree(root string, manifest Manifest) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(rootDescriptor)
+	defer func() { _ = unix.Close(rootDescriptor) }()
 	expectedFiles := make(map[string]File, len(manifest.Files))
 	expectedDirs := make(map[string]struct{})
 	for _, file := range manifest.Files {
@@ -262,23 +263,31 @@ func verifyRegularFileAt(rootDescriptor int, relative string, expected File) err
 	}
 	for _, component := range components[:len(components)-1] {
 		next, err := unix.Openat(directory, component, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-		unix.Close(directory)
+		closeErr := unix.Close(directory)
 		if err != nil {
-			return err
+			return errors.Join(err, closeErr)
+		}
+		if closeErr != nil {
+			_ = unix.Close(next)
+			return closeErr
 		}
 		directory = next
 	}
 	descriptor, err := unix.Openat(directory, components[len(components)-1], unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
-	unix.Close(directory)
+	closeErr := unix.Close(directory)
 	if err != nil {
-		return err
+		return errors.Join(err, closeErr)
+	}
+	if closeErr != nil {
+		_ = unix.Close(descriptor)
+		return closeErr
 	}
 	file := os.NewFile(uintptr(descriptor), relative)
 	if file == nil {
-		unix.Close(descriptor)
+		_ = unix.Close(descriptor)
 		return fmt.Errorf("open file descriptor")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	var stat unix.Stat_t
 	if err := unix.Fstat(descriptor, &stat); err != nil {
 		return err

@@ -1,0 +1,98 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: train
+    ai.idleloom.io/backend: worker
+    ai.idleloom.io/runtime: python
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/managed-by: idleloom
+        ai.idleloom.io/run: {{ quote .Name }}
+        ai.idleloom.io/task: train
+        ai.idleloom.io/backend: worker
+        ai.idleloom.io/runtime: python
+      annotations:
+        ai.idleloom.io/recipe: {{ quote .RecipeID }}
+        ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+        ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        kubernetes.io/os: linux
+        idleloom-worker: "true"
+      tolerations:
+      - key: idleloom-dedicated
+        operator: Exists
+        effect: NoSchedule
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+      - name: trainer
+        image: docker.io/library/python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: EPOCHS
+          value: {{ quote (index .Values "epochs") }}
+        - name: LEARNING_RATE
+          value: {{ quote (index .Values "learningRate") }}
+        - name: PYTHONDONTWRITEBYTECODE
+          value: "1"
+        command:
+        - python
+        - -c
+        - |
+          import os
+
+          epochs = int(os.environ["EPOCHS"])
+          learning_rate = float(os.environ["LEARNING_RATE"])
+          x = tuple(value / 4.0 for value in range(-8, 9))
+          y = tuple(3.0 * value + 2.0 for value in x)
+          weight = 0.0
+          bias = 0.0
+
+          for step in range(epochs):
+              predictions = tuple(weight * value + bias for value in x)
+              errors = tuple(prediction - target for prediction, target in zip(predictions, y))
+              loss = sum(error * error for error in errors) / len(errors)
+              weight_gradient = 2.0 * sum(error * value for error, value in zip(errors, x)) / len(x)
+              bias_gradient = 2.0 * sum(errors) / len(errors)
+              weight -= learning_rate * weight_gradient
+              bias -= learning_rate * bias_gradient
+              if step % 20 == 0 or step == epochs - 1:
+                  print(f"step={step:03d} loss={loss:.8f}")
+
+          final_loss = sum((weight * value + bias - target) ** 2 for value, target in zip(x, y)) / len(x)
+          print("executor=worker")
+          print(f"weight={weight:.6f} bias={bias:.6f}")
+          print(f"loss={final_loss:.8f}")
+          if final_loss > 0.0001:
+              raise SystemExit("training did not converge")
+        resources:
+          requests:
+            cpu: {{ quote (index .Values "cpu") }}
+            memory: {{ quote (index .Values "memory") }}
+          limits:
+            cpu: {{ quote (index .Values "cpu") }}
+            memory: {{ quote (index .Values "memory") }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true

@@ -38,10 +38,32 @@ spec:
             type: object
           spec:
             properties:
+              batch:
+                properties:
+                  maxTokens:
+                    format: int32
+                    maximum: 512
+                    minimum: 1
+                    type: integer
+                  prompt:
+                    maxLength: 16384
+                    minLength: 1
+                    type: string
+                  timeoutSeconds:
+                    format: int32
+                    maximum: 3600
+                    minimum: 1
+                    type: integer
+                required:
+                - maxTokens
+                - prompt
+                type: object
               mode:
                 enum:
                 - Server
+                - Batch
                 - Shell
+                - Train
                 type: string
               model:
                 properties:
@@ -62,6 +84,53 @@ spec:
                     x-kubernetes-int-or-string: true
                 required:
                 - unifiedMemoryRequest
+                type: object
+              run:
+                properties:
+                  attempt:
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  experiment:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  parameters:
+                    additionalProperties:
+                      maxLength: 4096
+                      pattern: ^[^\x00]*$
+                      type: string
+                    maxProperties: 64
+                    type: object
+                  task:
+                    enum:
+                    - train
+                    - infer
+                    - serve
+                    - shell
+                    type: string
+                required:
+                - attempt
+                - experiment
+                - task
+                type: object
+              server:
+                properties:
+                  modelAlias:
+                    maxLength: 253
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                    type: string
+                  serviceName:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                required:
+                - modelAlias
+                - serviceName
                 type: object
               shell:
                 properties:
@@ -86,6 +155,35 @@ spec:
                     type: integer
                 required:
                 - script
+                type: object
+              train:
+                properties:
+                  network:
+                    enum:
+                    - None
+                    - Outbound
+                    type: string
+                  runtimeProfile:
+                    enum:
+                    - mlx-train-v1
+                    type: string
+                  source:
+                    properties:
+                      inline:
+                        maxLength: 65536
+                        minLength: 1
+                        type: string
+                    required:
+                    - inline
+                    type: object
+                  timeoutSeconds:
+                    format: int32
+                    maximum: 86400
+                    minimum: 1
+                    type: integer
+                required:
+                - runtimeProfile
+                - source
                 type: object
             required:
             - mode
@@ -148,6 +246,86 @@ spec:
                 type: string
               resolvedArtifactDigest:
                 type: string
+              run:
+                properties:
+                  artifacts:
+                    items:
+                      properties:
+                        digest:
+                          pattern: ^sha256:[a-f0-9]{64}$
+                          type: string
+                        name:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        sizeBytes:
+                          format: int64
+                          maximum: 68719476736
+                          minimum: 0
+                          type: integer
+                        uri:
+                          maxLength: 4096
+                          minLength: 1
+                          pattern: ^[^\x00]*$
+                          type: string
+                      required:
+                      - digest
+                      - name
+                      - uri
+                      type: object
+                    maxItems: 16
+                    type: array
+                  attempt:
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  experiment:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  finishedAt:
+                    format: date-time
+                    type: string
+                  id:
+                    format: uuid
+                    type: string
+                  metrics:
+                    items:
+                      properties:
+                        name:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        observedAt:
+                          format: date-time
+                          type: string
+                        step:
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        value:
+                          maxLength: 128
+                          pattern: ^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$
+                          type: string
+                      required:
+                      - name
+                      - observedAt
+                      - value
+                      type: object
+                    maxItems: 32
+                    type: array
+                  startedAt:
+                    format: date-time
+                    type: string
+                  task:
+                    enum:
+                    - train
+                    - infer
+                    - serve
+                    - shell
+                    type: string
+                type: object
               schedulingIntent:
                 properties:
                   executionID:
@@ -196,12 +374,31 @@ spec:
           rule: self.spec == oldSelf.spec
         - message: unifiedMemoryRequest must be positive
           rule: quantity(self.spec.resources.unifiedMemoryRequest).isGreaterThan(quantity('0'))
-        - message: Server requires model and Shell requires shell
-          rule: (self.spec.mode == 'Server' && has(self.spec.model) && !has(self.spec.shell))
-            || (self.spec.mode == 'Shell' && !has(self.spec.model) && has(self.spec.shell))
+        - message: mode-specific model, server, batch, shell, and train fields are
+            inconsistent
+          rule: (self.spec.mode == 'Server' && has(self.spec.model) && has(self.spec.server)
+            && !has(self.spec.batch) && !has(self.spec.shell) && !has(self.spec.train))
+            || (self.spec.mode == 'Batch' && has(self.spec.model) && !has(self.spec.server)
+            && has(self.spec.batch) && !has(self.spec.shell) && !has(self.spec.train))
+            || (self.spec.mode == 'Shell' && !has(self.spec.model) && !has(self.spec.server)
+            && !has(self.spec.batch) && has(self.spec.shell) && !has(self.spec.train))
+            || (self.spec.mode == 'Train' && !has(self.spec.model) && !has(self.spec.server)
+            && !has(self.spec.batch) && !has(self.spec.shell) && has(self.spec.train)
+            && has(self.spec.run) && self.spec.run.task == 'train')
         - message: Host shell isolation requires outbound network access
           rule: '!has(self.spec.shell) || self.spec.shell.isolation != ''Host'' ||
             !has(self.spec.shell.network) || self.spec.shell.network == ''Outbound'''
+        - message: run task must match workload mode
+          rule: '!has(self.spec.run) || (self.spec.mode == ''Server'' && self.spec.run.task
+            == ''serve'') || (self.spec.mode == ''Batch'' && self.spec.run.task ==
+            ''infer'') || (self.spec.mode == ''Shell'' && self.spec.run.task == ''shell'')
+            || (self.spec.mode == ''Train'' && self.spec.run.task == ''train'')'
+        - message: run parameter names must be safe environment names and must not
+            use IDLELOOM_
+          rule: '!has(self.spec.run) || !has(self.spec.run.parameters) || self.spec.run.parameters.all(k,
+            k.matches(''^[A-Z][A-Z0-9_]{0,62}$'') && !k.startsWith(''IDLELOOM_''))'
+        - message: training source must not contain NUL bytes
+          rule: '!has(self.spec.train) || !self.spec.train.source.inline.contains(''\u0000'')'
     served: true
     storage: true
     subresources:

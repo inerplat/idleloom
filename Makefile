@@ -13,15 +13,13 @@ build: build-idlectl
 
 build-idlectl:
 	mkdir -p bin
+	rm -f bin/idleloom-controller bin/idleloom-agent bin/idleloom-link bin/idleloom-projection bin/idleloom-projection-linux
 	go build -trimpath -ldflags "$(IDLECTL_LDFLAGS)" -o bin/idlectl ./cmd/idlectl
-	cp bin/idlectl bin/idleloom-controller
-	cp bin/idlectl bin/idleloom-agent
-	cp bin/idlectl bin/idleloom-link
-	cp bin/idlectl bin/idleloom-projection
 
 build-projection:
 	mkdir -p bin
-	CGO_ENABLED=0 GOOS=linux go build -trimpath -o bin/idleloom-projection-linux ./cmd/idlectl
+	rm -f bin/idlectl-linux bin/idleloom-projection-linux
+	CGO_ENABLED=0 GOOS=linux go build -trimpath -o bin/idlectl-linux ./cmd/idlectl
 
 test:
 	go test ./...

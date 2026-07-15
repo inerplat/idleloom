@@ -1,0 +1,7 @@
+namespace: default
+experiment: linear-regression
+attempt: 1
+learningRate: 0.08
+steps: 100
+timeoutSeconds: 120
+unifiedMemory: 512Mi

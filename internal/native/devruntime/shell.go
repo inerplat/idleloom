@@ -106,10 +106,13 @@ func StartShell(ctx context.Context, config ShellConfig) (*ShellProcess, error) 
 	default:
 		return nil, fmt.Errorf("unsupported shell isolation %q", config.Isolation)
 	}
+	return startCommandProcess(ctx, command, work, config.Timeout, config.Output, config.OnSpawn)
+}
+
+func startCommandProcess(ctx context.Context, command *exec.Cmd, work string, timeout time.Duration, output io.Writer, onSpawn func(int) error) (*ShellProcess, error) {
 	command.Dir = work
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stderr := &boundedBuffer{limit: maxStderrBytes}
-	output := config.Output
 	if output == nil {
 		output = io.Discard
 	}
@@ -120,8 +123,8 @@ func StartShell(ctx context.Context, config ShellConfig) (*ShellProcess, error) 
 		return nil, fmt.Errorf("start native shell: %w", err)
 	}
 	process := &ShellProcess{cmd: command, done: make(chan struct{}), stderr: stderr}
-	if config.OnSpawn != nil {
-		if err := config.OnSpawn(process.PID()); err != nil {
+	if onSpawn != nil {
+		if err := onSpawn(process.PID()); err != nil {
 			_ = unix.Kill(-process.PID(), unix.SIGKILL)
 			_ = command.Wait()
 			close(process.done)
@@ -141,7 +144,7 @@ func StartShell(ctx context.Context, config ShellConfig) (*ShellProcess, error) 
 		close(process.done)
 	}()
 	go func() {
-		timer := time.NewTimer(config.Timeout)
+		timer := time.NewTimer(timeout)
 		defer timer.Stop()
 		select {
 		case <-timer.C:

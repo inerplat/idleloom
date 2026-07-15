@@ -73,12 +73,19 @@ spec:
                       format:
                         enum:
                         - mlx-safetensors-v1
+                        - gguf-v1
+                        type: string
+                      ggufFile:
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf$
                         type: string
                       manifestDigest:
                         pattern: ^sha256:[a-f0-9]{64}$
                         type: string
                       ociReference:
                         pattern: ^oci://[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$
+                        type: string
+                      ollamaModel:
+                        pattern: ^[a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}$
                         type: string
                       signature:
                         properties:
@@ -102,9 +109,34 @@ spec:
                     required:
                     - format
                     - manifestDigest
-                    - ociReference
-                    - signature
                     - sizeBytes
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exactly one artifact source is required; OCI artifacts
+                        require a signature and local GGUF sources are unsigned
+                      rule: (has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile)
+                        && has(self.signature)) || (!has(self.ociReference) && has(self.ollamaModel)
+                        && !has(self.ggufFile) && !has(self.signature)) || (!has(self.ociReference)
+                        && !has(self.ollamaModel) && has(self.ggufFile) && !has(self.signature))
+                  batch:
+                    properties:
+                      maxTokens:
+                        format: int32
+                        maximum: 512
+                        minimum: 1
+                        type: integer
+                      prompt:
+                        maxLength: 16384
+                        minLength: 1
+                        type: string
+                      timeoutSeconds:
+                        format: int32
+                        maximum: 3600
+                        minimum: 1
+                        type: integer
+                    required:
+                    - maxTokens
+                    - prompt
                     type: object
                   catalogRef:
                     properties:
@@ -120,6 +152,8 @@ spec:
                   family:
                     enum:
                     - qwen3.5
+                    - ollama-gguf
+                    - gguf
                     type: string
                   maxConcurrentRequests:
                     format: int32
@@ -134,7 +168,36 @@ spec:
                   runtimeProfile:
                     enum:
                     - mlx-lm-v1
+                    - ollama-gguf-v1
+                    - llama-cpp-metal-v1
                     type: string
+                  server:
+                    properties:
+                      authSecretName:
+                        enum:
+                        - active-serve-auth
+                        type: string
+                      modelAlias:
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$
+                        type: string
+                      port:
+                        format: int32
+                        maximum: 18080
+                        minimum: 18080
+                        type: integer
+                      serviceName:
+                        maxLength: 63
+                        minLength: 1
+                        pattern: ^[a-z]([-a-z0-9]*[a-z0-9])?$
+                        type: string
+                    required:
+                    - authSecretName
+                    - modelAlias
+                    - port
+                    - serviceName
+                    type: object
                   unifiedMemoryRequest:
                     anyOf:
                     - type: integer
@@ -150,16 +213,69 @@ spec:
                 - runtimeProfile
                 - unifiedMemoryRequest
                 type: object
+                x-kubernetes-validations:
+                - message: exactly one server or batch intent is required
+                  rule: has(self.server) != has(self.batch)
+                - message: resolved runtime profile, model family, and artifact source
+                    must match
+                  rule: (self.runtimeProfile == 'mlx-lm-v1' && self.family == 'qwen3.5'
+                    && self.artifact.format == 'mlx-safetensors-v1' && has(self.artifact.ociReference))
+                    || (self.runtimeProfile == 'ollama-gguf-v1' && self.family ==
+                    'ollama-gguf' && self.artifact.format == 'gguf-v1' && has(self.artifact.ollamaModel))
+                    || (self.runtimeProfile == 'llama-cpp-metal-v1' && self.family
+                    == 'gguf' && self.artifact.format == 'gguf-v1' && has(self.artifact.ggufFile))
+              run:
+                properties:
+                  attempt:
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  experiment:
+                    maxLength: 63
+                    minLength: 1
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  parameters:
+                    additionalProperties:
+                      maxLength: 4096
+                      pattern: ^[^\x00]*$
+                      type: string
+                    maxProperties: 64
+                    type: object
+                  task:
+                    enum:
+                    - train
+                    - infer
+                    - serve
+                    - shell
+                    type: string
+                required:
+                - attempt
+                - experiment
+                - task
+                type: object
               shell:
                 properties:
                   isolation:
+                    enum:
+                    - Sandbox
+                    - Host
                     type: string
                   network:
+                    enum:
+                    - None
+                    - Outbound
                     type: string
                   script:
+                    maxLength: 65536
+                    minLength: 1
+                    pattern: ^[^\x00]*$
                     type: string
                   timeoutSeconds:
                     format: int32
+                    maximum: 86400
+                    minimum: 1
                     type: integer
                   unifiedMemoryRequest:
                     anyOf:
@@ -171,6 +287,44 @@ spec:
                 - isolation
                 - network
                 - script
+                - timeoutSeconds
+                - unifiedMemoryRequest
+                type: object
+              training:
+                properties:
+                  network:
+                    enum:
+                    - None
+                    - Outbound
+                    type: string
+                  runtimeProfile:
+                    enum:
+                    - mlx-train-v1
+                    type: string
+                  source:
+                    maxLength: 65536
+                    minLength: 1
+                    pattern: ^[^\x00]*$
+                    type: string
+                  sourceDigest:
+                    pattern: ^sha256:[a-f0-9]{64}$
+                    type: string
+                  timeoutSeconds:
+                    format: int32
+                    maximum: 86400
+                    minimum: 1
+                    type: integer
+                  unifiedMemoryRequest:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                    x-kubernetes-int-or-string: true
+                required:
+                - network
+                - runtimeProfile
+                - source
+                - sourceDigest
                 - timeoutSeconds
                 - unifiedMemoryRequest
                 type: object
@@ -257,6 +411,86 @@ spec:
                 type: string
               resolvedArtifactDigest:
                 type: string
+              run:
+                properties:
+                  artifacts:
+                    items:
+                      properties:
+                        digest:
+                          pattern: ^sha256:[a-f0-9]{64}$
+                          type: string
+                        name:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        sizeBytes:
+                          format: int64
+                          maximum: 68719476736
+                          minimum: 0
+                          type: integer
+                        uri:
+                          maxLength: 4096
+                          minLength: 1
+                          pattern: ^[^\x00]*$
+                          type: string
+                      required:
+                      - digest
+                      - name
+                      - uri
+                      type: object
+                    maxItems: 16
+                    type: array
+                  attempt:
+                    format: int32
+                    maximum: 1000
+                    minimum: 1
+                    type: integer
+                  experiment:
+                    maxLength: 63
+                    pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                    type: string
+                  finishedAt:
+                    format: date-time
+                    type: string
+                  id:
+                    format: uuid
+                    type: string
+                  metrics:
+                    items:
+                      properties:
+                        name:
+                          maxLength: 63
+                          pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                          type: string
+                        observedAt:
+                          format: date-time
+                          type: string
+                        step:
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        value:
+                          maxLength: 128
+                          pattern: ^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$
+                          type: string
+                      required:
+                      - name
+                      - observedAt
+                      - value
+                      type: object
+                    maxItems: 32
+                    type: array
+                  startedAt:
+                    format: date-time
+                    type: string
+                  task:
+                    enum:
+                    - train
+                    - infer
+                    - serve
+                    - shell
+                    type: string
+                type: object
               runtimeVersion:
                 type: string
               stopAcknowledgement:
@@ -296,6 +530,12 @@ spec:
         - message: resolved shell is immutable
           rule: has(self.spec.shell) == has(oldSelf.spec.shell) && (!has(self.spec.shell)
             || self.spec.shell == oldSelf.spec.shell)
+        - message: resolved training run is immutable
+          rule: has(self.spec.training) == has(oldSelf.spec.training) && (!has(self.spec.training)
+            || self.spec.training == oldSelf.spec.training)
+        - message: resolved run identity is immutable
+          rule: has(self.spec.run) == has(oldSelf.spec.run) && (!has(self.spec.run)
+            || self.spec.run == oldSelf.spec.run)
         - message: execution identity is immutable
           rule: self.spec.executionID == oldSelf.spec.executionID
         - message: fencing epoch is immutable
@@ -307,13 +547,29 @@ spec:
         - message: workload and host UIDs are required
           rule: size(self.spec.workloadRef.uid) > 0 && size(self.spec.hostRef.uid)
             > 0
-        - message: exactly one resolved model or shell is required
-          rule: has(self.spec.model) != has(self.spec.shell)
+        - message: exactly one resolved model, shell, or training run is required
+          rule: (has(self.spec.model) && !has(self.spec.shell) && !has(self.spec.training))
+            || (!has(self.spec.model) && has(self.spec.shell) && !has(self.spec.training))
+            || (!has(self.spec.model) && !has(self.spec.shell) && has(self.spec.training))
         - message: resolved model identity and memory request are required
           rule: '!has(self.spec.model) || (size(self.spec.model.catalogRef.uid) >
             0 && quantity(self.spec.model.unifiedMemoryRequest).isGreaterThan(quantity(''0'')))'
         - message: resolved shell memory request must be positive
           rule: '!has(self.spec.shell) || quantity(self.spec.shell.unifiedMemoryRequest).isGreaterThan(quantity(''0''))'
+        - message: resolved training memory request must be positive
+          rule: '!has(self.spec.training) || quantity(self.spec.training.unifiedMemoryRequest).isGreaterThan(quantity(''0''))'
+        - message: resolved training requires train run identity
+          rule: '!has(self.spec.training) || (has(self.spec.run) && self.spec.run.task
+            == ''train'')'
+        - message: resolved run task must match the execution intent
+          rule: '!has(self.spec.run) || (has(self.spec.model) && has(self.spec.model.server)
+            && self.spec.run.task == ''serve'') || (has(self.spec.model) && has(self.spec.model.batch)
+            && self.spec.run.task == ''infer'') || (has(self.spec.shell) && self.spec.run.task
+            == ''shell'') || (has(self.spec.training) && self.spec.run.task == ''train'')'
+        - message: resolved run parameter names must be safe environment names and
+            must not use IDLELOOM_
+          rule: '!has(self.spec.run) || !has(self.spec.run.parameters) || self.spec.run.parameters.all(k,
+            k.matches(''^[A-Z][A-Z0-9_]{0,62}$'') && !k.startsWith(''IDLELOOM_''))'
         - message: Host shell isolation requires outbound network access
           rule: '!has(self.spec.shell) || self.spec.shell.isolation != ''Host'' ||
             self.spec.shell.network == ''Outbound'''

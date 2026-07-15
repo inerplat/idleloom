@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "cpu": {
+      "type": "string",
+      "description": "CPU request and limit for the training container.",
+      "default": "250m",
+      "format": "positiveQuantity"
+    },
+    "epochs": {
+      "type": "integer",
+      "description": "Number of gradient updates.",
+      "default": 120,
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "learningRate": {
+      "type": "number",
+      "description": "Gradient descent learning rate.",
+      "default": 0.08,
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    },
+    "memory": {
+      "type": "string",
+      "description": "Memory request and limit for the training container.",
+      "default": "128Mi",
+      "format": "positiveQuantity"
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Namespace for the Job.",
+      "default": "default",
+      "format": "namespace"
+    }
+  }
+}

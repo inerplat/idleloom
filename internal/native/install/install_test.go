@@ -53,6 +53,32 @@ func TestApplyProjectionIncludesRBACAndAdmissionWithoutDeployment(t *testing.T) 
 	}
 }
 
+func TestApplyCatalogPublishesLockedModel(t *testing.T) {
+	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())
+	models := map[string]map[string]any{}
+	client.PrependReactor("patch", "idleloommodels", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		patchAction := action.(clienttesting.PatchActionImpl)
+		var object map[string]any
+		if err := json.Unmarshal(patchAction.GetPatch(), &object); err != nil {
+			t.Fatal(err)
+		}
+		spec := object["spec"].(map[string]any)
+		artifact := spec["artifact"].(map[string]any)
+		name := object["metadata"].(map[string]any)["name"].(string)
+		models[name] = artifact
+		return true, &unstructured.Unstructured{Object: object}, nil
+	})
+	if err := ApplyCatalog(context.Background(), client, false); err != nil {
+		t.Fatal(err)
+	}
+	if artifact := models["qwen3-5-0-8b-mlx"]; artifact == nil || !strings.Contains(artifact["ociReference"].(string), "@sha256:") {
+		t.Fatalf("MLX catalog model = %#v", artifact)
+	}
+	if artifact := models["qwen3-5-9b-ollama"]; artifact == nil || artifact["ollamaModel"] != "qwen3.5:9b" || !strings.HasPrefix(artifact["manifestDigest"].(string), "sha256:") {
+		t.Fatalf("Ollama catalog model = %#v", artifact)
+	}
+}
+
 func assertApplyForce(t *testing.T, force bool) {
 	t.Helper()
 	client := dynamicfake.NewSimpleDynamicClient(runtime.NewScheme())

@@ -1,0 +1,69 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "cpu": {
+      "type": "string",
+      "description": "CPU request and limit for llama.cpp.",
+      "default": "2",
+      "format": "positiveQuantity"
+    },
+    "deviceClass": {
+      "type": "string",
+      "description": "DRA DeviceClass used to allocate the Vulkan device.",
+      "default": "apple-vulkan",
+      "format": "dnsSubdomain"
+    },
+    "maxTokens": {
+      "type": "integer",
+      "description": "Maximum number of tokens to generate.",
+      "default": 128,
+      "minimum": 1,
+      "maximum": 512
+    },
+    "memory": {
+      "type": "string",
+      "description": "Memory request and limit for llama.cpp.",
+      "default": "2Gi",
+      "format": "positiveQuantity"
+    },
+    "modelSHA256": {
+      "type": "string",
+      "description": "SHA-256 of the GGUF model file.",
+      "default": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "format": "sha256Hex"
+    },
+    "modelStorage": {
+      "type": "string",
+      "description": "Ephemeral disk capacity reserved for the downloaded GGUF file.",
+      "default": "2Gi",
+      "format": "positiveQuantity"
+    },
+    "modelURL": {
+      "type": "string",
+      "description": "Credential-free HTTPS URL for the GGUF model.",
+      "default": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
+      "format": "httpsURL"
+    },
+    "namespace": {
+      "type": "string",
+      "description": "Namespace for the ResourceClaim and Job.",
+      "default": "default",
+      "format": "namespace"
+    },
+    "prompt": {
+      "type": "string",
+      "description": "Prompt passed to llama.cpp.",
+      "default": "Explain why idle compute is useful in one sentence.",
+      "minLength": 1,
+      "maxLength": 16384
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "description": "Job deadline including model download and inference.",
+      "default": 1800,
+      "minimum": 60,
+      "maximum": 7200
+    }
+  }
+}

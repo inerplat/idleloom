@@ -118,7 +118,7 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 		return fmt.Errorf("init does not accept positional arguments")
 	}
 
-	if !*yes {
+	if !*yes && !*dryRun {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			return fmt.Errorf("interactive input is unavailable; pass --yes to accept defaults")
 		}

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -57,6 +58,7 @@ type Result struct {
 	AgentID              string
 	ControllerKubeconfig string
 	AgentKubeconfig      string
+	LinkKubeconfig       string
 	ExpiresAt            time.Time
 	Connectivity         string
 	WireKubePeer         string
@@ -83,7 +85,7 @@ type clusterTrust struct {
 
 func WriteServiceKubeconfig(ctx context.Context, restConfig *rest.Config, client kubernetes.Interface, namespace, serviceAccount, path, user string, duration time.Duration) (time.Time, error) {
 	if restConfig == nil || client == nil || namespace == "" || serviceAccount == "" || path == "" || user == "" {
-		return time.Time{}, fmt.Errorf("REST config, client, namespace, service account, path, and user are required")
+		return time.Time{}, fmt.Errorf("the REST config, client, namespace, service account, path, and user are required")
 	}
 	credential, expires, err := token(ctx, client, namespace, serviceAccount, duration)
 	if err != nil {
@@ -108,11 +110,11 @@ func DefaultStateDirectory() (string, error) {
 // current connection. Callers must require an explicit TOFU opt-in.
 func PinServerCertificate(ctx context.Context, source *rest.Config, stateDirectory string, reset bool) (*rest.Config, error) {
 	if source == nil || source.Host == "" {
-		return nil, fmt.Errorf("Kubernetes API endpoint is required")
+		return nil, fmt.Errorf("kubernetes API endpoint is required")
 	}
 	parsed, err := url.Parse(source.Host)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
-		return nil, fmt.Errorf("Kubernetes API endpoint must be an HTTPS URL")
+		return nil, fmt.Errorf("kubernetes API endpoint must be an HTTPS URL")
 	}
 	address := parsed.Host
 	if parsed.Port() == "" {
@@ -123,10 +125,10 @@ func PinServerCertificate(ctx context.Context, source *rest.Config, stateDirecto
 	if err != nil {
 		return nil, fmt.Errorf("observe Kubernetes API certificate: %w", err)
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 	tlsConnection, ok := connection.(*tls.Conn)
 	if !ok || len(tlsConnection.ConnectionState().PeerCertificates) == 0 {
-		return nil, fmt.Errorf("Kubernetes API returned no TLS certificate")
+		return nil, fmt.Errorf("the Kubernetes API returned no TLS certificate")
 	}
 	certificate := tlsConnection.ConnectionState().PeerCertificates[0]
 	spki := sha256.Sum256(certificate.RawSubjectPublicKeyInfo)
@@ -158,7 +160,7 @@ func persistClusterTrust(directory string, observed clusterTrust, reset bool) er
 			return fmt.Errorf("decode persisted cluster trust: %w", err)
 		}
 		if trusted.Version != 1 || trusted.Endpoint != observed.Endpoint || trusted.SPKISHA256 != observed.SPKISHA256 {
-			return fmt.Errorf("Kubernetes API identity changed; verify the new certificate and rerun with --reset-trust")
+			return fmt.Errorf("the Kubernetes API identity changed; verify the new certificate and rerun with --reset-trust")
 		}
 		return nil
 	}
@@ -174,7 +176,7 @@ func persistClusterTrust(directory string, observed clusterTrust, reset bool) er
 
 func Run(ctx context.Context, config Config) (Result, error) {
 	if config.REST == nil || config.Dynamic == nil || config.Kubernetes == nil {
-		return Result{}, fmt.Errorf("REST, dynamic, and Kubernetes clients are required")
+		return Result{}, fmt.Errorf("the REST, dynamic, and Kubernetes clients are required")
 	}
 	hostID := NormalizeHostID(config.HostID)
 	if hostID == "" {
@@ -214,7 +216,7 @@ func Run(ctx context.Context, config Config) (Result, error) {
 			return Result{}, err
 		}
 		if hasWireKubeState {
-			return Result{}, fmt.Errorf("WireKube leaf state already exists; run delete host/HOST before reenrolling with api-only connectivity")
+			return Result{}, fmt.Errorf("the WireKube leaf state already exists; run delete host/HOST before reenrolling with api-only connectivity")
 		}
 	}
 	intent, err := loadOrCreateIntent(stateDirectory, hostID)
@@ -244,8 +246,10 @@ func Run(ctx context.Context, config Config) (Result, error) {
 	var wireKubeState nativewirekube.State
 	if connectivity == nativewirekube.ConnectivityWireKube {
 		wireKubeState, err = nativewirekube.Enroll(ctx, nativewirekube.EnrollConfig{
-			Dynamic: config.Dynamic, HostID: hostID, EnrollmentID: intent.Nonce,
-			StateDirectory: stateDirectory, APIEndpoint: config.REST.Host, WaitTimeout: time.Minute,
+			Dynamic: config.Dynamic, Kubernetes: config.Kubernetes, REST: config.REST,
+			HostID: hostID, EnrollmentID: intent.Nonce, Namespace: namespace,
+			StateDirectory: stateDirectory, APIEndpoint: config.REST.Host,
+			TokenDuration: config.TokenDuration, WaitTimeout: time.Minute,
 		})
 		if err != nil {
 			return Result{}, fmt.Errorf("enroll WireKube connected leaf: %w", err)
@@ -290,7 +294,8 @@ func Run(ctx context.Context, config Config) (Result, error) {
 	}
 	return Result{
 		Namespace: namespace, AgentID: agentID, ControllerKubeconfig: controllerPath,
-		AgentKubeconfig: agentPath, ExpiresAt: expires, Connectivity: connectivity,
+		AgentKubeconfig: agentPath, LinkKubeconfig: wireKubeState.LinkKubeconfig,
+		ExpiresAt: expires, Connectivity: connectivity,
 		WireKubePeer: wireKubeState.PeerName, WireKubeAddress: wireKubeState.AssignedMeshIP,
 		ShellAccess: shellAccess,
 	}, nil
@@ -303,7 +308,7 @@ func kubernetesClientCA(ctx context.Context, client kubernetes.Interface) ([]byt
 	}
 	certificate := []byte(config.Data["client-ca-file"])
 	if len(certificate) == 0 {
-		return nil, fmt.Errorf("Kubernetes client CA for kubelet logs bridge is empty")
+		return nil, fmt.Errorf("the Kubernetes client CA for kubelet logs bridge is empty")
 	}
 	return certificate, nil
 }
@@ -399,6 +404,7 @@ func ensureAgentRBAC(ctx context.Context, client kubernetes.Interface, namespace
 			{APIGroups: []string{"ai.idleloom.io"}, Resources: []string{"idleloomworkloadassignments"}, Verbs: []string{"get", "list", "watch"}},
 			{APIGroups: []string{"ai.idleloom.io"}, Resources: []string{"idleloomworkloadassignments/status"}, ResourceNames: []string{"active"}, Verbs: []string{"get", "patch", "update"}},
 			{APIGroups: []string{""}, Resources: []string{"serviceaccounts/token"}, ResourceNames: []string{"idleloom-agent"}, Verbs: []string{"create"}},
+			{APIGroups: []string{""}, Resources: []string{"secrets"}, ResourceNames: []string{nativev1alpha1.ServingAuthSecretName}, Verbs: []string{"get"}},
 		},
 	}
 	roles := client.RbacV1().Roles(namespace)
@@ -558,7 +564,7 @@ func token(ctx context.Context, client kubernetes.Interface, namespace, serviceA
 		return "", time.Time{}, err
 	}
 	if request.Status.Token == "" || request.Status.ExpirationTimestamp.IsZero() {
-		return "", time.Time{}, fmt.Errorf("TokenRequest returned an incomplete credential")
+		return "", time.Time{}, fmt.Errorf("the TokenRequest returned an incomplete credential")
 	}
 	return request.Status.Token, request.Status.ExpirationTimestamp.Time, nil
 }
@@ -599,18 +605,15 @@ func writePrivate(name string, data []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Close(); err != nil {
 		return err

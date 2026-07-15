@@ -16,6 +16,7 @@ import (
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
 	"github.com/inerplat/idleloom/internal/native/enroll"
 	nativekube "github.com/inerplat/idleloom/internal/native/kube"
+	nativeprojection "github.com/inerplat/idleloom/internal/native/projection"
 	nativewirekube "github.com/inerplat/idleloom/internal/native/wirekube"
 	"github.com/inerplat/idleloom/internal/native/wirekubecli"
 	"github.com/spf13/pflag"
@@ -24,7 +25,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
@@ -82,7 +85,7 @@ func TestPublicUsageIsResourceOriented(t *testing.T) {
 	if !strings.HasPrefix(usageText, "idlectl ") {
 		t.Fatalf("usage does not expose the idlectl binary name: %s", usageText)
 	}
-	for _, expected := range []string{"join HOST", "run NAME", "get (hosts|workloads) [NAME]", "logs (WORKLOAD | workload/WORKLOAD)", "delete ((host|workload) NAME | (host|workload)/NAME)", "version"} {
+	for _, expected := range []string{"join HOST", "run NAME", "recipe (list | show NAME | render NAME", "get (hosts|workloads) [NAME]", "logs (WORKLOAD | workload/WORKLOAD)", "delete ((host|workload) NAME | (host|workload)/NAME)", "version"} {
 		if !strings.Contains(usageText, expected) {
 			t.Fatalf("usage does not contain %q", expected)
 		}
@@ -91,6 +94,79 @@ func TestPublicUsageIsResourceOriented(t *testing.T) {
 		if strings.Contains(usageText, legacy) {
 			t.Fatalf("usage still exposes legacy command %q", legacy)
 		}
+	}
+}
+
+func TestRecipeCommandsExposeBothBackendsAndRenderYAML(t *testing.T) {
+	var output bytes.Buffer
+	if err := runRecipe([]string{"list"}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"train/mlx-linear-regression@v1", "native", "train/container-linear-regression@v1", "worker"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("recipe list does not contain %q: %s", expected, output.String())
+		}
+	}
+	for _, expected := range []string{
+		"infer/mlx-batch@v1", "infer/ollama-gguf@v1", "infer/llama-cpp-metal@v1", "infer/llama-vulkan@v1",
+		"serve/ollama-gguf@v1", "serve/llama-cpp-metal@v1",
+	} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("recipe list does not contain %q: %s", expected, output.String())
+		}
+	}
+
+	output.Reset()
+	if err := runRecipe([]string{"show", "train/mlx-linear-regression@v1"}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"id: train/mlx-linear-regression@v1", "digest: sha256:", "backend: native", "parameters:", "example:"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("recipe show does not contain %q: %s", expected, output.String())
+		}
+	}
+
+	output.Reset()
+	values := "namespace: training\nepochs: 140\n"
+	if err := runRecipe([]string{"render", "train/container-linear-regression@v1", "--name", "worker-train", "--values", "-", "-o", "yaml"}, strings.NewReader(values), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"apiVersion: batch/v1", "kind: Job", `name: "worker-train"`, `namespace: "training"`, `value: "140"`} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("recipe render does not contain %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestRecipeCommandsRenderPairedBatchInference(t *testing.T) {
+	var output bytes.Buffer
+	if err := runRecipe([]string{"render", "infer/mlx-batch@v1", "--name", "native-infer"}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"kind: IdleloomWorkload", "mode: Batch", `catalogRef: "qwen3-5-0-8b-mlx"`} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("Native inference manifest does not contain %q: %s", expected, output.String())
+		}
+	}
+
+	output.Reset()
+	if err := runRecipe([]string{"render", "infer/llama-vulkan@v1", "--name", "worker-infer"}, strings.NewReader(""), &output); err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"kind: ResourceClaim", "kind: Job", "resourceClaimName:", "@sha256:", "sha256sum -c -"} {
+		if !strings.Contains(output.String(), expected) {
+			t.Fatalf("Worker inference manifest does not contain %q: %s", expected, output.String())
+		}
+	}
+}
+
+func TestRecipeCommandsRejectUnpinnedAndUnsupportedOutput(t *testing.T) {
+	var output bytes.Buffer
+	if err := runRecipe([]string{"show", "train/mlx-linear-regression"}, strings.NewReader(""), &output); err == nil || !strings.Contains(err.Error(), "version-pinned") {
+		t.Fatalf("unpinned show error = %v", err)
+	}
+	if err := runRecipe([]string{"render", "train/mlx-linear-regression@v1", "--name", "train", "-o", "json"}, strings.NewReader(""), &output); err == nil || !strings.Contains(err.Error(), "--output must be yaml") {
+		t.Fatalf("unsupported output error = %v", err)
 	}
 }
 
@@ -123,6 +199,38 @@ func TestHostCommandsRejectNamespacedFlagsBeforeClusterAccess(t *testing.T) {
 	}
 	if err := runDelete(context.Background(), []string{"--wait=false", "host/studio"}); err == nil || !strings.Contains(err.Error(), "always waits") {
 		t.Fatalf("delete host wait error = %v", err)
+	}
+}
+
+func TestLiveHostConditionStatusRejectsStaleTrueConditions(t *testing.T) {
+	now := time.Date(2026, time.July, 14, 12, 0, 0, 0, time.UTC)
+	fresh := metav1.NewMicroTime(now)
+	host := nativev1alpha1.IdleloomHost{
+		Status: nativev1alpha1.IdleloomHostStatus{
+			LastHeartbeatTime: &fresh,
+			Conditions: []metav1.Condition{{
+				Type: nativev1alpha1.HostConditionReady, Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+	if got := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now); got != "True" {
+		t.Fatalf("fresh Ready status = %q", got)
+	}
+
+	stale := metav1.NewMicroTime(now.Add(-nativev1alpha1.DefaultAgentHeartbeatTimeout - nativev1alpha1.HeartbeatClockSkewAllowance - time.Second))
+	host.Status.LastHeartbeatTime = &stale
+	if got := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now); got != "Stale" {
+		t.Fatalf("stale Ready status = %q", got)
+	}
+
+	host.Status.LastHeartbeatTime = nil
+	if got := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now); got != "Unknown" {
+		t.Fatalf("missing-heartbeat Ready status = %q", got)
+	}
+
+	host.Status.Conditions[0].Status = metav1.ConditionFalse
+	if got := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now); got != "False" {
+		t.Fatalf("explicit false Ready status = %q", got)
 	}
 }
 
@@ -161,10 +269,74 @@ func TestLocalLogsRejectsFollowBeforeClusterAccess(t *testing.T) {
 	}
 }
 
+func TestWaitForProjectedLogEndpointUsesReadyProjection(t *testing.T) {
+	uid := types.UID("workload-uid")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "projected", Namespace: "default",
+			Labels: map[string]string{nativeprojection.LabelWorkloadUID: string(uid)},
+			Annotations: map[string]string{
+				nativeprojection.AnnotationLogs: "supported", nativeprojection.AnnotationKubeletAPI: "logs-only",
+			},
+		},
+		Spec: corev1.PodSpec{NodeName: "projected-node"},
+	}
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "projected-node"},
+		Status: corev1.NodeStatus{
+			Addresses:       []corev1.NodeAddress{{Type: corev1.NodeInternalIP, Address: "198.18.0.10"}},
+			DaemonEndpoints: corev1.NodeDaemonEndpoints{KubeletEndpoint: corev1.DaemonEndpoint{Port: 10250}},
+		},
+	}
+	client := kubernetesfake.NewClientset(pod, node)
+	name, err := waitForProjectedLogEndpoint(context.Background(), client, "default", "job", uid, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != pod.Name {
+		t.Fatalf("projected Pod = %q, want %q", name, pod.Name)
+	}
+}
+
+func TestWaitForProjectedLogEndpointReportsConvergenceTimeout(t *testing.T) {
+	uid := types.UID("workload-uid")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "projected", Namespace: "default",
+			Labels:      map[string]string{nativeprojection.LabelWorkloadUID: string(uid)},
+			Annotations: map[string]string{nativeprojection.AnnotationLogs: "unsupported"},
+		},
+		Spec: corev1.PodSpec{NodeName: "projected-node"},
+	}
+	client := kubernetesfake.NewClientset(pod)
+	_, err := waitForProjectedLogEndpoint(context.Background(), client, "default", "job", uid, 50*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "projection log probe has not succeeded") {
+		t.Fatalf("wait error = %v", err)
+	}
+}
+
+func TestPreferredNodeAddressUsesKubernetesPreferenceOrder(t *testing.T) {
+	addresses := []corev1.NodeAddress{
+		{Type: corev1.NodeHostName, Address: "node.example"},
+		{Type: corev1.NodeExternalIP, Address: "203.0.113.10"},
+		{Type: corev1.NodeInternalIP, Address: "198.18.0.10"},
+	}
+	if got := preferredNodeAddress(addresses); got != "198.18.0.10" {
+		t.Fatalf("preferred address = %q", got)
+	}
+}
+
 func TestJoinRejectsEmptyNormalizedHostBeforeClusterAccess(t *testing.T) {
 	err := runJoin(context.Background(), []string{"___"})
 	if err == nil || !strings.Contains(err.Error(), "letter or digit") {
 		t.Fatalf("runJoin invalid host error = %v", err)
+	}
+}
+
+func TestRunRejectsNameThatCannotBeUsedAsRunLabel(t *testing.T) {
+	err := runWorkload(context.Background(), []string{"run.with.dots", "--shell", "true"})
+	if err == nil || !strings.Contains(err.Error(), "invalid workload name") {
+		t.Fatalf("runWorkload error = %v", err)
 	}
 }
 
@@ -182,7 +354,9 @@ func TestJoinRejectsExistingLocalInstallationBeforeClusterAccess(t *testing.T) {
 func TestMissingWireKubeRequiresExplicitNonInteractiveDependencyInstall(t *testing.T) {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+		nativewirekube.ServicesGVR:      "ServiceList",
 	})
 	called := false
 	original := newWireKubeLifecycle
@@ -210,13 +384,18 @@ func TestExistingCompatibleWireKubeSkipsDependencyResolver(t *testing.T) {
 		"metadata":   map[string]any{"name": "default"},
 		"spec": map[string]any{
 			"meshCIDR": "172.31.240.0/20",
-			"relay":    map[string]any{"mode": "auto", "provider": "managed"},
+			"relay": map[string]any{
+				"mode": "auto", "provider": "managed",
+				"managed": map[string]any{"transport": "wss", "controlEndpoint": "wss://relay.example.test/relay"},
+			},
 		},
 		"status": map[string]any{"readyPeers": int64(1)},
 	}}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+		nativewirekube.ServicesGVR:      "ServiceList",
 	})
 	if err := client.Tracker().Create(nativewirekube.MeshesGVR, mesh, ""); err != nil {
 		t.Fatal(err)
@@ -247,13 +426,15 @@ func TestExistingCompatibleWireKubeSkipsDependencyResolver(t *testing.T) {
 func TestMissingWireKubePlansInstallsAndContinuesJoin(t *testing.T) {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		nativewirekube.MeshesGVR:        "WireKubeMeshList",
+		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
+		nativewirekube.ServicesGVR:      "ServiceList",
 	})
 	lifecycle := &fakeWireKubeLifecycle{plan: wirekubecli.Plan{
 		Context: "cluster", WireKubeVersion: wirekubecli.CompatibleVersion,
 		Image: "example.test/wirekube@sha256:" + strings.Repeat("a", 64),
-		Relay: "load-balancer", RelayUDP: true, MeshCIDR: "100.96.0.0/11", NodeAddresses: "internal-ip",
-		Impact: []string{"one public TCP LoadBalancer", "one separate public UDP LoadBalancer"},
+		Relay: "load-balancer", RelayUDP: false, MeshCIDR: "100.96.0.0/11", NodeAddresses: "internal-ip",
+		Impact: []string{"one public TCP LoadBalancer"},
 	}}
 	lifecycle.plan.Detection.KubernetesVersion = "v1.35.3"
 	lifecycle.plan.Detection.CNI = "cilium"
@@ -272,7 +453,7 @@ func TestMissingWireKubePlansInstallsAndContinuesJoin(t *testing.T) {
 	if lifecycle.planCalls != 1 || lifecycle.installCalls != 1 {
 		t.Fatalf("plan calls=%d install calls=%d", lifecycle.planCalls, lifecycle.installCalls)
 	}
-	for _, text := range []string{"Idleloom connected-host plan", "one separate public UDP LoadBalancer", "continuing host enrollment"} {
+	for _, text := range []string{"Idleloom connected-host plan", "one public TCP LoadBalancer", "continuing host enrollment"} {
 		if !strings.Contains(output.String(), text) {
 			t.Fatalf("output does not contain %q: %s", text, output.String())
 		}
@@ -380,6 +561,18 @@ func TestCompanionBinaryNamesDispatchInternally(t *testing.T) {
 	}
 }
 
+func TestCanonicalBinaryDispatchesInternalRoles(t *testing.T) {
+	for _, role := range []string{"controller", "agent", "link", "projection"} {
+		handled, err := runInternalCommand(context.Background(), []string{"internal", role, "--help"})
+		if !handled || !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("%s handled=%t err=%v", role, handled, err)
+		}
+	}
+	if handled, err := runInternalCommand(context.Background(), []string{"help"}); handled || err != nil {
+		t.Fatalf("public command was handled internally: handled=%t err=%v", handled, err)
+	}
+}
+
 func TestResolveNamespaceUsesSelectedKubeconfigContext(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config")
 	config := clientcmdapi.Config{
@@ -428,5 +621,22 @@ func TestSecureClusterConfigPreservesVerifiedTLS(t *testing.T) {
 	}
 	if secured != config {
 		t.Fatal("verified Kubernetes config was unnecessarily copied")
+	}
+}
+
+func TestAssignedMeshIPv4AcceptsAddressAndHostPrefix(t *testing.T) {
+	for _, value := range []string{"198.18.0.10", "198.18.0.10/32"} {
+		got, err := assignedMeshIPv4(value)
+		if err != nil {
+			t.Fatalf("assignedMeshIPv4(%q): %v", value, err)
+		}
+		if got != "198.18.0.10" {
+			t.Fatalf("assignedMeshIPv4(%q) = %q", value, got)
+		}
+	}
+	for _, value := range []string{"", "not-an-ip", "198.18.0.0/24", "2001:db8::1/128"} {
+		if _, err := assignedMeshIPv4(value); err == nil {
+			t.Fatalf("assignedMeshIPv4(%q) succeeded", value)
+		}
 	}
 }

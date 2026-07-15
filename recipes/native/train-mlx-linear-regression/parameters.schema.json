@@ -1,0 +1,53 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "namespace": {
+      "type": "string",
+      "description": "Namespace for the IdleloomWorkload.",
+      "default": "default",
+      "format": "namespace"
+    },
+    "experiment": {
+      "type": "string",
+      "description": "Experiment grouping label recorded on the immutable run.",
+      "default": "linear-regression",
+      "format": "dnsLabel",
+      "maxLength": 63
+    },
+    "attempt": {
+      "type": "integer",
+      "description": "One-based attempt number; retries are new workload objects.",
+      "default": 1,
+      "minimum": 1,
+      "maximum": 1000
+    },
+    "learningRate": {
+      "type": "number",
+      "description": "Gradient descent learning rate.",
+      "default": 0.08,
+      "exclusiveMinimum": 0,
+      "maximum": 1
+    },
+    "steps": {
+      "type": "integer",
+      "description": "Number of optimization steps.",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 100000
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "description": "Maximum training runtime.",
+      "default": 120,
+      "minimum": 1,
+      "maximum": 86400
+    },
+    "unifiedMemory": {
+      "type": "string",
+      "description": "Unified memory reservation hint for Native scheduling.",
+      "default": "512Mi",
+      "format": "positiveQuantity"
+    }
+  }
+}

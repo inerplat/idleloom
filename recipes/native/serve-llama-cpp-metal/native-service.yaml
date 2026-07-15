@@ -1,0 +1,52 @@
+apiVersion: ai.idleloom.io/v1alpha1
+kind: IdleloomWorkload
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: serve
+    ai.idleloom.io/backend: native
+    ai.idleloom.io/runtime: llama-cpp-metal
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+spec:
+  mode: Server
+  run:
+    task: serve
+    experiment: {{ quote .Name }}
+    attempt: 1
+  model:
+    catalogRef: {{ quote (index .Values "model") }}
+  server:
+    serviceName: {{ quote .Name }}
+    modelAlias: {{ quote (index .Values "modelAlias") }}
+  resources:
+    unifiedMemoryRequest: {{ quote (index .Values "unifiedMemory") }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ quote .Name }}
+  namespace: {{ quote .Namespace }}
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/run: {{ quote .Name }}
+    ai.idleloom.io/task: serve
+    ai.idleloom.io/backend: native
+    ai.idleloom.io/runtime: llama-cpp-metal
+  annotations:
+    ai.idleloom.io/recipe: {{ quote .RecipeID }}
+    ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
+    ai.idleloom.io/input-digest: {{ quote .InputDigest }}
+    ai.idleloom.io/native-workload: {{ quote .Name }}
+    ai.idleloom.io/auth-secret: {{ quote (printf "%s-auth" .Name) }}
+spec:
+  type: ClusterIP
+  ports:
+  - name: http
+    port: {{ integer (index .Values "servicePort") }}
+    protocol: TCP

@@ -1,0 +1,5 @@
+namespace: default
+epochs: 120
+learningRate: 0.08
+cpu: 250m
+memory: 128Mi

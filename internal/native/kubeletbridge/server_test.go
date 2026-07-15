@@ -3,8 +3,10 @@ package kubeletbridge
 import (
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -13,7 +15,9 @@ import (
 func TestLogsHandlerServesOnlyCurrentProjectedContainer(t *testing.T) {
 	buffer := NewLogBuffer(1024)
 	now := time.Unix(1_800_000_000, 0).UTC()
-	buffer.Reset("assignment-one", now, "process started")
+	if err := buffer.Reset("assignment-one", now, "process started"); err != nil {
+		t.Fatal(err)
+	}
 	server := &Server{config: ServerConfig{
 		Logs: buffer,
 		ResolveTarget: func() (Target, bool) {
@@ -59,5 +63,29 @@ func TestAuthorizeAcceptsConfiguredKubeletClientSubject(t *testing.T) {
 	server.authorize(server.handleHealth)(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d", response.Code)
+	}
+}
+
+func TestUnsupportedStreamingEndpointsReturnExplicitError(t *testing.T) {
+	server := &Server{config: ServerConfig{}}
+	for _, path := range []string{
+		"/exec/default/projected/native-metal",
+		"/attach/default/projected/native-metal",
+		"/portForward/default/projected",
+	} {
+		request := httptest.NewRequest(http.MethodPost, "https://example.test"+path, nil)
+		response := httptest.NewRecorder()
+		server.handleUnsupportedStreaming(response, request)
+		if response.Code != http.StatusNotImplemented || !strings.Contains(response.Body.String(), "not supported") {
+			t.Fatalf("%s response = %d %q", path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestParseLogOptionsRejectsSinceSecondsDurationOverflow(t *testing.T) {
+	values := make(url.Values)
+	values["sinceSeconds"] = []string{fmt.Sprintf("%d", int64(^uint64(0)>>1)/int64(time.Second)+1)}
+	if _, err := parseLogOptions(values, time.Now()); err == nil || !strings.Contains(err.Error(), "invalid sinceSeconds") {
+		t.Fatalf("overflow error = %v", err)
 	}
 }

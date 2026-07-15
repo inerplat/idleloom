@@ -7,6 +7,6 @@ import (
 	"fmt"
 )
 
-func startPlatformTunnel(context.Context, State, func(string, ...any)) (Tunnel, error) {
-	return nil, fmt.Errorf("WireKube connected leaf currently requires macOS")
+func startPlatformTunnel(context.Context, State, TunnelConfig, func(string, ...any)) (Tunnel, error) {
+	return nil, fmt.Errorf("the WireKube connected leaf currently requires macOS")
 }

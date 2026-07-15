@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,24 +27,34 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
 )
 
 type DevAgentConfig struct {
-	Dynamic            dynamic.Interface
-	Namespace          string
-	AgentID            string
-	Layout             devruntime.Layout
-	StateDirectory     string
-	KubeconfigPath     string
-	ListenAddress      string
-	PollInterval       time.Duration
-	Now                func() time.Time
-	Logf               func(string, ...any)
-	ConnectivityStatus func() (nativev1alpha1.HostConnectivityStatus, error)
-	Platform           Platform
-	StartProcess       func(context.Context, devruntime.ProcessConfig) (Process, error)
-	StartShell         func(context.Context, devruntime.ShellConfig) (Process, error)
-	KubeletBridge      *KubeletBridgeConfig
+	Dynamic                dynamic.Interface
+	Kubernetes             kubernetes.Interface
+	Namespace              string
+	AgentID                string
+	Layout                 devruntime.Layout
+	StateDirectory         string
+	KubeconfigPath         string
+	ListenAddress          string
+	ServeListenAddress     string
+	PollInterval           time.Duration
+	Now                    func() time.Time
+	Logf                   func(string, ...any)
+	ConnectivityStatus     func() (nativev1alpha1.HostConnectivityStatus, error)
+	Platform               Platform
+	StartProcess           func(context.Context, devruntime.ProcessConfig) (Process, error)
+	StartOllama            func(context.Context, devruntime.OllamaProcessConfig) (Process, error)
+	StartLlamaCpp          func(context.Context, devruntime.LlamaCppProcessConfig) (Process, error)
+	StartShell             func(context.Context, devruntime.ShellConfig) (Process, error)
+	StartTraining          func(context.Context, devruntime.TrainingConfig) (Process, error)
+	ResolveOllama          func() (devruntime.OllamaRuntime, []devruntime.OllamaModel, error)
+	ResolveLlamaCpp        func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, error)
+	PrepareRuntime         func(context.Context, func(string)) (devruntime.Receipt, error)
+	PrepareTrainingRuntime func(context.Context, func(string)) (devruntime.RuntimeReceipt, error)
+	KubeletBridge          *KubeletBridgeConfig
 }
 
 type KubeletBridgeConfig struct {
@@ -72,12 +85,15 @@ type DevAgent struct {
 	endpointToken  string
 	logs           *kubeletbridge.LogBuffer
 	bridgeErrors   chan error
+	runStatus      *nativev1alpha1.WorkloadRunStatus
+	runProtocolErr error
 }
 
 type agentLogWriter struct {
 	agent   *DevAgent
 	mu      sync.Mutex
 	pending []byte
+	onLine  func(time.Time, string)
 }
 
 func (writer *agentLogWriter) Write(data []byte) (int, error) {
@@ -89,11 +105,11 @@ func (writer *agentLogWriter) Write(data []byte) (int, error) {
 		if newline < 0 {
 			break
 		}
-		writer.agent.appendLogMessage(writer.agent.now(), string(writer.pending[:newline]))
+		writer.writeLine(string(writer.pending[:newline]))
 		writer.pending = writer.pending[newline+1:]
 	}
 	for len(writer.pending) > 64<<10 {
-		writer.agent.appendLogMessage(writer.agent.now(), string(writer.pending[:64<<10]))
+		writer.writeLine(string(writer.pending[:64<<10]))
 		writer.pending = writer.pending[64<<10:]
 	}
 	return len(data), nil
@@ -105,8 +121,16 @@ func (writer *agentLogWriter) Flush() {
 	if len(writer.pending) == 0 {
 		return
 	}
-	writer.agent.appendLogMessage(writer.agent.now(), string(writer.pending))
+	writer.writeLine(string(writer.pending))
 	writer.pending = nil
+}
+
+func (writer *agentLogWriter) writeLine(message string) {
+	now := writer.agent.now()
+	writer.agent.appendLogMessage(now, message)
+	if writer.onLine != nil {
+		writer.onLine(now, message)
+	}
 }
 
 var ErrProcessExited = errors.New("native process exited unexpectedly")
@@ -133,9 +157,90 @@ func NewDevAgent(config DevAgentConfig) (*DevAgent, error) {
 			return devruntime.Start(ctx, processConfig)
 		}
 	}
+	if config.StartOllama == nil {
+		config.StartOllama = func(ctx context.Context, processConfig devruntime.OllamaProcessConfig) (Process, error) {
+			return devruntime.StartOllama(ctx, processConfig)
+		}
+	}
+	if config.StartLlamaCpp == nil {
+		config.StartLlamaCpp = func(ctx context.Context, processConfig devruntime.LlamaCppProcessConfig) (Process, error) {
+			return devruntime.StartLlamaCpp(ctx, processConfig)
+		}
+	}
 	if config.StartShell == nil {
 		config.StartShell = func(ctx context.Context, shellConfig devruntime.ShellConfig) (Process, error) {
 			return devruntime.StartShell(ctx, shellConfig)
+		}
+	}
+	if config.StartTraining == nil {
+		config.StartTraining = func(ctx context.Context, trainingConfig devruntime.TrainingConfig) (Process, error) {
+			return devruntime.StartTraining(ctx, trainingConfig)
+		}
+	}
+	if config.ResolveOllama == nil {
+		var ollamaMu sync.Mutex
+		var ollamaRuntime devruntime.OllamaRuntime
+		var lastOllamaAttempt time.Time
+		var lastOllamaErr error
+		config.ResolveOllama = func() (devruntime.OllamaRuntime, []devruntime.OllamaModel, error) {
+			ollamaMu.Lock()
+			defer ollamaMu.Unlock()
+			if ollamaRuntime.Executable == "" {
+				if lastOllamaErr != nil && time.Since(lastOllamaAttempt) < 30*time.Second {
+					return devruntime.OllamaRuntime{}, nil, lastOllamaErr
+				}
+				lastOllamaAttempt = time.Now()
+				resolved, err := devruntime.FindOllama("", "")
+				if err != nil {
+					lastOllamaErr = err
+					return devruntime.OllamaRuntime{}, nil, err
+				}
+				ollamaRuntime = resolved
+				lastOllamaErr = nil
+			}
+			models, err := devruntime.DiscoverOllamaModels(ollamaRuntime)
+			return ollamaRuntime, models, err
+		}
+	}
+	if config.ResolveLlamaCpp == nil {
+		var llamaMu sync.Mutex
+		var llamaRuntime devruntime.LlamaCppRuntime
+		var lastLlamaAttempt time.Time
+		var lastLlamaErr error
+		discovery := &devruntime.LlamaCppDiscovery{}
+		config.ResolveLlamaCpp = func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, error) {
+			llamaMu.Lock()
+			defer llamaMu.Unlock()
+			if llamaRuntime.Executable == "" {
+				if lastLlamaErr != nil && time.Since(lastLlamaAttempt) < 30*time.Second {
+					return devruntime.LlamaCppRuntime{}, nil, lastLlamaErr
+				}
+				lastLlamaAttempt = time.Now()
+				resolved, err := devruntime.FindLlamaCpp(context.Background(), "", filepath.Join(config.Layout.Root, "models", "gguf"))
+				if err != nil {
+					lastLlamaErr = err
+					return devruntime.LlamaCppRuntime{}, nil, err
+				}
+				llamaRuntime = resolved
+				lastLlamaErr = nil
+			}
+			models, err := discovery.Discover(context.Background(), llamaRuntime)
+			return llamaRuntime, models, err
+		}
+	}
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && (config.PrepareRuntime == nil || config.PrepareTrainingRuntime == nil) {
+		python, pythonErr := devruntime.FindPython312("")
+		if platformErr := devruntime.CheckMLXPlatform(); platformErr == nil && pythonErr == nil {
+			if config.PrepareRuntime == nil {
+				config.PrepareRuntime = func(ctx context.Context, progress func(string)) (devruntime.Receipt, error) {
+					return (devruntime.Preparer{Root: config.Layout.Root, Python: python, Progress: progress}).Prepare(ctx)
+				}
+			}
+			if config.PrepareTrainingRuntime == nil {
+				config.PrepareTrainingRuntime = func(ctx context.Context, progress func(string)) (devruntime.RuntimeReceipt, error) {
+					return (devruntime.Preparer{Root: config.Layout.Root, Python: python, Progress: progress}).PrepareRuntime(ctx)
+				}
+			}
 		}
 	}
 	if err := os.MkdirAll(config.StateDirectory, 0o700); err != nil {
@@ -150,13 +255,11 @@ func NewDevAgent(config DevAgentConfig) (*DevAgent, error) {
 	}
 	token, err := secureToken()
 	if err != nil {
-		store.Close()
-		return nil, err
+		return nil, errors.Join(err, store.Close())
 	}
 	logs, err := kubeletbridge.OpenLogBuffer(filepath.Join(config.StateDirectory, "container-logs.jsonl"), 1<<20)
 	if err != nil {
-		store.Close()
-		return nil, err
+		return nil, errors.Join(err, store.Close())
 	}
 	return &DevAgent{config: config, store: store, endpointToken: token, logs: logs}, nil
 }
@@ -279,6 +382,9 @@ func (a *DevAgent) reconcile(ctx context.Context) error {
 	if err := ValidateMailbox(&assignment, &host, a.config.AgentID, a.store.Current()); err != nil {
 		return err
 	}
+	if err := a.fenceSupersededExecution(ctx, &assignment); err != nil {
+		return err
+	}
 	a.markAPISuccess()
 	if assignment.Spec.DesiredState == nativev1alpha1.AssignmentDesiredStopped {
 		if err := a.stopAssignment(ctx, &assignment); err != nil {
@@ -292,7 +398,7 @@ func (a *DevAgent) reconcile(ctx context.Context) error {
 		}
 		return a.updateHostStatus(ctx, &host, true, "")
 	}
-	if phase, terminal := a.completedShellPhase(&assignment); terminal {
+	if phase, terminal := a.completedAssignmentPhase(&assignment); terminal {
 		a.mu.Lock()
 		a.assignment = assignment.DeepCopy()
 		a.mu.Unlock()
@@ -301,8 +407,10 @@ func (a *DevAgent) reconcile(ctx context.Context) error {
 		}
 		return a.updateHostStatus(ctx, &host, false, "")
 	}
-	if err := a.updateAssignmentStatus(ctx, &assignment, nativev1alpha1.PhaseStarting, nil); err != nil {
-		return err
+	if !a.processRunningFor(&assignment) {
+		if err := a.updateAssignmentStatus(ctx, &assignment, nativev1alpha1.PhaseStarting, nil); err != nil {
+			return err
+		}
 	}
 	if err := a.ensureProcess(ctx, &assignment); err != nil {
 		if errors.Is(err, ErrProcessCompleted) {
@@ -321,8 +429,8 @@ func (a *DevAgent) reconcile(ctx context.Context) error {
 	return a.updateHostStatus(ctx, &host, false, assignment.UID)
 }
 
-func (a *DevAgent) completedShellPhase(assignment *nativev1alpha1.IdleloomWorkloadAssignment) (string, bool) {
-	if assignment.Spec.Shell == nil || assignment.Status.ObservedGeneration != assignment.Generation || assignment.Status.AgentID != a.config.AgentID || assignment.Status.ExecutionID != assignment.Spec.ExecutionID || assignment.Status.FencingEpoch != assignment.Spec.FencingEpoch {
+func (a *DevAgent) completedAssignmentPhase(assignment *nativev1alpha1.IdleloomWorkloadAssignment) (string, bool) {
+	if !finiteAssignment(assignment) || assignment.Status.ObservedGeneration != assignment.Generation || assignment.Status.AgentID != a.config.AgentID || assignment.Status.ExecutionID != assignment.Spec.ExecutionID || assignment.Status.FencingEpoch != assignment.Spec.FencingEpoch {
 		return "", false
 	}
 	if assignment.Status.Phase != nativev1alpha1.PhaseSucceeded && assignment.Status.Phase != nativev1alpha1.PhaseFailed {
@@ -332,56 +440,160 @@ func (a *DevAgent) completedShellPhase(assignment *nativev1alpha1.IdleloomWorklo
 }
 
 func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) error {
-	a.mu.RLock()
-	process := a.process
-	running := process != nil && process.Alive() && a.assignment != nil && a.assignment.UID == assignment.UID && a.assignment.Spec.ExecutionID == assignment.Spec.ExecutionID
-	a.mu.RUnlock()
-	if running {
+	if a.processRunningFor(assignment) {
 		return nil
 	}
+	a.mu.RLock()
+	process := a.process
+	a.mu.RUnlock()
+	if process == nil && !finiteAssignment(assignment) {
+		if err := a.clearRestartableExecution(ctx, assignment); err != nil {
+			return err
+		}
+	}
 	if process != nil {
-		if assignment.Spec.Shell != nil && !process.Alive() {
+		if finiteAssignment(assignment) && !process.Alive() {
+			kind := "shell process"
+			if assignment.Spec.Model != nil {
+				kind = "batch inference"
+			} else if assignment.Spec.Training != nil {
+				kind = "training process"
+			}
 			waitErr := process.WaitError()
+			if assignment.Spec.Training != nil {
+				a.mu.RLock()
+				protocolErr := a.runProtocolErr
+				a.mu.RUnlock()
+				waitErr = errors.Join(waitErr, protocolErr)
+			}
 			current := a.store.Current()
 			if current == nil || !recordMatchesAssignment(*current, assignment) {
-				return fmt.Errorf("shell completion does not match the durable execution journal")
+				return fmt.Errorf("finite workload completion does not match the durable execution journal")
 			}
 			if err := a.store.Complete(*current, waitErr); err != nil {
-				return fmt.Errorf("persist shell completion: %w", err)
+				return fmt.Errorf("persist %s completion: %w", kind, err)
 			}
 			if err := a.stopProcess(); err != nil {
 				return err
 			}
 			if waitErr == nil {
-				a.appendLog(a.now(), "shell process completed successfully")
+				a.appendLog(a.now(), "%s completed successfully", kind)
 				return ErrProcessCompleted
 			}
-			a.appendLog(a.now(), "shell process exited with error: %v", waitErr)
-			return fmt.Errorf("shell process exited: %w", waitErr)
+			a.appendLog(a.now(), "%s exited with error: %v", kind, waitErr)
+			return fmt.Errorf("%s exited: %w", kind, waitErr)
 		}
 		if err := a.stopProcess(); err != nil {
 			return err
 		}
+		if !finiteAssignment(assignment) {
+			if err := a.clearRestartableExecution(ctx, assignment); err != nil {
+				return err
+			}
+		}
 		return ErrProcessExited
 	}
-	if assignment.Spec.Shell != nil {
+	if finiteAssignment(assignment) {
 		if current := a.store.Current(); current != nil && current.Completed && recordMatchesAssignment(*current, assignment) {
 			if current.ExitError == "" {
 				return ErrProcessCompleted
 			}
-			return fmt.Errorf("shell process exited: %s", current.ExitError)
+			return fmt.Errorf("finite native workload exited: %s", current.ExitError)
 		}
 	}
+	a.mu.Lock()
+	a.assignment = assignment.DeepCopy()
+	a.runStatus = nil
+	a.runProtocolErr = nil
+	if assignment.Spec.Run != nil {
+		a.runStatus = cloneRunStatus(assignment.Status.Run)
+		if a.runStatus == nil {
+			a.runStatus = &nativev1alpha1.WorkloadRunStatus{
+				ID: assignment.Spec.ExecutionID, Task: assignment.Spec.Run.Task,
+				Experiment: assignment.Spec.Run.Experiment, Attempt: assignment.Spec.Run.Attempt,
+			}
+		}
+	}
+	a.mu.Unlock()
+	a.beginAssignmentLog(assignment)
 	var receipt devruntime.Receipt
+	var runtimeReceipt devruntime.RuntimeReceipt
+	var ollamaRuntime devruntime.OllamaRuntime
+	var ollamaModel devruntime.OllamaModel
+	var llamaRuntime devruntime.LlamaCppRuntime
+	var llamaModel devruntime.LlamaCppModel
+	runtimeVersion := ""
+	executable := filepath.Join(a.config.Layout.Venv, "bin", "python")
 	var err error
 	if assignment.Spec.Model != nil {
-		receipt, err = devruntime.VerifyFast(a.config.Layout)
+		switch assignment.Spec.Model.RuntimeProfile {
+		case nativev1alpha1.RuntimeProfileMLXLMV1:
+			receipt, err = devruntime.VerifyFast(a.config.Layout)
+			if err != nil && a.config.PrepareRuntime != nil {
+				a.appendLog(a.now(), "preparing locked MLX runtime and model")
+				receipt, err = a.prepareRuntimeWithLease(ctx, assignment)
+			}
+			if err != nil {
+				return fmt.Errorf("prepare locked MLX runtime: %w", err)
+			}
+			if assignment.Spec.Model.Artifact.OCIReference != receipt.ArtifactIdentity || assignment.Spec.Model.Artifact.ManifestDigest != receipt.ManifestDigest || assignment.Spec.Model.Family != nativev1alpha1.ModelFamilyQwen35 {
+				return fmt.Errorf("assignment is not the exact locked MLX model")
+			}
+			runtimeVersion = receipt.RuntimeVersion
+		case nativev1alpha1.RuntimeProfileOllamaGGUFV1:
+			var models []devruntime.OllamaModel
+			ollamaRuntime, models, err = a.config.ResolveOllama()
+			if err != nil {
+				return fmt.Errorf("resolve local Ollama runtime: %w", err)
+			}
+			for _, candidate := range models {
+				if candidate.Name == assignment.Spec.Model.Artifact.OllamaModel && candidate.ManifestDigest == assignment.Spec.Model.Artifact.ManifestDigest {
+					ollamaModel = candidate
+					break
+				}
+			}
+			if ollamaModel.Name == "" || ollamaModel.Family != assignment.Spec.Model.Family || ollamaModel.Format != assignment.Spec.Model.Artifact.Format || ollamaModel.SizeBytes != assignment.Spec.Model.Artifact.SizeBytes {
+				return fmt.Errorf("the exact pinned Ollama GGUF model is not installed on this host")
+			}
+			runtimeVersion = "ollama-" + ollamaRuntime.Version
+			executable = ollamaRuntime.Executable
+		case nativev1alpha1.RuntimeProfileLlamaCppMetalV1:
+			var models []devruntime.LlamaCppModel
+			llamaRuntime, models, err = a.config.ResolveLlamaCpp()
+			if err != nil {
+				return fmt.Errorf("resolve local llama.cpp runtime: %w", err)
+			}
+			for _, candidate := range models {
+				if candidate.Name == assignment.Spec.Model.Artifact.GGUFFile && candidate.ManifestDigest == assignment.Spec.Model.Artifact.ManifestDigest {
+					llamaModel = candidate
+					break
+				}
+			}
+			if llamaModel.Name == "" || llamaModel.Family != assignment.Spec.Model.Family || llamaModel.Format != assignment.Spec.Model.Artifact.Format || llamaModel.SizeBytes != assignment.Spec.Model.Artifact.SizeBytes {
+				return fmt.Errorf("the exact pinned llama.cpp GGUF model is not installed on this host")
+			}
+			runtimeVersion = "llama.cpp-" + llamaRuntime.Version
+			executable = llamaRuntime.Executable
+		default:
+			return fmt.Errorf("assignment requests an unsupported model runtime %q", assignment.Spec.Model.RuntimeProfile)
+		}
+	} else if assignment.Spec.Training != nil {
+		runtimeReceipt, err = devruntime.VerifyRuntimeFast(a.config.Layout)
+		if err != nil && a.config.PrepareTrainingRuntime != nil {
+			a.appendLog(a.now(), "preparing locked MLX training runtime")
+			runtimeReceipt, err = a.prepareTrainingRuntimeWithLease(ctx, assignment)
+		}
 		if err != nil {
-			return err
+			return fmt.Errorf("prepare locked MLX training runtime: %w", err)
 		}
-		if assignment.Spec.Model.Artifact.OCIReference != receipt.ArtifactIdentity || assignment.Spec.Model.Artifact.ManifestDigest != receipt.ManifestDigest || assignment.Spec.Model.RuntimeProfile != nativev1alpha1.RuntimeProfileMLXLMV1 || assignment.Spec.Model.Family != nativev1alpha1.ModelFamilyQwen35 {
-			return fmt.Errorf("assignment is not the exact locked development model")
+		if assignment.Spec.Training.RuntimeProfile != nativev1alpha1.RuntimeProfileMLXTrainV1 {
+			return fmt.Errorf("assignment requests an unsupported training runtime")
 		}
+		digest := sha256.Sum256([]byte(assignment.Spec.Training.Source))
+		if assignment.Spec.Training.SourceDigest != "sha256:"+hex.EncodeToString(digest[:]) {
+			return fmt.Errorf("training source digest does not match the resolved assignment")
+		}
+		runtimeVersion = runtimeReceipt.RuntimeVersion
 	}
 	nonce, err := secureToken()
 	if err != nil {
@@ -394,8 +606,8 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 		AssignmentUID:      string(assignment.UID),
 		ExecutionID:        assignment.Spec.ExecutionID,
 		FencingEpoch:       assignment.Spec.FencingEpoch,
-		Executable:         filepath.Join(a.config.Layout.Venv, "bin", "python"),
-		RuntimeVersion:     receipt.RuntimeVersion,
+		Executable:         executable,
+		RuntimeVersion:     runtimeVersion,
 		Nonce:              nonce,
 	}
 	if assignment.Spec.Shell != nil {
@@ -405,17 +617,20 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 	if err := a.store.Begin(planned); err != nil {
 		return err
 	}
-	a.resetLog(string(assignment.UID), a.now(), "assignment accepted: execution="+assignment.Spec.ExecutionID)
 	if assignment.Spec.Model != nil {
-		a.appendLog(a.now(), "verified locked MLX runtime and model artifact")
-		a.appendLog(a.now(), "starting sandboxed MLX process")
+		a.appendLog(a.now(), "verified pinned %s runtime and model artifact", assignment.Spec.Model.RuntimeProfile)
+		if assignment.Spec.Model.Batch != nil {
+			a.appendLog(a.now(), "starting Native batch inference")
+		} else {
+			a.appendLog(a.now(), "starting Native model server process")
+		}
+	} else if assignment.Spec.Training != nil {
+		a.appendLog(a.now(), "verified locked MLX training runtime")
+		a.appendLog(a.now(), "starting MLX training run: experiment=%s attempt=%d network=%s", assignment.Spec.Run.Experiment, assignment.Spec.Run.Attempt, assignment.Spec.Training.Network)
 	} else {
 		a.appendLog(a.now(), "starting shell process: isolation=%s network=%s", assignment.Spec.Shell.Isolation, assignment.Spec.Shell.Network)
 	}
-	a.mu.Lock()
-	a.assignment = assignment.DeepCopy()
-	a.mu.Unlock()
-	process, err = a.startProcessWithLease(ctx, assignment, planned, nonce)
+	process, err = a.startProcessWithLease(ctx, assignment, planned, nonce, ollamaRuntime, ollamaModel, llamaRuntime, llamaModel)
 	if err != nil {
 		a.appendLog(a.now(), "native process failed to start: %v", err)
 		if current := a.store.Current(); current != nil {
@@ -423,22 +638,88 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 				_ = a.store.Clear(*current)
 			}
 		}
-		a.mu.Lock()
-		a.assignment = nil
-		a.mu.Unlock()
-		if assignment.Spec.Shell != nil {
+		if assignment.Spec.Shell != nil || assignment.Spec.Training != nil {
 			_ = os.RemoveAll(shellWorkDirectory(a.config.Layout, assignment.UID))
+		}
+		if assignment.Spec.Model != nil && assignment.Spec.Model.RuntimeProfile == nativev1alpha1.RuntimeProfileOllamaGGUFV1 {
+			_ = os.RemoveAll(ollamaWorkDirectory(a.config.Layout, assignment.UID))
+		}
+		if assignment.Spec.Model != nil && assignment.Spec.Model.RuntimeProfile == nativev1alpha1.RuntimeProfileLlamaCppMetalV1 {
+			_ = os.RemoveAll(llamaCppWorkDirectory(a.config.Layout, assignment.UID))
 		}
 		return err
 	}
 	a.mu.Lock()
 	a.process = process
 	a.mu.Unlock()
+	if assignment.Spec.Model != nil && assignment.Spec.Model.RuntimeProfile == nativev1alpha1.RuntimeProfileOllamaGGUFV1 {
+		a.appendLog(a.now(), "verified Ollama Metal acceleration")
+	}
+	if assignment.Spec.Model != nil && assignment.Spec.Model.RuntimeProfile == nativev1alpha1.RuntimeProfileLlamaCppMetalV1 {
+		a.appendLog(a.now(), "verified llama.cpp full Metal offload")
+	}
 	a.appendLog(a.now(), "native process started: pid=%d", processPID(process))
 	return nil
 }
 
-func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment, planned execution.Record, nonce string) (Process, error) {
+func (a *DevAgent) processRunningFor(assignment *nativev1alpha1.IdleloomWorkloadAssignment) bool {
+	if assignment == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.process != nil && a.process.Alive() && a.assignment != nil &&
+		a.assignment.UID == assignment.UID && a.assignment.Spec.ExecutionID == assignment.Spec.ExecutionID
+}
+
+func (a *DevAgent) clearRestartableExecution(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) error {
+	if a.store == nil {
+		return nil
+	}
+	current := a.store.Current()
+	if current == nil {
+		return nil
+	}
+	if !recordMatchesAssignment(*current, assignment) {
+		return fmt.Errorf("refusing to clear a journal for a different server assignment")
+	}
+	if err := a.terminateRecorded(ctx, *current); err != nil {
+		return fmt.Errorf("terminate previous server execution: %w", err)
+	}
+	if err := a.store.Clear(*current); err != nil {
+		return fmt.Errorf("clear previous server execution: %w", err)
+	}
+	return nil
+}
+
+func (a *DevAgent) fenceSupersededExecution(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) error {
+	if a.store == nil {
+		return nil
+	}
+	current := a.store.Current()
+	if current == nil || recordMatchesAssignment(*current, assignment) {
+		return nil
+	}
+	if assignment.Spec.FencingEpoch <= current.FencingEpoch {
+		return fmt.Errorf("refusing assignment epoch %d while execution epoch %d is recorded", assignment.Spec.FencingEpoch, current.FencingEpoch)
+	}
+	stopErr := a.stopProcess()
+	terminateErr := a.terminateRecorded(ctx, *current)
+	if err := errors.Join(stopErr, terminateErr); err != nil {
+		return fmt.Errorf("fence superseded native execution: %w", err)
+	}
+	if err := a.store.Clear(*current); err != nil {
+		return fmt.Errorf("clear superseded native execution: %w", err)
+	}
+	a.mu.Lock()
+	a.assignment = nil
+	a.runStatus = nil
+	a.runProtocolErr = nil
+	a.mu.Unlock()
+	return nil
+}
+
+func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment, planned execution.Record, nonce string, ollamaRuntime devruntime.OllamaRuntime, ollamaModel devruntime.OllamaModel, llamaRuntime devruntime.LlamaCppRuntime, llamaModel devruntime.LlamaCppModel) (Process, error) {
 	type result struct {
 		process Process
 		err     error
@@ -472,11 +753,67 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 				DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
 				Output:      &agentLogWriter{agent: a}, OnSpawn: onSpawn,
 			})
-		} else {
-			process, err = a.config.StartProcess(startupCtx, devruntime.ProcessConfig{
-				Layout: a.config.Layout, DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
-				ReadyTimeout: 5 * time.Minute, Nonce: nonce, OnSpawn: onSpawn,
+		} else if assignment.Spec.Training != nil {
+			workDirectory := shellWorkDirectory(a.config.Layout, assignment.UID)
+			if err := pruneTrainingWorkDirectories(a.config.Layout, 9); err != nil {
+				completed <- result{err: fmt.Errorf("prune training work directories: %w", err)}
+				return
+			}
+			if err := os.RemoveAll(workDirectory); err != nil {
+				completed <- result{err: fmt.Errorf("clear training work directory: %w", err)}
+				return
+			}
+			process, err = a.config.StartTraining(startupCtx, devruntime.TrainingConfig{
+				Layout: a.config.Layout, WorkDirectory: workDirectory,
+				Source: assignment.Spec.Training.Source, Network: assignment.Spec.Training.Network,
+				Timeout:     time.Duration(assignment.Spec.Training.TimeoutSeconds) * time.Second,
+				DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
+				Parameters:  trainingEnvironment(assignment.Spec.Run.Parameters),
+				RunID:       assignment.Spec.ExecutionID, Experiment: assignment.Spec.Run.Experiment,
+				Attempt: assignment.Spec.Run.Attempt,
+				Output:  &agentLogWriter{agent: a, onLine: a.observeRunProtocol}, OnSpawn: onSpawn,
 			})
+		} else {
+			switch assignment.Spec.Model.RuntimeProfile {
+			case nativev1alpha1.RuntimeProfileOllamaGGUFV1:
+				process, err = a.config.StartOllama(startupCtx, devruntime.OllamaProcessConfig{
+					Runtime: ollamaRuntime, Model: ollamaModel,
+					ContextLength: int(assignment.Spec.Model.MaxContextLength),
+					WorkDirectory: ollamaWorkDirectory(a.config.Layout, assignment.UID),
+					DeniedPaths:   []string{a.config.StateDirectory, a.config.KubeconfigPath},
+					ReadyTimeout:  2 * time.Minute, OnSpawn: onSpawn,
+				})
+			case nativev1alpha1.RuntimeProfileLlamaCppMetalV1:
+				process, err = a.config.StartLlamaCpp(startupCtx, devruntime.LlamaCppProcessConfig{
+					Runtime: llamaRuntime, Model: llamaModel,
+					ContextLength: int(assignment.Spec.Model.MaxContextLength),
+					WorkDirectory: llamaCppWorkDirectory(a.config.Layout, assignment.UID),
+					DeniedPaths:   []string{a.config.StateDirectory, a.config.KubeconfigPath},
+					ReadyTimeout:  5 * time.Minute, OnSpawn: onSpawn,
+				})
+			default:
+				process, err = a.config.StartProcess(startupCtx, devruntime.ProcessConfig{
+					Layout: a.config.Layout, DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
+					ReadyTimeout: 5 * time.Minute, Nonce: nonce, OnSpawn: onSpawn,
+				})
+			}
+			if err == nil {
+				switch {
+				case assignment.Spec.Model.Batch != nil:
+					batch := assignment.Spec.Model.Batch
+					process = startBatchProcess(process, devruntime.GenerateRequest{
+						Prompt: batch.Prompt, MaxTokens: int(batch.MaxTokens),
+					}, time.Duration(batch.TimeoutSeconds)*time.Second, &agentLogWriter{agent: a})
+				case assignment.Spec.Model.Server != nil:
+					key, keyErr := a.resolveServingKey(startupCtx, assignment)
+					if keyErr != nil {
+						_ = process.Stop()
+						err = keyErr
+						break
+					}
+					process, err = startServeProcess(process, a.config.ServeListenAddress, assignment.Spec.Model.Server.ModelAlias, key, a)
+				}
+			}
 		}
 		completed <- result{process: process, err: err}
 	}()
@@ -525,8 +862,94 @@ func (a *DevAgent) refreshStartupLease(ctx context.Context, expected *nativev1al
 	if current.UID != expected.UID || current.Spec.ExecutionID != expected.Spec.ExecutionID || current.Spec.FencingEpoch != expected.Spec.FencingEpoch || current.Generation != expected.Generation || current.Spec.DesiredState != nativev1alpha1.AssignmentDesiredRunning {
 		return fmt.Errorf("assignment changed while the native process was starting")
 	}
+	if err := a.updateAssignmentStatus(ctx, &current, nativev1alpha1.PhaseStarting, nil); err != nil {
+		return err
+	}
 	a.markAPISuccess()
 	return nil
+}
+
+func (a *DevAgent) prepareRuntimeWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) (devruntime.Receipt, error) {
+	type result struct {
+		receipt devruntime.Receipt
+		err     error
+	}
+	completed := make(chan result, 1)
+	prepareCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		receipt, err := a.config.PrepareRuntime(prepareCtx, func(message string) {
+			a.appendLog(a.now(), "prepare: %s", message)
+		})
+		completed <- result{receipt: receipt, err: err}
+	}()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-completed:
+			return result.receipt, result.err
+		case <-ticker.C:
+			if err := a.refreshStartupLease(prepareCtx, assignment); err != nil {
+				cancel()
+				result := <-completed
+				return result.receipt, errors.Join(fmt.Errorf("refresh preparation assignment lease: %w", err), result.err)
+			}
+		case <-ctx.Done():
+			cancel()
+			result := <-completed
+			return result.receipt, errors.Join(ctx.Err(), result.err)
+		}
+	}
+}
+
+func (a *DevAgent) prepareTrainingRuntimeWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) (devruntime.RuntimeReceipt, error) {
+	type result struct {
+		receipt devruntime.RuntimeReceipt
+		err     error
+	}
+	completed := make(chan result, 1)
+	prepareCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		receipt, err := a.config.PrepareTrainingRuntime(prepareCtx, func(message string) {
+			a.appendLog(a.now(), "prepare: %s", message)
+		})
+		completed <- result{receipt: receipt, err: err}
+	}()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case result := <-completed:
+			return result.receipt, result.err
+		case <-ticker.C:
+			if err := a.refreshStartupLease(prepareCtx, assignment); err != nil {
+				cancel()
+				result := <-completed
+				return result.receipt, errors.Join(fmt.Errorf("refresh training runtime preparation lease: %w", err), result.err)
+			}
+		case <-ctx.Done():
+			cancel()
+			result := <-completed
+			return result.receipt, errors.Join(ctx.Err(), result.err)
+		}
+	}
+}
+
+func finiteAssignment(assignment *nativev1alpha1.IdleloomWorkloadAssignment) bool {
+	return assignment.Spec.Shell != nil || assignment.Spec.Training != nil || assignment.Spec.Model != nil && assignment.Spec.Model.Batch != nil
+}
+
+func trainingEnvironment(values map[string]nativev1alpha1.WorkloadRunParameter) map[string]string {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]string, len(values))
+	for name, value := range values {
+		result[name] = string(value)
+	}
+	return result
 }
 
 func (a *DevAgent) stopAssignment(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) error {
@@ -542,6 +965,11 @@ func (a *DevAgent) stopAssignment(ctx context.Context, assignment *nativev1alpha
 		}
 		if err := a.store.Clear(*current); err != nil {
 			return err
+		}
+	}
+	if assignment.Spec.Run != nil {
+		if err := os.RemoveAll(shellWorkDirectory(a.config.Layout, assignment.UID)); err != nil {
+			return fmt.Errorf("remove assignment work directory: %w", err)
 		}
 	}
 	now := metav1.NewMicroTime(a.now())
@@ -563,12 +991,43 @@ func (a *DevAgent) updateAssignmentStatus(ctx context.Context, assignment *nativ
 	copy.Status.AgentID = a.config.AgentID
 	copy.Status.ExecutionID = assignment.Spec.ExecutionID
 	copy.Status.FencingEpoch = assignment.Spec.FencingEpoch
-	copy.Status.RuntimeVersion = devruntime.RuntimeVersion
+	copy.Status.RuntimeVersion = a.assignmentRuntimeVersion(assignment)
 	copy.Status.ResolvedArtifactDigest = ""
 	if assignment.Spec.Model != nil {
 		copy.Status.ResolvedArtifactDigest = assignment.Spec.Model.Artifact.ManifestDigest
-	} else {
+	} else if assignment.Spec.Shell != nil {
 		copy.Status.RuntimeVersion = nativev1alpha1.RuntimeProfileShellV1
+	}
+	if assignment.Spec.Run != nil {
+		a.mu.Lock()
+		run := cloneRunStatus(a.runStatus)
+		if run == nil || run.ID != "" && run.ID != assignment.Spec.ExecutionID {
+			run = cloneRunStatus(assignment.Status.Run)
+		}
+		if run != nil && run.ID != "" && run.ID != assignment.Spec.ExecutionID {
+			run = nil
+		}
+		if run == nil {
+			run = &nativev1alpha1.WorkloadRunStatus{}
+		}
+		run.ID = assignment.Spec.ExecutionID
+		run.Task = assignment.Spec.Run.Task
+		run.Experiment = assignment.Spec.Run.Experiment
+		run.Attempt = assignment.Spec.Run.Attempt
+		if run.StartedAt == nil && phase != nativev1alpha1.PhaseAssigned {
+			started := now
+			run.StartedAt = &started
+		}
+		terminalRun := phase == nativev1alpha1.PhaseStopped || finiteAssignment(assignment) && (phase == nativev1alpha1.PhaseSucceeded || phase == nativev1alpha1.PhaseFailed)
+		if terminalRun && run.FinishedAt == nil {
+			finished := now
+			run.FinishedAt = &finished
+		} else if !terminalRun {
+			run.FinishedAt = nil
+		}
+		a.runStatus = cloneRunStatus(run)
+		copy.Status.Run = cloneRunStatus(run)
+		a.mu.Unlock()
 	}
 	copy.Status.LastHeartbeatTime = &now
 	copy.Status.StopAcknowledgement = ack
@@ -583,6 +1042,24 @@ func (a *DevAgent) updateAssignmentStatus(ctx context.Context, assignment *nativ
 	return nativekube.FromUnstructured(updated, assignment)
 }
 
+func (a *DevAgent) assignmentRuntimeVersion(assignment *nativev1alpha1.IdleloomWorkloadAssignment) string {
+	if a.store != nil {
+		if current := a.store.Current(); current != nil && recordMatchesAssignment(*current, assignment) {
+			return current.RuntimeVersion
+		}
+	}
+	switch {
+	case assignment.Spec.Shell != nil:
+		return nativev1alpha1.RuntimeProfileShellV1
+	case assignment.Spec.Training != nil:
+		return assignment.Spec.Training.RuntimeProfile
+	case assignment.Spec.Model != nil:
+		return assignment.Spec.Model.RuntimeProfile
+	default:
+		return ""
+	}
+}
+
 func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.IdleloomHost, krunkit bool, activeUID types.UID) error {
 	copy := host.DeepCopy()
 	now := metav1.NewMicroTime(a.now())
@@ -594,6 +1071,8 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 	copy.Status.ProtocolVersion = nativev1alpha1.AgentProtocolV1Alpha1
 	copy.Status.RuntimeProfiles = nil
 	copy.Status.ModelFamilies = nil
+	copy.Status.AvailableModels = nil
+	copy.Status.Capabilities = nil
 	copy.Status.AllocatableUnifiedMemory = memory
 	copy.Status.AvailableUnifiedMemory = memory
 	copy.Status.KrunkitState = nativev1alpha1.KrunkitStateStopped
@@ -612,14 +1091,88 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 		copy.Status.RuntimeProfiles = append(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXLMV1)
 		copy.Status.ModelFamilies = append(copy.Status.ModelFamilies, nativev1alpha1.ModelFamilyQwen35)
 		readyStatus = metav1.ConditionTrue
-		readyReason = "DevelopmentRuntimeReady"
-		readyMessage = "locked development MLX runtime is available"
+		readyReason = "NativeRuntimeReady"
+		readyMessage = "locked MLX inference runtime and model are available"
+	} else if a.config.PrepareRuntime != nil {
+		copy.Status.RuntimeProfiles = append(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXLMV1)
+		copy.Status.ModelFamilies = append(copy.Status.ModelFamilies, nativev1alpha1.ModelFamilyQwen35)
+		readyStatus = metav1.ConditionTrue
+		readyReason = "NativeRuntimePreparable"
+		readyMessage = "locked MLX inference runtime and model will be prepared on first use"
 	}
-	if host.Spec.ShellAccess == nativev1alpha1.ShellAccessSandboxed || host.Spec.ShellAccess == nativev1alpha1.ShellAccessHost {
-		copy.Status.RuntimeProfiles = append(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileShellV1)
+	if a.config.ResolveOllama != nil {
+		_, models, err := a.config.ResolveOllama()
+		if err == nil && len(models) > 0 {
+			copy.Status.RuntimeProfiles = appendUnique(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileOllamaGGUFV1)
+			for _, model := range models {
+				if model.Family != nativev1alpha1.ModelFamilyOllamaGGUF || model.Format != nativev1alpha1.ArtifactFormatGGUFV1 {
+					continue
+				}
+				copy.Status.ModelFamilies = appendUnique(copy.Status.ModelFamilies, model.Family)
+				copy.Status.AvailableModels = appendAvailableModel(copy.Status.AvailableModels, nativev1alpha1.HostModelStatus{
+					RuntimeProfile: nativev1alpha1.RuntimeProfileOllamaGGUFV1,
+					Name:           model.Name, ManifestDigest: model.ManifestDigest,
+					Family: model.Family, Format: model.Format, SizeBytes: model.SizeBytes,
+				})
+			}
+			if len(copy.Status.AvailableModels) > 0 {
+				readyStatus = metav1.ConditionTrue
+				readyReason = "NativeRuntimeReady"
+				readyMessage = "Native MLX and/or local Ollama GGUF runtime is available"
+			}
+		}
+	}
+	if a.config.ResolveLlamaCpp != nil {
+		_, models, err := a.config.ResolveLlamaCpp()
+		if err == nil && len(models) > 0 {
+			copy.Status.RuntimeProfiles = appendUnique(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileLlamaCppMetalV1)
+			for _, model := range models {
+				if model.Family != nativev1alpha1.ModelFamilyGGUF || model.Format != nativev1alpha1.ArtifactFormatGGUFV1 {
+					continue
+				}
+				copy.Status.ModelFamilies = appendUnique(copy.Status.ModelFamilies, model.Family)
+				copy.Status.AvailableModels = appendAvailableModel(copy.Status.AvailableModels, nativev1alpha1.HostModelStatus{
+					RuntimeProfile: nativev1alpha1.RuntimeProfileLlamaCppMetalV1,
+					Name:           model.Name, ManifestDigest: model.ManifestDigest,
+					Family: model.Family, Format: model.Format, SizeBytes: model.SizeBytes,
+				})
+			}
+			if len(copy.Status.AvailableModels) > 0 {
+				readyStatus = metav1.ConditionTrue
+				readyReason = "NativeRuntimeReady"
+				readyMessage = "Native MLX, Ollama, and/or llama.cpp Metal runtime is available"
+			}
+		}
+	}
+	if _, err := devruntime.VerifyRuntimeFast(a.config.Layout); err == nil {
+		copy.Status.RuntimeProfiles = appendUnique(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXTrainV1)
+		copy.Status.Capabilities = appendUnique(copy.Status.Capabilities, nativev1alpha1.CapabilityNativeTrainingV1)
 		readyStatus = metav1.ConditionTrue
 		readyReason = "NativeRuntimeReady"
-		readyMessage = "Native MLX and/or shell runtime capability is available"
+		readyMessage = "locked MLX training runtime is available"
+	} else if a.config.PrepareTrainingRuntime != nil {
+		copy.Status.RuntimeProfiles = appendUnique(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXTrainV1)
+		copy.Status.Capabilities = appendUnique(copy.Status.Capabilities, nativev1alpha1.CapabilityNativeTrainingV1)
+		readyStatus = metav1.ConditionTrue
+		if readyReason == "DevelopmentRuntimeUnavailable" {
+			readyReason = "NativeRuntimePreparable"
+			readyMessage = "locked MLX training runtime will be prepared on first use"
+		}
+	}
+	if len(copy.Status.ModelFamilies) > 0 {
+		copy.Status.Capabilities = appendUnique(copy.Status.Capabilities, nativev1alpha1.CapabilityBatchInferenceV1)
+		if connectedCondition.Status == metav1.ConditionTrue && a.config.ServeListenAddress != "" {
+			copy.Status.Capabilities = appendUnique(copy.Status.Capabilities, nativev1alpha1.CapabilityNativeServiceV1)
+		}
+	}
+	if host.Spec.ShellAccess == nativev1alpha1.ShellAccessSandboxed || host.Spec.ShellAccess == nativev1alpha1.ShellAccessHost {
+		copy.Status.RuntimeProfiles = appendUnique(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileShellV1)
+		readyStatus = metav1.ConditionTrue
+		readyReason = "NativeRuntimeReady"
+		readyMessage = "Native shell execution is available"
+	}
+	if readyStatus == metav1.ConditionTrue && len(copy.Status.RuntimeProfiles) > 0 {
+		readyMessage = "Native host advertises runtime profiles: " + strings.Join(copy.Status.RuntimeProfiles, ", ")
 	}
 	apiMeta.SetStatusCondition(&copy.Status.Conditions, metav1.Condition{
 		Type:               nativev1alpha1.HostConditionReady,
@@ -670,25 +1223,21 @@ func evaluateConnectivity(now time.Time, status func() (nativev1alpha1.HostConne
 		condition.Message = err.Error()
 		return connectivity, condition
 	}
+	condition.Status = metav1.ConditionTrue
+	condition.Reason = "WireKubeRelaySessionReady"
+	condition.Message = "WireKube relay session and peer routing are active"
 	if connectivity.LastHandshakeTime == nil || connectivity.LastHandshakeTime.IsZero() {
-		condition.Reason = "WireKubeHandshakePending"
-		condition.Message = "WireGuard handshake has not completed"
+		condition.Message += "; waiting for the first WireGuard handshake"
 		return connectivity, condition
 	}
 	handshakeAge := now.Sub(connectivity.LastHandshakeTime.Time)
 	if handshakeAge < -nativev1alpha1.HeartbeatClockSkewAllowance {
+		condition.Status = metav1.ConditionFalse
 		condition.Reason = "WireKubeClockSkew"
 		condition.Message = "WireGuard handshake timestamp is in the future"
 		return connectivity, condition
 	}
-	if handshakeAge > 3*time.Minute {
-		condition.Reason = "WireKubeHandshakeStale"
-		condition.Message = "WireGuard handshake is stale"
-		return connectivity, condition
-	}
-	condition.Status = metav1.ConditionTrue
-	condition.Reason = "WireKubeRelaySessionReady"
-	condition.Message = "WireKube relay session has a fresh handshake; reverse reachability is not yet verified"
+	condition.Message += fmt.Sprintf("; last handshake was %s ago", handshakeAge.Round(time.Second))
 	return connectivity, condition
 }
 
@@ -733,7 +1282,33 @@ func (a *DevAgent) stopProcess() error {
 			return fmt.Errorf("remove shell work directory: %w", err)
 		}
 	}
+	if a.assignment != nil && a.assignment.Spec.Model != nil && a.assignment.Spec.Model.RuntimeProfile == nativev1alpha1.RuntimeProfileOllamaGGUFV1 {
+		if err := os.RemoveAll(ollamaWorkDirectory(a.config.Layout, a.assignment.UID)); err != nil {
+			return fmt.Errorf("remove Ollama work directory: %w", err)
+		}
+	}
+	if a.assignment != nil && a.assignment.Spec.Model != nil && a.assignment.Spec.Model.RuntimeProfile == nativev1alpha1.RuntimeProfileLlamaCppMetalV1 {
+		if err := os.RemoveAll(llamaCppWorkDirectory(a.config.Layout, a.assignment.UID)); err != nil {
+			return fmt.Errorf("remove llama.cpp work directory: %w", err)
+		}
+	}
 	return nil
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func appendAvailableModel(values []nativev1alpha1.HostModelStatus, value nativev1alpha1.HostModelStatus) []nativev1alpha1.HostModelStatus {
+	if len(values) >= 64 {
+		return values
+	}
+	return append(values, value)
 }
 
 func (a *DevAgent) startKubeletBridge(ctx context.Context) error {
@@ -787,6 +1362,55 @@ func shellWorkDirectory(layout devruntime.Layout, uid types.UID) string {
 	return filepath.Join(layout.Work, "assignments", string(uid))
 }
 
+func ollamaWorkDirectory(layout devruntime.Layout, uid types.UID) string {
+	return filepath.Join(layout.Work, "ollama", string(uid))
+}
+
+func llamaCppWorkDirectory(layout devruntime.Layout, uid types.UID) string {
+	return filepath.Join(layout.Work, "llama-cpp", string(uid))
+}
+
+func pruneTrainingWorkDirectories(layout devruntime.Layout, retain int) error {
+	root := filepath.Join(layout.Work, "assignments")
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	type candidate struct {
+		name    string
+		modTime time.Time
+	}
+	var candidates []candidate
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		candidates = append(candidates, candidate{name: entry.Name(), modTime: info.ModTime()})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].modTime.Equal(candidates[j].modTime) {
+			return candidates[i].name < candidates[j].name
+		}
+		return candidates[i].modTime.Before(candidates[j].modTime)
+	})
+	if retain < 0 {
+		retain = 0
+	}
+	for _, item := range candidates[:max(0, len(candidates)-retain)] {
+		if err := os.RemoveAll(filepath.Join(root, item.name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func processPID(process Process) int {
 	if typed, ok := process.(interface{ PID() int }); ok {
 		return typed.PID()
@@ -818,13 +1442,22 @@ func (a *DevAgent) resetLog(assignment string, now time.Time, message string) {
 	}
 }
 
+func (a *DevAgent) beginAssignmentLog(assignment *nativev1alpha1.IdleloomWorkloadAssignment) {
+	uid := string(assignment.UID)
+	if a.logs != nil && a.logs.MatchesAssignment(uid) {
+		a.appendLog(a.now(), "assignment retry accepted: execution=%s", assignment.Spec.ExecutionID)
+		return
+	}
+	a.resetLog(uid, a.now(), "assignment accepted: execution="+assignment.Spec.ExecutionID)
+}
+
 func (a *DevAgent) recoverOrphan() error {
 	current := a.store.Current()
 	if current == nil {
 		return nil
 	}
 	if current.Completed {
-		return os.RemoveAll(filepath.Join(a.config.Layout.Work, "assignments", current.AssignmentUID))
+		return nil
 	}
 	if err := a.terminateRecorded(context.Background(), *current); err != nil {
 		return err
@@ -832,7 +1465,11 @@ func (a *DevAgent) recoverOrphan() error {
 	if err := a.store.Clear(*current); err != nil {
 		return err
 	}
-	return os.RemoveAll(filepath.Join(a.config.Layout.Work, "assignments", current.AssignmentUID))
+	return errors.Join(
+		os.RemoveAll(filepath.Join(a.config.Layout.Work, "assignments", current.AssignmentUID)),
+		os.RemoveAll(filepath.Join(a.config.Layout.Work, "ollama", current.AssignmentUID)),
+		os.RemoveAll(filepath.Join(a.config.Layout.Work, "llama-cpp", current.AssignmentUID)),
+	)
 }
 
 func recordMatchesAssignment(record execution.Record, assignment *nativev1alpha1.IdleloomWorkloadAssignment) bool {

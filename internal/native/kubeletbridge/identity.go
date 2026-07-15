@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -41,7 +42,7 @@ func ClientCAPath(directory string) string {
 func EnsureClientCA(directory string, certificate []byte) (string, error) {
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(certificate) {
-		return "", fmt.Errorf("Kubernetes client CA is not valid PEM")
+		return "", fmt.Errorf("kubernetes client CA is not valid PEM")
 	}
 	path := ClientCAPath(directory)
 	if err := atomicWrite(path, certificate, 0o600); err != nil {
@@ -96,7 +97,7 @@ func EnsureServingIdentity(ctx context.Context, directory, meshAddress, nodeName
 	privatePEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateDER})
 	certificateBlock, _ := pem.Decode(certificatePEM)
 	if certificateBlock == nil {
-		return Identity{}, fmt.Errorf("Kubernetes signer returned an invalid serving certificate")
+		return Identity{}, fmt.Errorf("kubernetes signer returned an invalid serving certificate")
 	}
 	certificate, err := x509.ParseCertificate(certificateBlock.Bytes)
 	if err != nil {
@@ -106,7 +107,7 @@ func EnsureServingIdentity(ctx context.Context, directory, meshAddress, nodeName
 		return Identity{}, fmt.Errorf("validate Kubernetes-signed serving certificate: %w", err)
 	}
 	if _, err := tls.X509KeyPair(certificatePEM, privatePEM); err != nil {
-		return Identity{}, fmt.Errorf("Kubernetes-signed serving certificate does not match the generated key: %w", err)
+		return Identity{}, fmt.Errorf("kubernetes-signed serving certificate does not match the generated key: %w", err)
 	}
 	if err := atomicWrite(identity.CertificateFile, certificatePEM, 0o644); err != nil {
 		return Identity{}, err
@@ -169,18 +170,15 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
+	defer func() { _ = os.Remove(temporaryName) }()
 	if err := temporary.Chmod(mode); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return err

@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: native-ollama-serve-client
+  namespace: default
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/example: native-serve-client
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/os: linux
+  affinity:
+    podAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: ["wirekube-agent", "wirekube-agent-proxy"]
+          namespaces: ["wirekube-system"]
+          topologyKey: kubernetes.io/hostname
+  tolerations:
+    - key: idleloom-dedicated
+      operator: Exists
+      effect: NoSchedule
+  containers:
+    - name: curl
+      image: curlimages/curl@sha256:94e9e444bcba979c2ea12e27ae39bee4cd10bc7041a472c4727a558e213744e6
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+            http://native-ollama-serve.default.svc:8000/v1/chat/completions \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"qwen3-5-9b","messages":[{"role":"user","content":"unauthenticated probe"}],"max_tokens":1}')"
+          test "${STATUS}" = 401
+
+          API_KEY="$(cat /var/run/secrets/idleloom/api-key)"
+          curl --fail-with-body \
+            http://native-ollama-serve.default.svc:8000/v1/chat/completions \
+            -H "Authorization: Bearer ${API_KEY}" \
+            -H 'Content-Type: application/json' \
+            -d '{"model":"qwen3-5-9b","messages":[{"role":"user","content":"Why is idle compute useful?"}],"max_tokens":64}'
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        readOnlyRootFilesystem: true
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+      volumeMounts:
+        - name: auth
+          mountPath: /var/run/secrets/idleloom
+          readOnly: true
+  volumes:
+    - name: auth
+      secret:
+        secretName: native-ollama-serve-auth

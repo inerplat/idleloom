@@ -22,7 +22,7 @@ func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeSt
 	var status WireKubeStatus
 	raw, err := client.Discovery().RESTClient().Get().AbsPath("/apis/wirekube.io/v1alpha1/wirekubemeshes/default").Do(ctx).Raw()
 	if err != nil {
-		return status, fmt.Errorf("WireKube mesh is not available: %w", err)
+		return status, fmt.Errorf("the WireKube mesh is not available: %w", err)
 	}
 	var mesh struct {
 		Spec struct {
@@ -53,13 +53,13 @@ func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeSt
 		}
 	}
 	if status.AgentName == "" {
-		return status, fmt.Errorf("WireKubeMesh exists but no WireKube agent DaemonSet was found")
+		return status, fmt.Errorf("the WireKubeMesh exists but no WireKube agent DaemonSet was found")
 	}
 	if !status.IncludeNodeInternalIP {
-		return status, fmt.Errorf("WireKubeMesh default must set spec.autoAllowedIPs.includeNodeInternalIP=true")
+		return status, fmt.Errorf("the WireKubeMesh default must set spec.autoAllowedIPs.includeNodeInternalIP=true")
 	}
 	if status.ReadyPeers == 0 {
-		return status, fmt.Errorf("WireKube has no ready ingress peers")
+		return status, fmt.Errorf("the WireKube installation has no ready ingress peers")
 	}
 	return status, nil
 }

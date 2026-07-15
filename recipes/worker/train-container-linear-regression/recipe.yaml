@@ -1,0 +1,12 @@
+name: train/container-linear-regression
+version: v1
+description: Train a small linear model in a pinned Python container on an Idleloom Linux worker.
+task: train
+backend: worker
+runtime: python
+manifest: job.yaml
+parametersSchema: parameters.schema.json
+example: example.yaml
+prerequisites:
+- A joined Idleloom Linux worker labeled idleloom-worker=true.
+- Pull access to Docker Hub for the pinned Python image.

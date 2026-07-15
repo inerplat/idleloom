@@ -19,7 +19,7 @@ func TestClientPlanAndInstallUseConnectedHostContract(t *testing.T) {
 	runner := func(_ context.Context, _ string, args ...string) ([]byte, []byte, error) {
 		calls = append(calls, append([]string(nil), args...))
 		if args[0] == "install" && contains(args, "--dry-run") {
-			return []byte(`{"schemaVersion":"v1alpha1","wireKubeVersion":"v0.0.14","relay":"load-balancer","relayUDP":true,"meshCIDR":"100.96.0.0/11","nodeAddresses":"internal-ip","image":"example.test/wirekube@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`), nil, nil
+			return []byte(`{"schemaVersion":"v1alpha1","wireKubeVersion":"v0.0.15","relay":"load-balancer","relayUDP":false,"meshCIDR":"100.96.0.0/11","nodeAddresses":"internal-ip","image":"example.test/wirekube@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`), nil, nil
 		}
 		return []byte(`{"schemaVersion":"v1alpha1","operation":"install","installationID":"install-1","ready":true}`), nil, nil
 	}
@@ -34,10 +34,13 @@ func TestClientPlanAndInstallUseConnectedHostContract(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("calls=%v", calls)
 	}
-	for _, required := range []string{"--relay-udp", "--node-addresses", "internal-ip", "--kubeconfig", "/kube/config", "--context", "cluster"} {
+	for _, required := range []string{"--relay-udp=false", "--node-addresses", "internal-ip", "--kubeconfig", "/kube/config", "--context", "cluster"} {
 		if !contains(calls[0], required) {
 			t.Fatalf("plan args %v do not contain %q", calls[0], required)
 		}
+	}
+	if contains(calls[0], "--relay-udp") || contains(calls[1], "--relay-udp") {
+		t.Fatalf("wkpeer install unexpectedly requested a public UDP relay: %v", calls)
 	}
 	if !containsPair(calls[1], "--mesh-cidr", "100.96.0.0/11") || !contains(calls[1], "--yes") {
 		t.Fatalf("install args=%v", calls[1])
@@ -49,9 +52,9 @@ func TestClientRejectsIncompatiblePlanMetadata(t *testing.T) {
 		name string
 		plan string
 	}{
-		{name: "schema", plan: `{"schemaVersion":"v2","wireKubeVersion":"v0.0.14","relay":"load-balancer","relayUDP":true,"meshCIDR":"100.96.0.0/11","nodeAddresses":"internal-ip","image":"example.test/wirekube@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`},
-		{name: "version", plan: `{"schemaVersion":"v1alpha1","wireKubeVersion":"v9.9.9","relay":"load-balancer","relayUDP":true,"meshCIDR":"100.96.0.0/11","nodeAddresses":"internal-ip","image":"example.test/wirekube@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`},
-		{name: "image digest", plan: `{"schemaVersion":"v1alpha1","wireKubeVersion":"v0.0.14","relay":"load-balancer","relayUDP":true,"meshCIDR":"100.96.0.0/11","nodeAddresses":"internal-ip","image":"example.test/wirekube:latest"}`},
+		{name: "schema", plan: `{"schemaVersion":"v2","wireKubeVersion":"v0.0.15","relay":"load-balancer","relayUDP":false,"meshCIDR":"100.96.0.0/11","nodeAddresses":"internal-ip","image":"example.test/wirekube@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`},
+		{name: "version", plan: `{"schemaVersion":"v1alpha1","wireKubeVersion":"v9.9.9","relay":"load-balancer","relayUDP":false,"meshCIDR":"100.96.0.0/11","nodeAddresses":"internal-ip","image":"example.test/wirekube@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`},
+		{name: "image digest", plan: `{"schemaVersion":"v1alpha1","wireKubeVersion":"v0.0.15","relay":"load-balancer","relayUDP":false,"meshCIDR":"100.96.0.0/11","nodeAddresses":"internal-ip","image":"example.test/wirekube:latest"}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -75,7 +78,7 @@ func TestResolverDownloadsAndCachesVerifiedRelease(t *testing.T) {
 		requests++
 		switch filepath.Base(request.URL.Path) {
 		case "wirekubectl-checksums.txt":
-			fmt.Fprintf(writer, "%s  %s\n", digestHex, asset)
+			_, _ = fmt.Fprintf(writer, "%s  %s\n", digestHex, asset)
 		case asset:
 			_, _ = writer.Write(binary)
 		default:

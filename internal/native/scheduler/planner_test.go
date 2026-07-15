@@ -105,6 +105,137 @@ func TestPlanAssignmentCarriesFencingIdentityAndResolvedCatalog(t *testing.T) {
 	}
 }
 
+func TestPlannerCopiesBatchInferenceIntent(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Mode = nativev1alpha1.WorkloadModeBatch
+	workload.Spec.Server = nil
+	workload.Spec.Batch = &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: 32}
+	model := testModel()
+	host := testHost("native", "32Gi", now)
+	planner := Planner{Now: func() time.Time { return now }, NewExecutionID: func() (string, error) {
+		return "123e4567-e89b-42d3-a456-426614174000", nil
+	}}
+	assignment, err := planner.PlanAssignment(&workload, &model, &host, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.Spec.Model == nil || assignment.Spec.Model.Batch == nil || assignment.Spec.Model.Batch.Prompt != "hello" || assignment.Spec.Model.Batch.TimeoutSeconds != 600 {
+		t.Fatalf("batch assignment = %#v", assignment.Spec.Model)
+	}
+}
+
+func TestBatchInferenceRejectsAgentWithoutCapability(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Mode = nativev1alpha1.WorkloadModeBatch
+	workload.Spec.Server = nil
+	workload.Spec.Batch = &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: 32}
+	host := testHost("legacy", "32Gi", now)
+	host.Status.Capabilities = nil
+	model := testModel()
+	_, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host})
+	if err == nil || !strings.Contains(err.Error(), "does not support Native batch inference") {
+		t.Fatalf("legacy agent error = %v", err)
+	}
+}
+
+func TestOllamaInferenceRequiresExactInstalledModel(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Mode = nativev1alpha1.WorkloadModeBatch
+	workload.Spec.Server = nil
+	workload.Spec.Batch = &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: 32}
+	model := testModel()
+	model.Spec.RuntimeProfile = nativev1alpha1.RuntimeProfileOllamaGGUFV1
+	model.Spec.Family = nativev1alpha1.ModelFamilyOllamaGGUF
+	model.Spec.Artifact = nativev1alpha1.ModelArtifact{
+		OllamaModel: "qwen3.5:9b", ManifestDigest: "sha256:" + strings.Repeat("b", 64),
+		Format: nativev1alpha1.ArtifactFormatGGUFV1, SizeBytes: 6_594_474_711,
+	}
+	model.Spec.MinimumUnifiedMemory = nativev1alpha1.MinimumUnifiedMemoryForModel(model.Spec.Artifact.SizeBytes, model.Spec.MaxContextLength)
+	host := testHost("ollama", "32Gi", now)
+	host.Status.RuntimeProfiles = []string{nativev1alpha1.RuntimeProfileOllamaGGUFV1}
+	host.Status.ModelFamilies = []string{nativev1alpha1.ModelFamilyOllamaGGUF}
+	if _, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host}); err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Fatalf("missing Ollama model error = %v", err)
+	}
+	host.Status.AvailableModels = []nativev1alpha1.HostModelStatus{{
+		RuntimeProfile: nativev1alpha1.RuntimeProfileOllamaGGUFV1,
+		Name:           model.Spec.Artifact.OllamaModel, ManifestDigest: model.Spec.Artifact.ManifestDigest,
+		Family: model.Spec.Family, Format: model.Spec.Artifact.Format, SizeBytes: model.Spec.Artifact.SizeBytes,
+	}}
+	if _, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host}); err != nil {
+		t.Fatalf("exact Ollama model was rejected: %v", err)
+	}
+}
+
+func TestLlamaCppInferenceRequiresExactInstalledModel(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Mode = nativev1alpha1.WorkloadModeBatch
+	workload.Spec.Server = nil
+	workload.Spec.Batch = &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: 32}
+	model := testModel()
+	model.Spec.RuntimeProfile = nativev1alpha1.RuntimeProfileLlamaCppMetalV1
+	model.Spec.Family = nativev1alpha1.ModelFamilyGGUF
+	model.Spec.Artifact = nativev1alpha1.ModelArtifact{
+		GGUFFile: "llama-3.2-3b.gguf", ManifestDigest: "sha256:" + strings.Repeat("c", 64),
+		Format: nativev1alpha1.ArtifactFormatGGUFV1, SizeBytes: 2_000_000_000,
+	}
+	model.Spec.MinimumUnifiedMemory = nativev1alpha1.MinimumUnifiedMemoryForModel(model.Spec.Artifact.SizeBytes, model.Spec.MaxContextLength)
+	host := testHost("llama-cpp", "32Gi", now)
+	host.Status.RuntimeProfiles = []string{nativev1alpha1.RuntimeProfileLlamaCppMetalV1}
+	host.Status.ModelFamilies = []string{nativev1alpha1.ModelFamilyGGUF}
+	if _, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host}); err == nil || !strings.Contains(err.Error(), "not installed") {
+		t.Fatalf("missing llama.cpp model error = %v", err)
+	}
+	host.Status.AvailableModels = []nativev1alpha1.HostModelStatus{{
+		RuntimeProfile: nativev1alpha1.RuntimeProfileLlamaCppMetalV1,
+		Name:           model.Spec.Artifact.GGUFFile, ManifestDigest: model.Spec.Artifact.ManifestDigest,
+		Family: model.Spec.Family, Format: model.Spec.Artifact.Format, SizeBytes: model.Spec.Artifact.SizeBytes,
+	}}
+	if _, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host}); err != nil {
+		t.Fatalf("exact llama.cpp model was rejected: %v", err)
+	}
+	host.Status.AvailableModels[0].SizeBytes++
+	if _, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host}); err == nil {
+		t.Fatal("llama.cpp model with a mismatched byte size was accepted")
+	}
+}
+
+func TestPlannerCopiesConnectedServerIntent(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Server = &nativev1alpha1.WorkloadServer{ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b"}
+	model := testModel()
+	host := testHost("native", "32Gi", now)
+	planner := Planner{Now: func() time.Time { return now }, NewExecutionID: func() (string, error) {
+		return "123e4567-e89b-42d3-a456-426614174000", nil
+	}}
+	assignment, err := planner.PlanAssignment(&workload, &model, &host, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := assignment.Spec.Model.Server
+	if server == nil || server.ServiceName != "qwen-chat" || server.ModelAlias != "qwen3-5-0-8b" || server.AuthSecretName != nativev1alpha1.ServingAuthSecretName || server.Port != nativev1alpha1.NativeServingPort {
+		t.Fatalf("server assignment = %#v", server)
+	}
+}
+
+func TestConnectedServerRejectsAgentWithoutCapability(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Server = &nativev1alpha1.WorkloadServer{ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b"}
+	host := testHost("legacy", "32Gi", now)
+	host.Status.Capabilities = []string{nativev1alpha1.CapabilityBatchInferenceV1}
+	model := testModel()
+	_, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host})
+	if err == nil || !strings.Contains(err.Error(), "does not support connected Native serving") {
+		t.Fatalf("legacy agent error = %v", err)
+	}
+}
+
 func TestShellAccessNeverExceedsHostEnrollment(t *testing.T) {
 	now := time.Date(2026, 7, 11, 10, 0, 0, 0, time.UTC)
 	planner := Planner{Now: func() time.Time { return now }}
@@ -164,6 +295,40 @@ func TestPlanHostShellDefaultsNetworkToOutbound(t *testing.T) {
 	}
 }
 
+func TestPlannerCopiesImmutableTrainingRun(t *testing.T) {
+	now := time.Now().UTC()
+	workload := trainingWorkload()
+	host := testHost("trainer", "32Gi", now)
+	host.Status.RuntimeProfiles = append(host.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXTrainV1)
+	host.Status.Capabilities = append(host.Status.Capabilities, nativev1alpha1.CapabilityNativeTrainingV1)
+	planner := Planner{Now: func() time.Time { return now }, NewExecutionID: func() (string, error) {
+		return "123e4567-e89b-42d3-a456-426614174000", nil
+	}}
+	assignment, err := planner.PlanAssignment(&workload, nil, &host, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	training := assignment.Spec.Training
+	if training == nil || training.RuntimeProfile != nativev1alpha1.RuntimeProfileMLXTrainV1 || training.SourceDigest == "" || assignment.Spec.Run == nil || assignment.Spec.Run.Experiment != "linear-regression" || assignment.Spec.Run.Parameters["EPOCHS"] != "100" {
+		t.Fatalf("training assignment = %#v", training)
+	}
+	workload.Spec.Run.Parameters["EPOCHS"] = "999"
+	if assignment.Spec.Run.Parameters["EPOCHS"] != "100" {
+		t.Fatal("resolved training parameters alias the workload map")
+	}
+}
+
+func TestTrainingRejectsAgentWithoutCapability(t *testing.T) {
+	now := time.Now().UTC()
+	workload := trainingWorkload()
+	host := testHost("legacy", "32Gi", now)
+	host.Status.RuntimeProfiles = append(host.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXTrainV1)
+	_, err := (Planner{Now: func() time.Time { return now }}).SelectHost(&workload, nil, []nativev1alpha1.IdleloomHost{host})
+	if err == nil || !strings.Contains(err.Error(), "does not support Native MLX training") {
+		t.Fatalf("legacy training host error = %v", err)
+	}
+}
+
 func shellWorkload(isolation string) nativev1alpha1.IdleloomWorkload {
 	network := nativev1alpha1.ShellNetworkNone
 	if isolation == nativev1alpha1.ShellIsolationHost {
@@ -182,13 +347,36 @@ func shellWorkload(isolation string) nativev1alpha1.IdleloomWorkload {
 	}
 }
 
+func trainingWorkload() nativev1alpha1.IdleloomWorkload {
+	return nativev1alpha1.IdleloomWorkload{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "train", UID: types.UID("train-uid"), Generation: 1},
+		Spec: nativev1alpha1.IdleloomWorkloadSpec{
+			Mode: nativev1alpha1.WorkloadModeTrain,
+			Train: &nativev1alpha1.WorkloadTraining{
+				RuntimeProfile: nativev1alpha1.RuntimeProfileMLXTrainV1,
+				Source:         nativev1alpha1.WorkloadTrainingSource{Inline: "print('train')"},
+				Network:        nativev1alpha1.ShellNetworkNone,
+				TimeoutSeconds: 120,
+			},
+			Run: &nativev1alpha1.WorkloadRunSpec{
+				Task: "train", Experiment: "linear-regression", Attempt: 1,
+				Parameters: map[string]nativev1alpha1.WorkloadRunParameter{"EPOCHS": "100"},
+			},
+			Resources: nativev1alpha1.WorkloadResources{UnifiedMemoryRequest: resource.MustParse("1Gi")},
+		},
+	}
+}
+
 func testWorkload() nativev1alpha1.IdleloomWorkload {
 	return nativev1alpha1.IdleloomWorkload{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "qwen", UID: types.UID("workload-uid"), Generation: 1},
 		Spec: nativev1alpha1.IdleloomWorkloadSpec{
-			Mode:      nativev1alpha1.WorkloadModeServer,
-			Model:     &nativev1alpha1.WorkloadModelReference{CatalogRef: "qwen-approved"},
-			Resources: nativev1alpha1.WorkloadResources{UnifiedMemoryRequest: resource.MustParse("16Gi")},
+			Mode:   nativev1alpha1.WorkloadModeServer,
+			Model:  &nativev1alpha1.WorkloadModelReference{CatalogRef: "qwen-approved"},
+			Server: &nativev1alpha1.WorkloadServer{ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b"},
+			Resources: nativev1alpha1.WorkloadResources{
+				UnifiedMemoryRequest: resource.MustParse("16Gi"),
+			},
 		},
 	}
 }
@@ -205,7 +393,7 @@ func testModel() nativev1alpha1.IdleloomModel {
 				ManifestDigest: digest,
 				Format:         nativev1alpha1.ArtifactFormatSafetensorsV1,
 				SizeBytes:      1024,
-				Signature:      nativev1alpha1.SignaturePolicy{Issuer: "https://issuer.example", Subject: "publisher"},
+				Signature:      &nativev1alpha1.SignaturePolicy{Issuer: "https://issuer.example", Subject: "publisher"},
 			},
 			MinimumUnifiedMemory:  resource.MustParse("12Gi"),
 			MaxContextLength:      2048,
@@ -223,6 +411,7 @@ func testHost(name, memory string, now time.Time) nativev1alpha1.IdleloomHost {
 			ProtocolVersion:          nativev1alpha1.AgentProtocolV1Alpha1,
 			RuntimeProfiles:          []string{nativev1alpha1.RuntimeProfileMLXLMV1},
 			ModelFamilies:            []string{nativev1alpha1.ModelFamilyQwen35},
+			Capabilities:             []string{nativev1alpha1.CapabilityBatchInferenceV1, nativev1alpha1.CapabilityNativeServiceV1},
 			AllocatableUnifiedMemory: resource.MustParse(memory),
 			AvailableUnifiedMemory:   resource.MustParse(memory),
 			KrunkitState:             nativev1alpha1.KrunkitStateStopped,

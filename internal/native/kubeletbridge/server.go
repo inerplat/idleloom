@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -72,6 +73,9 @@ func (server *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", server.authorize(server.handleHealth))
 	mux.HandleFunc("/containerLogs/", server.authorize(server.handleLogs))
+	for _, path := range []string{"/exec/", "/attach/", "/portForward/"} {
+		mux.HandleFunc(path, server.authorize(server.handleUnsupportedStreaming))
+	}
 	readHeaderTimeout := server.config.ReadHeaderLimit
 	if readHeaderTimeout <= 0 {
 		readHeaderTimeout = 5 * time.Second
@@ -96,6 +100,19 @@ func (server *Server) Run(ctx context.Context) error {
 	case err := <-errors:
 		return err
 	}
+}
+
+func (server *Server) handleUnsupportedStreaming(response http.ResponseWriter, request *http.Request) {
+	operation := "streaming operation"
+	switch {
+	case strings.HasPrefix(request.URL.Path, "/exec/"):
+		operation = "kubectl exec"
+	case strings.HasPrefix(request.URL.Path, "/attach/"):
+		operation = "kubectl attach"
+	case strings.HasPrefix(request.URL.Path, "/portForward/"):
+		operation = "kubectl port-forward"
+	}
+	http.Error(response, operation+" is not supported by the Idleloom observability-only projection", http.StatusNotImplemented)
 }
 
 func (server *Server) authorize(next http.HandlerFunc) http.HandlerFunc {
@@ -216,7 +233,7 @@ func parseLogOptions(values url.Values, now time.Time) (logOptions, error) {
 	}
 	if value := values.Get("sinceSeconds"); value != "" {
 		seconds, parseErr := strconv.ParseInt(value, 10, 64)
-		if parseErr != nil || seconds < 0 {
+		if parseErr != nil || seconds < 0 || seconds > math.MaxInt64/int64(time.Second) {
 			return logOptions{}, fmt.Errorf("invalid sinceSeconds")
 		}
 		options.since = now.Add(-time.Duration(seconds) * time.Second)
