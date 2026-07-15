@@ -2,6 +2,7 @@
 /bin/
 *.test
 coverage.out
+site/
 
 # Local-only design notes and environment-specific overlays.
 /ARCHITECTURE.md

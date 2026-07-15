@@ -16,8 +16,9 @@ The Native backend is intentionally smaller than a distributed training
 platform. It runs one Python program with the locked MLX runtime on one joined
 Apple Silicon host.
 
-For installation, connected-mode setup, and the complete Native and Worker
-smoke-test sequence, start with [`getting-started.md`](getting-started.md).
+For installation and connected-mode setup, start with the
+[Native Metal quick start](getting-started/native-metal.md). For the tracked
+MLX example, see [MLX workloads](guides/native-mlx.md).
 
 ## Link modes
 

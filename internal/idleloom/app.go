@@ -22,6 +22,7 @@ import (
 const (
 	NetworkWireKube    = "wirekube"
 	PhaseEnrolling     = "enrolling"
+	PhaseRegistered    = "registered"
 	PhaseReady         = "ready"
 	PhaseLocalDeleting = "local-delete-pending"
 	PhaseLocalGone     = "local-deleted"
@@ -39,6 +40,7 @@ type InitOptions struct {
 	Network        string
 	Timeout        time.Duration
 	TokenTTL       time.Duration
+	SkipWait       bool
 	StatePath      string
 	DryRun         bool
 }
@@ -50,6 +52,7 @@ type App struct {
 	Runtime                  WorkerRuntime
 	DownloadKubelet          func(context.Context, string) (string, error)
 	ApproveKubeletServingCSR func(context.Context, *Cluster, string, string, time.Time, bool, time.Duration) error
+	StartMaintainer          func(context.Context, string, io.Writer) error
 	StepIndex                int
 }
 
@@ -96,12 +99,19 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	var wireKube WireKubeStatus
 	if opts.Network == NetworkWireKube {
 		a.step("Checking the WireKube node mesh")
-		wireKube, err = CheckWireKube(ctx, cluster.Client)
+		if opts.SkipWait {
+			wireKube, err = checkWireKubeForRegistration(ctx, cluster.Client)
+		} else {
+			wireKube, err = CheckWireKube(ctx, cluster.Client)
+		}
 		if err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(a.Out, "  Agent:   %s/%s\n", wireKube.AgentNamespace, wireKube.AgentName)
 		_, _ = fmt.Fprintf(a.Out, "  Peers:   %d ready\n", wireKube.ReadyPeers)
+		if opts.SkipWait && wireKube.ReadyPeers == 0 {
+			_, _ = fmt.Fprintln(a.Err, "warning: WireKube has no ready ingress peers; the registered worker will remain cordoned until idleloom start succeeds")
+		}
 	}
 	a.step("Checking external worker compatibility")
 	compatibility, err := CheckWorkerCompatibility(ctx, cluster)
@@ -254,6 +264,9 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	if err := a.approveKubeletServingCSR(ctx, cluster, opts.NodeName, state.Runtime.GuestIP, state.CreatedAt, true, opts.Timeout); err != nil {
 		return err
 	}
+	if opts.SkipWait {
+		return a.registerWorkerWithoutWaiting(ctx, statePath, &state, cluster, token)
+	}
 
 	if opts.Network == NetworkWireKube {
 		a.step("Waiting for the WireKube tunnel")
@@ -270,18 +283,14 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	if err := waitForNodeReady(ctx, cluster, opts.NodeName, opts.Timeout); err != nil {
 		return err
 	}
-	if err := token.Delete(ctx); err != nil {
-		return err
-	}
-	token.client = nil
-	if err := a.Runtime.RemoveBootstrapIdentity(ctx, state.Runtime); err != nil {
+	if err := a.removeBootstrapIdentity(ctx, token, state.Runtime); err != nil {
 		return err
 	}
 	state.Phase = PhaseReady
 	if err := SaveState(statePath, state); err != nil {
 		return err
 	}
-	if err := startMaintainer(ctx, statePath, a.Err); err != nil {
+	if err := a.startMaintainer(ctx, statePath); err != nil {
 		return err
 	}
 
@@ -338,8 +347,8 @@ func (a *App) Status(ctx context.Context, statePath string) error {
 			_, _ = fmt.Fprintf(a.Out, "WireKube:   %s\n", readyWord(connected))
 		}
 	}
-	if state.Phase == PhaseReady && runtimeStatus.VM == "running" && runtimeStatus.Network == "running" {
-		if err := startMaintainer(ctx, resolvedPath, a.Err); err != nil {
+	if (state.Phase == PhaseRegistered || state.Phase == PhaseReady) && runtimeStatus.VM == "running" && runtimeStatus.Network == "running" {
+		if err := a.startMaintainer(ctx, resolvedPath); err != nil {
 			return err
 		}
 	}
@@ -369,6 +378,9 @@ func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration
 	}
 	if state.Phase == PhaseEnrolling {
 		return a.resumeEnrollment(ctx, resolvedPath, &state, cluster, timeout)
+	}
+	if state.Phase == PhaseRegistered {
+		return a.completeRegisteredEnrollment(ctx, resolvedPath, &state, cluster, timeout)
 	}
 	if state.Phase != PhaseReady {
 		return fmt.Errorf("worker state phase %q cannot be started", state.Phase)
@@ -434,11 +446,127 @@ func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration
 	if _, err := cluster.Client.CoreV1().Nodes().Patch(ctx, state.NodeName, types.MergePatchType, []byte(`{"spec":{"unschedulable":false}}`), metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("uncordon node %s: %w", state.NodeName, err)
 	}
-	if err := startMaintainer(ctx, resolvedPath, a.Err); err != nil {
+	if err := a.startMaintainer(ctx, resolvedPath); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is Ready.\n", state.NodeName)
 	return nil
+}
+
+func (a *App) registerWorkerWithoutWaiting(ctx context.Context, statePath string, state *State, cluster *Cluster, token *BootstrapToken) error {
+	if state == nil || state.Phase != PhaseEnrolling {
+		return fmt.Errorf("an enrolling worker state is required")
+	}
+	a.step("Deferring worker readiness")
+	if err := cordonNode(ctx, cluster, state.NodeName); err != nil {
+		return err
+	}
+	if err := a.removeBootstrapIdentity(ctx, token, state.Runtime); err != nil {
+		return err
+	}
+	state.Phase = PhaseRegistered
+	if err := SaveState(statePath, *state); err != nil {
+		return err
+	}
+	if err := a.startMaintainer(ctx, statePath); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is registered; readiness is pending.\n", state.NodeName)
+	_, _ = fmt.Fprintln(a.Out, "The Kubernetes Node remains cordoned. Run idleloom status, then idleloom start to complete readiness.")
+	return nil
+}
+
+func (a *App) completeRegisteredEnrollment(ctx context.Context, statePath string, state *State, cluster *Cluster, timeout time.Duration) error {
+	if state == nil || state.Phase != PhaseRegistered {
+		return fmt.Errorf("a registered worker state is required")
+	}
+	previousNode, err := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get registered node %s before start: %w", state.NodeName, err)
+	}
+	previousHeartbeat := nodeHeartbeat(previousNode)
+	previousSSHPort := state.Runtime.SSHPort
+	runtimeStatus, err := a.Runtime.Status(ctx, &state.Runtime)
+	if err != nil {
+		return err
+	}
+	if state.Runtime.SSHPort != previousSSHPort {
+		if err := SaveState(statePath, *state); err != nil {
+			return err
+		}
+	}
+	wasRunning := runtimeStatus.VM == "running" && runtimeStatus.Network == "running"
+
+	a.step("Completing registered worker enrollment")
+	if err := a.Runtime.Start(ctx, &state.Runtime); err != nil {
+		return err
+	}
+	if err := SaveState(statePath, *state); err != nil {
+		_ = a.Runtime.Stop(context.Background(), state.Runtime)
+		return err
+	}
+	if err := a.Runtime.WaitReady(ctx, state.Runtime, 5*time.Minute); err != nil {
+		return err
+	}
+	a.step("Waiting for kubelet to reconnect")
+	if err := waitForNode(ctx, cluster, state.NodeName, timeout); err != nil {
+		return err
+	}
+	a.step("Checking the kubelet serving certificate")
+	if err := a.approveKubeletServingCSR(ctx, cluster, state.NodeName, state.Runtime.GuestIP, state.CreatedAt, false, timeout); err != nil {
+		return err
+	}
+	if state.Network == NetworkWireKube {
+		wireKube, err := CheckWireKube(ctx, cluster.Client)
+		if err != nil {
+			return err
+		}
+		a.step("Waiting for the WireKube tunnel")
+		if err := waitForWireKubeAgent(ctx, cluster, state.NodeName, wireKube, timeout); err != nil {
+			return err
+		}
+		if err := waitForWireKube(ctx, cluster, state.NodeName, timeout); err != nil {
+			return err
+		}
+	}
+	a.step("Waiting for the worker to become Ready")
+	if wasRunning {
+		err = waitForNodeReady(ctx, cluster, state.NodeName, timeout)
+	} else {
+		err = waitForNodeReadyAfter(ctx, cluster, state.NodeName, previousHeartbeat, timeout)
+	}
+	if err != nil {
+		return err
+	}
+	if err := uncordonNode(ctx, cluster, state.NodeName); err != nil {
+		return err
+	}
+	state.Phase = PhaseReady
+	if err := SaveState(statePath, *state); err != nil {
+		return err
+	}
+	if err := a.startMaintainer(ctx, statePath); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is Ready.\n", state.NodeName)
+	return nil
+}
+
+func (a *App) removeBootstrapIdentity(ctx context.Context, token *BootstrapToken, runtime RuntimeState) error {
+	if token != nil {
+		if err := token.Delete(ctx); err != nil {
+			return err
+		}
+		token.client = nil
+	}
+	return a.Runtime.RemoveBootstrapIdentity(ctx, runtime)
+}
+
+func (a *App) startMaintainer(ctx context.Context, statePath string) error {
+	if a.StartMaintainer != nil {
+		return a.StartMaintainer(ctx, statePath, a.Err)
+	}
+	return startMaintainer(ctx, statePath, a.Err)
 }
 
 func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *State, cluster *Cluster, timeout time.Duration) error {
@@ -545,20 +673,14 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 	if err := waitForNodeReady(ctx, cluster, state.NodeName, timeout); err != nil {
 		return err
 	}
-	if token != nil {
-		if err := token.Delete(ctx); err != nil {
-			return err
-		}
-		token.client = nil
-	}
-	if err := a.Runtime.RemoveBootstrapIdentity(ctx, state.Runtime); err != nil {
+	if err := a.removeBootstrapIdentity(ctx, token, state.Runtime); err != nil {
 		return err
 	}
 	state.Phase = PhaseReady
 	if err := SaveState(statePath, *state); err != nil {
 		return err
 	}
-	if err := startMaintainer(ctx, statePath, a.Err); err != nil {
+	if err := a.startMaintainer(ctx, statePath); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s enrollment resumed and is Ready.\n", state.NodeName)
@@ -803,6 +925,13 @@ func uncordonNode(ctx context.Context, cluster *Cluster, nodeName string) error 
 	return nil
 }
 
+func cordonNode(ctx context.Context, cluster *Cluster, nodeName string) error {
+	if _, err := cluster.Client.CoreV1().Nodes().Patch(ctx, nodeName, types.MergePatchType, []byte(`{"spec":{"unschedulable":true}}`), metav1.PatchOptions{}); err != nil {
+		return fmt.Errorf("cordon node %s: %w", nodeName, err)
+	}
+	return nil
+}
+
 func removeStateFile(path string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove Idleloom state %s: %w", path, err)
@@ -945,6 +1074,9 @@ func waitForNodeReadyAfter(ctx context.Context, cluster *Cluster, nodeName strin
 }
 
 func nodeHeartbeat(node *corev1.Node) time.Time {
+	if node == nil {
+		return time.Time{}
+	}
 	for _, condition := range node.Status.Conditions {
 		if condition.Type == corev1.NodeReady {
 			return condition.LastHeartbeatTime.Time

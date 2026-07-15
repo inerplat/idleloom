@@ -1,0 +1,72 @@
+site_name: Idleloom
+site_url: https://inerplat.github.io/idleloom/
+site_description: Use idle Apple Silicon Macs as Kubernetes compute
+repo_url: https://github.com/inerplat/idleloom
+repo_name: inerplat/idleloom
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: teal
+      accent: deep-orange
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Guide Map: getting-started.md
+      - Start Here: getting-started/index.md
+      - Choose a Mode: getting-started/choose-mode.md
+      - Native Metal: getting-started/native-metal.md
+      - Linux Worker: getting-started/linux-worker.md
+  - Guides:
+      - Native Shells: guides/native-shell.md
+      - MLX Workloads: guides/native-mlx.md
+      - Ollama: guides/native-ollama.md
+      - llama.cpp Metal: guides/native-llama-cpp.md
+      - Native Serving: guides/native-serving.md
+      - Worker Storage: guides/worker-storage.md
+      - Worker Vulkan: guides/worker-vulkan.md
+  - Operations:
+      - Lifecycle: operations/lifecycle.md
+      - Cleanup: operations/cleanup.md
+      - Troubleshooting: operations/troubleshooting.md
+  - Reference:
+      - Recipes: recipes.md
+      - Native Training Contract: native-training.md
+      - Worker Bootstrap: worker-bootstrap.md
