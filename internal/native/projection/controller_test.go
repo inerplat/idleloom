@@ -3,6 +3,7 @@ package projection
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +25,7 @@ func TestReconcileCreatesIsolatedRunningProjection(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	controller := &Controller{
 		Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now },
 		ProbeLogs: func(context.Context, string, string) error { return nil },
@@ -74,6 +75,45 @@ func TestReconcileCreatesIsolatedRunningProjection(t *testing.T) {
 	}
 }
 
+func TestProjectionAnnotationsIncludeCommonRunIdentity(t *testing.T) {
+	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{
+		Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+			Shell: &nativev1alpha1.ResolvedShell{},
+			Run:   &nativev1alpha1.WorkloadRunSpec{Task: "shell", Experiment: "smoke", Attempt: 1},
+		},
+	}
+	annotations := projectionAnnotations(assignment, false)
+	if annotations["native.idleloom.io/run-task"] != "shell" || annotations["native.idleloom.io/experiment"] != "smoke" {
+		t.Fatalf("run annotations = %#v", annotations)
+	}
+}
+
+func TestProjectionUsesPinnedOllamaArtifactIdentity(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+		Model: &nativev1alpha1.ResolvedModel{Artifact: nativev1alpha1.ModelArtifact{
+			OllamaModel: "qwen3.5:9b", ManifestDigest: digest,
+		}},
+	}}
+	want := "ollama://local/qwen3.5:9b@" + digest
+	if got := projectionAnnotations(assignment, false)[AnnotationModelArtifact]; got != want {
+		t.Fatalf("model artifact annotation = %q, want %q", got, want)
+	}
+}
+
+func TestProjectionUsesPinnedLlamaCppArtifactIdentity(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("b", 64)
+	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+		Model: &nativev1alpha1.ResolvedModel{Artifact: nativev1alpha1.ModelArtifact{
+			GGUFFile: "llama-3.2-3b.gguf", ManifestDigest: digest,
+		}},
+	}}
+	want := "gguf://managed/llama-3.2-3b.gguf@" + digest
+	if got := projectionAnnotations(assignment, false)[AnnotationModelArtifact]; got != want {
+		t.Fatalf("model artifact annotation = %q, want %q", got, want)
+	}
+}
+
 func TestReconcilePublishesLogsEndpointOnlyForConnectedWireKubeHost(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
@@ -90,7 +130,12 @@ func TestReconcilePublishesLogsEndpointOnlyForConnectedWireKubeHost(t *testing.T
 		Mode: nativev1alpha1.ConnectivityModeWireKubeLeaf, Provider: nativev1alpha1.ConnectivityProviderWireKube,
 		Transport: nativev1alpha1.ConnectivityTransportRelay, Address: "198.18.18.52/32",
 	}
-	host.Status.Conditions = []metav1.Condition{{Type: nativev1alpha1.HostConditionConnected, Status: metav1.ConditionTrue}}
+	hostHeartbeat := metav1.NewMicroTime(now)
+	host.Status.ObservedGeneration = host.Generation
+	host.Status.LastHeartbeatTime = &hostHeartbeat
+	host.Status.Conditions = []metav1.Condition{{
+		Type: nativev1alpha1.HostConditionConnected, Status: metav1.ConditionTrue, ObservedGeneration: host.Generation,
+	}}
 	updatedHost, err := nativekube.ToUnstructured(&host)
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +143,7 @@ func TestReconcilePublishesLogsEndpointOnlyForConnectedWireKubeHost(t *testing.T
 	if _, err := dynamicClient.Resource(nativekube.HostsGVR).Namespace(assignment.Namespace).UpdateStatus(context.Background(), updatedHost, metav1.UpdateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	controller := &Controller{
 		Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now },
 		ProbeLogs: func(context.Context, string, string) error { return nil },
@@ -121,7 +166,7 @@ func TestReconcilePublishesLogsEndpointOnlyForConnectedWireKubeHost(t *testing.T
 	if pod.Annotations[AnnotationLogs] != "supported" || pod.Annotations[AnnotationKubeletAPI] != "logs-only" {
 		t.Fatalf("Pod capability annotations = %#v", pod.Annotations)
 	}
-	controller.ProbeLogs = func(context.Context, string, string) error { return fmt.Errorf("API server log probe failed") }
+	controller.ProbeLogs = func(context.Context, string, string) error { return fmt.Errorf("the API server log probe failed") }
 	if err := controller.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -138,13 +183,26 @@ func TestReconcilePublishesLogsEndpointOnlyForConnectedWireKubeHost(t *testing.T
 	}
 }
 
+func TestEnsureNodeRejectsMutationOutsideProjectionContract(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	_, assignment := testProjectionObjects(now)
+	ref := refFor(assignment)
+	node := managedNode(assignment, ref.NodeName, false)
+	node.Labels[corev1.LabelOSStable] = "linux"
+	kubernetesClient := kubernetesfake.NewClientset(node)
+	controller := &Controller{Kubernetes: kubernetesClient}
+	if _, err := controller.ensureNode(context.Background(), assignment, ref.NodeName, false); err == nil || !strings.Contains(err.Error(), "not the expected projection") {
+		t.Fatalf("mutated Node error = %v", err)
+	}
+}
+
 func TestReconcileProjectsInitiallyStaleAssignmentAsNotReady(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	heartbeat := metav1.NewMicroTime(now.Add(-2 * time.Minute))
 	assignment.Status.LastHeartbeatTime = &heartbeat
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now }}
 	if err := controller.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -184,11 +242,22 @@ func TestStateForPreservesCompletedShellAfterHeartbeatExpires(t *testing.T) {
 	}
 }
 
+func TestStateForTreatsServerFailureAsRestartable(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	_, assignment := testProjectionObjects(now)
+	assignment.Spec.Model.Server = &nativev1alpha1.ResolvedServer{ServiceName: "qwen-chat"}
+	assignment.Status.Phase = nativev1alpha1.PhaseFailed
+	state := stateFor(assignment, now)
+	if state.podPhase != corev1.PodPending || state.ready || state.reason != "IdleloomServerRestarting" {
+		t.Fatalf("restartable server state = %#v", state)
+	}
+}
+
 func TestReconcileDoesNotRegressRunningPodPhaseDuringLeaseLoss(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now }}
 	if err := controller.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -212,7 +281,7 @@ func TestReconcileDoesNotRegressRunningPodPhaseWhileStopping(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now }}
 	if err := controller.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -231,11 +300,36 @@ func TestReconcileDoesNotRegressRunningPodPhaseWhileStopping(t *testing.T) {
 	}
 }
 
+func TestReconcileDoesNotRegressTerminalPodPhase(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	workload, assignment := testProjectionObjects(now)
+	assignment.Status.Phase = nativev1alpha1.PhaseSucceeded
+	dynamicClient := testDynamicClient(t, workload, assignment)
+	kubernetesClient := kubernetesfake.NewClientset()
+	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now }}
+	if err := controller.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	assignment.Status.Phase = nativev1alpha1.PhaseRunning
+	controller.Dynamic = testDynamicClient(t, workload, assignment)
+	if err := controller.ReconcileOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pod, err := kubernetesClient.CoreV1().Pods(refFor(assignment).PodNamespace).Get(context.Background(), refFor(assignment).PodName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pod.Status.Phase != corev1.PodSucceeded || len(pod.Status.ContainerStatuses) != 1 || pod.Status.ContainerStatuses[0].State.Terminated == nil {
+		t.Fatalf("terminal Pod regressed after stale assignment state: %#v", pod.Status)
+	}
+}
+
 func TestReconcileGarbageCollectsProjectionAfterAssignmentDeletion(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now }}
 	if err := controller.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -265,13 +359,35 @@ func TestReconcileRejectsMutatedManagedPod(t *testing.T) {
 	privileged := true
 	mutated.Spec.Containers[0].SecurityContext = &corev1.SecurityContext{Privileged: &privileged}
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset(mutated)
+	kubernetesClient := kubernetesfake.NewClientset(mutated)
 	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now }}
 	if err := controller.ReconcileOnce(context.Background()); err == nil {
 		t.Fatal("projection accepted a mutated managed Pod")
 	}
 	if _, err := kubernetesClient.CoreV1().Nodes().Get(context.Background(), ref.NodeName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
 		t.Fatalf("Node was created after Pod contract failure: %v", err)
+	}
+}
+
+func TestValidateManagedNodeAllowsNodeLifecycleTaints(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	_, assignment := testProjectionObjects(now)
+	desired := managedNode(assignment, refFor(assignment).NodeName, false)
+	actual := desired.DeepCopy()
+	taintedAt := metav1.NewTime(now)
+	actual.Spec.Taints = append(actual.Spec.Taints,
+		corev1.Taint{Key: corev1.TaintNodeNotReady, Effect: corev1.TaintEffectNoSchedule},
+		corev1.Taint{Key: corev1.TaintNodeUnreachable, Effect: corev1.TaintEffectNoExecute, TimeAdded: &taintedAt},
+	)
+	if err := validateManagedNode(actual, desired, assignment, false); err != nil {
+		t.Fatalf("node lifecycle taints were rejected: %v", err)
+	}
+
+	actual.Spec.Taints = append(actual.Spec.Taints,
+		corev1.Taint{Key: "native.idleloom.io/foreign", Effect: corev1.TaintEffectNoSchedule},
+	)
+	if err := validateManagedNode(actual, desired, assignment, false); err == nil {
+		t.Fatal("unrelated Node taint was accepted")
 	}
 }
 
@@ -303,7 +419,7 @@ func TestTransientWorkloadReadFailurePreservesActiveProjection(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now }}
 	if err := controller.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -327,7 +443,7 @@ func TestReconcileIsIdempotentAcrossControllerRestart(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	current := now
 	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return current }}
 	if err := controller.ReconcileOnce(context.Background()); err != nil {
@@ -364,7 +480,7 @@ func TestReconcileDeletesProjectionOnlyAfterExactStopAcknowledgement(t *testing.
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	controller := &Controller{Dynamic: dynamicClient, Kubernetes: kubernetesClient, Now: func() time.Time { return now }}
 	if err := controller.ReconcileOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -395,7 +511,7 @@ func TestReconcileRetriesNodeStatusConflict(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)
 	dynamicClient := testDynamicClient(t, workload, assignment)
-	kubernetesClient := kubernetesfake.NewSimpleClientset()
+	kubernetesClient := kubernetesfake.NewClientset()
 	conflicted := false
 	kubernetesClient.PrependReactor("update", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "status" || conflicted {

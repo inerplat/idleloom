@@ -64,8 +64,7 @@ func startPlatformTunnel(ctx context.Context, state State, config TunnelConfig, 
 	}
 	name, err := tunDevice.Name()
 	if err != nil {
-		tunDevice.Close()
-		return nil, fmt.Errorf("read macOS utun name: %w", err)
+		return nil, errors.Join(fmt.Errorf("read macOS utun name: %w", err), tunDevice.Close())
 	}
 	logger := &device.Logger{Verbosef: device.DiscardLogf, Errorf: device.DiscardLogf}
 	if logf != nil {
@@ -121,7 +120,7 @@ func (t *darwinTunnel) InterfaceName() string { return t.name }
 
 func (t *darwinTunnel) SyncPeers(ctx context.Context, client dynamic.Interface) error {
 	if client == nil {
-		return fmt.Errorf("WireKube peer client is required")
+		return fmt.Errorf("the WireKube peer client is required")
 	}
 	list, err := client.Resource(PeersGVR).List(ctx, v1.ListOptions{})
 	if err != nil {
@@ -175,13 +174,13 @@ func (t *darwinTunnel) SyncPeers(ctx context.Context, client dynamic.Interface) 
 		previous := t.peerKeys
 		t.peerKeys = next
 		t.mu.Unlock()
-		for _, publicKey := range previous {
+		for _, publicKey := range stalePeerPublicKeys(previous, next) {
 			key, err := relayPublicKey(publicKey)
 			if err == nil {
 				t.relay.RemoveProxy(key)
 			}
 		}
-		return fmt.Errorf("WireKube mesh has no remote peers with usable mesh routes")
+		return fmt.Errorf("the WireKube mesh has no remote peers with usable mesh routes")
 	}
 	t.mu.Lock()
 	if err := t.device.IpcSet(config.String()); err != nil {
@@ -191,10 +190,7 @@ func (t *darwinTunnel) SyncPeers(ctx context.Context, client dynamic.Interface) 
 	previous := t.peerKeys
 	t.peerKeys = next
 	t.mu.Unlock()
-	for name, publicKey := range previous {
-		if _, ok := next[name]; ok {
-			continue
-		}
+	for _, publicKey := range stalePeerPublicKeys(previous, next) {
 		key, err := relayPublicKey(publicKey)
 		if err == nil {
 			t.relay.RemoveProxy(key)
@@ -208,13 +204,13 @@ func (t *darwinTunnel) Validate(ctx context.Context) error {
 		return err
 	}
 	if !t.relay.IsConnected() {
-		return fmt.Errorf("WireKube relay is not connected")
+		return fmt.Errorf("the WireKube relay is not connected")
 	}
 	t.mu.RLock()
 	peerCount := len(t.peerKeys)
 	t.mu.RUnlock()
 	if peerCount == 0 {
-		return fmt.Errorf("WireKube peers are not synchronized")
+		return fmt.Errorf("the WireKube peers are not synchronized")
 	}
 	return nil
 }
@@ -275,7 +271,7 @@ func wireGuardListenPort(wireGuardDevice *device.Device) (int, error) {
 			return port, nil
 		}
 	}
-	return 0, fmt.Errorf("WireGuard did not allocate a listen port")
+	return 0, fmt.Errorf("the WireGuard implementation did not allocate a listen port")
 }
 
 func relayPublicKey(value string) ([32]byte, error) {
@@ -366,14 +362,14 @@ func resolveRelayEndpoint(ctx context.Context, state State) (State, error) {
 	var selected net.IP
 	for _, address := range addresses {
 		if mesh != nil && mesh.Contains(address) {
-			return State{}, fmt.Errorf("WireKube relay endpoint %s is inside the routed mesh CIDR %s", address, state.MeshCIDR)
+			return State{}, fmt.Errorf("the WireKube relay endpoint %s is inside the routed mesh CIDR %s", address, state.MeshCIDR)
 		}
 		if selected == nil || selected.To4() == nil && address.To4() != nil {
 			selected = address
 		}
 	}
 	if selected == nil {
-		return State{}, fmt.Errorf("WireKube relay endpoint resolved to no addresses")
+		return State{}, fmt.Errorf("the WireKube relay endpoint resolved to no addresses")
 	}
 	state.RelayEndpoint = net.JoinHostPort(selected.String(), port)
 	return state, nil

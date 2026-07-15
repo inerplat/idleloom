@@ -8,5 +8,5 @@ import (
 )
 
 func startPlatformTunnel(context.Context, State, TunnelConfig, func(string, ...any)) (Tunnel, error) {
-	return nil, fmt.Errorf("WireKube connected leaf currently requires macOS")
+	return nil, fmt.Errorf("the WireKube connected leaf currently requires macOS")
 }

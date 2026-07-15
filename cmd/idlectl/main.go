@@ -91,9 +91,12 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	handled, internalErr := runInternalBinary(ctx, filepath.Base(os.Args[0]), os.Args[1:])
+	if !handled && internalErr == nil {
+		handled, internalErr = runInternalCommand(ctx, os.Args[1:])
+	}
 	if internalErr != nil {
 		if !errors.Is(internalErr, context.Canceled) && !errors.Is(internalErr, flag.ErrHelp) {
-			fmt.Fprintln(os.Stderr, "error:", internalErr)
+			_, _ = fmt.Fprintln(os.Stderr, "error:", internalErr)
 			os.Exit(1)
 		}
 		return
@@ -102,20 +105,20 @@ func main() {
 		return
 	}
 	if filepath.Base(os.Args[0]) != "idlectl" {
-		fmt.Fprintf(os.Stderr, "unsupported executable name %q\n", filepath.Base(os.Args[0]))
+		_, _ = fmt.Fprintf(os.Stderr, "unsupported executable name %q\n", filepath.Base(os.Args[0]))
 		os.Exit(2)
 	}
 	if len(os.Args) < 2 {
-		fmt.Fprint(os.Stderr, usageText)
+		_, _ = fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
 	}
 	handled, err := runPublicCommand(ctx, os.Args[1], os.Args[2:])
 	if !handled {
-		fmt.Fprintf(os.Stderr, "unknown command %q\n%s", os.Args[1], usageText)
+		_, _ = fmt.Fprintf(os.Stderr, "unknown command %q\n%s", os.Args[1], usageText)
 		os.Exit(2)
 	}
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, flag.ErrHelp) && !errors.Is(err, pflag.ErrHelp) {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		_, _ = fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
@@ -167,6 +170,27 @@ func runInternalBinary(ctx context.Context, binary string, args []string) (bool,
 	}
 }
 
+func runInternalCommand(ctx context.Context, args []string) (bool, error) {
+	if len(args) == 0 || args[0] != "internal" {
+		return false, nil
+	}
+	if len(args) < 2 {
+		return true, fmt.Errorf("internal service role is required")
+	}
+	switch args[1] {
+	case "controller":
+		return true, runController(ctx, args[2:])
+	case "agent":
+		return true, runAgent(ctx, args[2:])
+	case "link":
+		return true, runLink(ctx, args[2:])
+	case "projection":
+		return true, runProjection(ctx, args[2:])
+	default:
+		return true, fmt.Errorf("unknown internal service role %q", args[1])
+	}
+}
+
 func runJoin(ctx context.Context, args []string) error {
 	flags, kubeconfig, kubeContext := clusterPFlags("join")
 	stateDirectory := flags.String("state-dir", mustStateDirectory(), "private controller and agent state")
@@ -190,23 +214,16 @@ func runJoin(ctx context.Context, args []string) error {
 	}
 	hostID := enroll.NormalizeHostID(flags.Args()[0])
 	if hostID == "" {
-		return fmt.Errorf("HOST must contain a letter or digit")
+		return fmt.Errorf("the host ID must contain a letter or digit")
 	}
 	if installed, err := serviceinstall.HasReceipt(*stateDirectory); err != nil {
 		return err
 	} else if installed {
 		return fmt.Errorf("host is already joined locally; delete host/%s before joining again", hostID)
 	}
-	if err := requireServiceBinaries(*projectionEnabled, *link == nativewirekube.ConnectivityWireKube); err != nil {
-		return err
-	}
-	var publicBinary []byte
-	if *link == nativewirekube.ConnectivityWireKube {
-		captured, captureErr := serviceinstall.CaptureCurrentBinary()
-		if captureErr != nil {
-			return fmt.Errorf("capture public native binary: %w", captureErr)
-		}
-		publicBinary = captured
+	publicBinary, err := serviceinstall.CaptureCurrentBinary()
+	if err != nil {
+		return fmt.Errorf("capture public native binary: %w", err)
 	}
 	resolvedShellAccess, err := parseShellAccess(*shellAccess)
 	if err != nil {
@@ -238,12 +255,12 @@ func runJoin(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	fmt.Fprintln(os.Stderr, "installing Native API and restricted identities")
+	_, _ = fmt.Fprintln(os.Stderr, "installing Native API and restricted identities")
 	if err := install.Apply(ctx, dynamicClient, *forceConflicts); err != nil {
 		return err
 	}
 	if *projectionEnabled {
-		fmt.Fprintln(os.Stderr, "installing projection RBAC and admission policy")
+		_, _ = fmt.Fprintln(os.Stderr, "installing projection RBAC and admission policy")
 		if err := install.ApplyProjection(ctx, dynamicClient, *forceConflicts); err != nil {
 			return err
 		}
@@ -251,7 +268,7 @@ func runJoin(ctx context.Context, args []string) error {
 	if err := waitForNativeAPI(ctx, dynamicClient); err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "installing locked Native model catalog")
+	_, _ = fmt.Fprintln(os.Stderr, "installing locked Native model catalog")
 	if err := install.ApplyCatalog(ctx, dynamicClient, *forceConflicts); err != nil {
 		return err
 	}
@@ -263,7 +280,7 @@ func runJoin(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "enrolled host; installing launchd services")
+	_, _ = fmt.Fprintln(os.Stderr, "enrolled host; installing launchd services")
 	projectionKubeconfig := ""
 	if *projectionEnabled {
 		projectionKubeconfig = filepath.Join(*stateDirectory, "projection.kubeconfig")
@@ -287,7 +304,7 @@ func runJoin(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("refresh cluster credentials after installing native services: %w", err)
 	}
-	fmt.Fprintln(os.Stderr, "waiting for host readiness")
+	_, _ = fmt.Fprintln(os.Stderr, "waiting for host readiness")
 	if err := waitForHostReady(ctx, readyClient, result.Namespace, result.Connectivity == nativewirekube.ConnectivityWireKube, 2*time.Minute); err != nil {
 		return fmt.Errorf("wait for joined host: %w", err)
 	}
@@ -330,9 +347,9 @@ func ensureWireKubeForJoin(ctx context.Context, config wireKubeJoinConfig) error
 		if inspectErr != nil {
 			return fmt.Errorf("existing WireKube installation is incompatible: %w", inspectErr)
 		}
-		fmt.Fprintf(config.Output, "using existing WireKube mesh %s (%s)\n", report.MeshName, report.MeshCIDR)
+		_, _ = fmt.Fprintf(config.Output, "using existing WireKube mesh %s (%s)\n", report.MeshName, report.MeshCIDR)
 		for _, warning := range report.Warnings {
-			fmt.Fprintln(config.Output, "warning:", warning)
+			_, _ = fmt.Fprintln(config.Output, "warning:", warning)
 		}
 		return nil
 	}
@@ -340,13 +357,13 @@ func ensureWireKubeForJoin(ctx context.Context, config wireKubeJoinConfig) error
 		return fmt.Errorf("inspect WireKube installation: %w", err)
 	}
 	if config.Yes && !config.InstallDependencies {
-		return fmt.Errorf("WireKube is not installed; rerun with --install-dependencies --yes, or use --link api-only")
+		return fmt.Errorf("the WireKube dependency is not installed; rerun with --install-dependencies --yes, or use --link api-only")
 	}
 	if !config.Interactive && (!config.Yes || !config.InstallDependencies) {
-		return fmt.Errorf("WireKube is not installed and input is non-interactive; rerun with --install-dependencies --yes, or use --link api-only")
+		return fmt.Errorf("the WireKube dependency is not installed and input is non-interactive; rerun with --install-dependencies --yes, or use --link api-only")
 	}
 
-	fmt.Fprintf(config.Output, "WireKube is not installed; resolving compatible release %s\n", wirekubecli.CompatibleVersion)
+	_, _ = fmt.Fprintf(config.Output, "WireKube is not installed; resolving compatible release %s\n", wirekubecli.CompatibleVersion)
 	lifecycle, err := newWireKubeLifecycle(ctx, config.Kubeconfig, config.Context)
 	if err != nil {
 		return fmt.Errorf("prepare WireKube installer: %w", err)
@@ -365,39 +382,39 @@ func ensureWireKubeForJoin(ctx context.Context, config wireKubeJoinConfig) error
 			return fmt.Errorf("join cancelled; rerun with --link api-only to join without inbound Kubernetes connectivity")
 		}
 	}
-	fmt.Fprintln(config.Output, "installing WireKube cluster dependencies")
+	_, _ = fmt.Fprintln(config.Output, "installing WireKube cluster dependencies")
 	result, err := lifecycle.Install(ctx, plan)
 	if err != nil {
 		return fmt.Errorf("install WireKube: %w", err)
 	}
-	fmt.Fprintf(config.Output, "WireKube installation %s is ready; continuing host enrollment\n", result.InstallationID)
+	_, _ = fmt.Fprintf(config.Output, "WireKube installation %s is ready; continuing host enrollment\n", result.InstallationID)
 	return nil
 }
 
 func writeWireKubeJoinPlan(out io.Writer, config wireKubeJoinConfig, plan wirekubecli.Plan) {
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Idleloom connected-host plan")
-	fmt.Fprintf(out, "  Host:          %s\n", config.HostID)
-	fmt.Fprintf(out, "  Shell access:  %s\n", config.ShellAccess)
-	fmt.Fprintf(out, "  Projection:    %t\n", config.Projection)
-	fmt.Fprintf(out, "  Cluster:       %s\n", plan.Context)
-	fmt.Fprintf(out, "  Kubernetes:    %s\n", plan.Detection.KubernetesVersion)
-	fmt.Fprintf(out, "  CNI:           %s\n", plan.Detection.CNI)
-	fmt.Fprintf(out, "  WireKube:      %s\n", plan.WireKubeVersion)
-	fmt.Fprintf(out, "  Mesh CIDR:     %s\n", plan.MeshCIDR)
-	fmt.Fprintf(out, "  Image:         %s\n", plan.Image)
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "Infrastructure impact")
+	_, _ = fmt.Fprintln(out, "")
+	_, _ = fmt.Fprintln(out, "Idleloom connected-host plan")
+	_, _ = fmt.Fprintf(out, "  Host:          %s\n", config.HostID)
+	_, _ = fmt.Fprintf(out, "  Shell access:  %s\n", config.ShellAccess)
+	_, _ = fmt.Fprintf(out, "  Projection:    %t\n", config.Projection)
+	_, _ = fmt.Fprintf(out, "  Cluster:       %s\n", plan.Context)
+	_, _ = fmt.Fprintf(out, "  Kubernetes:    %s\n", plan.Detection.KubernetesVersion)
+	_, _ = fmt.Fprintf(out, "  CNI:           %s\n", plan.Detection.CNI)
+	_, _ = fmt.Fprintf(out, "  WireKube:      %s\n", plan.WireKubeVersion)
+	_, _ = fmt.Fprintf(out, "  Mesh CIDR:     %s\n", plan.MeshCIDR)
+	_, _ = fmt.Fprintf(out, "  Image:         %s\n", plan.Image)
+	_, _ = fmt.Fprintln(out, "")
+	_, _ = fmt.Fprintln(out, "Infrastructure impact")
 	for _, impact := range plan.Impact {
-		fmt.Fprintf(out, "  - %s\n", impact)
+		_, _ = fmt.Fprintf(out, "  - %s\n", impact)
 	}
 	for _, warning := range plan.Warnings {
-		fmt.Fprintf(out, "  warning: %s\n", warning)
+		_, _ = fmt.Fprintf(out, "  warning: %s\n", warning)
 	}
 }
 
 func confirmDefaultYes(in io.Reader, out io.Writer, prompt string) (bool, error) {
-	fmt.Fprint(out, prompt)
+	_, _ = fmt.Fprint(out, prompt)
 	response, err := bufio.NewReader(in).ReadString('\n')
 	if err != nil && len(response) == 0 {
 		return false, err
@@ -453,29 +470,6 @@ func waitForHostReady(ctx context.Context, client dynamic.Interface, namespace s
 	})
 }
 
-func requireServiceBinaries(projection, linked bool) error {
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	directory := filepath.Dir(executable)
-	names := []string{"idleloom-controller", "idleloom-agent"}
-	if projection {
-		names = append(names, "idleloom-projection")
-	}
-	if linked {
-		names = append(names, "idleloom-link")
-	}
-	for _, name := range names {
-		path := filepath.Join(directory, name)
-		info, err := os.Stat(path)
-		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
-			return fmt.Errorf("required service binary %s is missing; install the complete Idleloom Native bundle", path)
-		}
-	}
-	return nil
-}
-
 func parseShellAccess(value string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "disabled":
@@ -527,7 +521,7 @@ func runLink(ctx context.Context, args []string) (returnErr error) {
 	clusterConfig, err = credential.Configure(clusterConfig, credential.Options{
 		Namespace: state.PeerNamespace, ServiceAccount: state.PeerServiceAccount,
 		KubeconfigPath: *kubeconfig, TokenDuration: 8 * time.Hour,
-		Logf: func(format string, values ...any) { fmt.Fprintf(os.Stderr, "link: "+format+"\n", values...) },
+		Logf: func(format string, values ...any) { _, _ = fmt.Fprintf(os.Stderr, "link: "+format+"\n", values...) },
 	})
 	if err != nil {
 		return fmt.Errorf("configure WireKube peer credential: %w", err)
@@ -580,7 +574,7 @@ func runLink(ctx context.Context, args []string) (returnErr error) {
 	tunnel, err := nativewirekube.StartTunnel(ctx, state, nativewirekube.TunnelConfig{
 		RelayTokenFile: nativewirekube.RelayTokenPath(*stateDirectory),
 	}, func(format string, values ...any) {
-		fmt.Fprintf(os.Stderr, "link: "+format+"\n", values...)
+		_, _ = fmt.Fprintf(os.Stderr, "link: "+format+"\n", values...)
 	})
 	if err != nil {
 		return err
@@ -590,7 +584,7 @@ func runLink(ctx context.Context, args []string) (returnErr error) {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if err := nativewirekube.UpdatePeerStatus(cleanupCtx, dynamicClient, state, nativewirekube.TunnelSnapshot{}, false); err != nil {
-			fmt.Fprintf(os.Stderr, "link: clear peer status: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "link: clear peer status: %v\n", err)
 		}
 	}()
 	writeStatus := func() error {
@@ -599,11 +593,11 @@ func runLink(ctx context.Context, args []string) (returnErr error) {
 			if relayTokenExpiry.IsZero() || !time.Now().Before(relayTokenExpiry) {
 				statusErr = errors.Join(statusErr, err)
 			} else {
-				fmt.Fprintf(os.Stderr, "link: relay token refresh deferred: %v\n", err)
+				_, _ = fmt.Fprintf(os.Stderr, "link: relay token refresh deferred: %v\n", err)
 			}
 		}
 		if err := tunnel.SyncPeers(ctx, dynamicClient); err != nil {
-			fmt.Fprintf(os.Stderr, "link: peer synchronization deferred: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "link: peer synchronization deferred: %v\n", err)
 		}
 		if err := tunnel.Validate(ctx); err != nil {
 			statusErr = errors.Join(statusErr, err)
@@ -623,7 +617,7 @@ func runLink(ctx context.Context, args []string) (returnErr error) {
 			return err
 		}
 		if err := nativewirekube.UpdatePeerStatus(ctx, dynamicClient, state, snapshot, statusErr == nil); err != nil {
-			fmt.Fprintf(os.Stderr, "link: %v\n", err)
+			_, _ = fmt.Fprintf(os.Stderr, "link: %v\n", err)
 		}
 		return nil
 	}
@@ -660,7 +654,9 @@ func runController(ctx context.Context, args []string) error {
 	config.Timeout = 10 * time.Second
 	config, err = credential.Configure(config, credential.Options{
 		Namespace: "idleloom-system", ServiceAccount: "idleloom-controller", KubeconfigPath: *kubeconfig,
-		Logf: func(format string, values ...any) { fmt.Fprintf(os.Stderr, "controller: "+format+"\n", values...) },
+		Logf: func(format string, values ...any) {
+			_, _ = fmt.Fprintf(os.Stderr, "controller: "+format+"\n", values...)
+		},
 	})
 	if err != nil {
 		return err
@@ -688,7 +684,9 @@ func runController(ctx context.Context, args []string) error {
 		Reconcile: func(leaderCtx context.Context) error {
 			return runControllerLoop(leaderCtx, reconciler, *interval)
 		},
-		Logf: func(format string, values ...any) { fmt.Fprintf(os.Stderr, "controller: "+format+"\n", values...) },
+		Logf: func(format string, values ...any) {
+			_, _ = fmt.Fprintf(os.Stderr, "controller: "+format+"\n", values...)
+		},
 	})
 }
 
@@ -700,7 +698,7 @@ func runControllerLoop(ctx context.Context, reconciler *nativecontroller.Reconci
 	defer ticker.Stop()
 	for {
 		if err := reconciler.ReconcileOnce(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, "controller:", err)
+			_, _ = fmt.Fprintln(os.Stderr, "controller:", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -749,7 +747,9 @@ func runProjection(ctx context.Context, args []string) error {
 		}
 		config, err = credential.Configure(config, credential.Options{
 			Namespace: "idleloom-system", ServiceAccount: "idleloom-projection", KubeconfigPath: *kubeconfig,
-			Logf: func(format string, values ...any) { fmt.Fprintf(os.Stderr, "projection: "+format+"\n", values...) },
+			Logf: func(format string, values ...any) {
+				_, _ = fmt.Fprintf(os.Stderr, "projection: "+format+"\n", values...)
+			},
 		})
 		if err != nil {
 			return err
@@ -783,7 +783,9 @@ func runProjection(ctx context.Context, args []string) error {
 		Reconcile: func(leaderCtx context.Context) error {
 			return runProjectionLoop(leaderCtx, projector, *interval)
 		},
-		Logf: func(format string, values ...any) { fmt.Fprintf(os.Stderr, "projection: "+format+"\n", values...) },
+		Logf: func(format string, values ...any) {
+			_, _ = fmt.Fprintf(os.Stderr, "projection: "+format+"\n", values...)
+		},
 	})
 }
 
@@ -792,7 +794,7 @@ func runProjectionLoop(ctx context.Context, projector *nativeprojection.Controll
 	defer ticker.Stop()
 	for {
 		if err := projector.ReconcileOnce(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, "projection:", err)
+			_, _ = fmt.Fprintln(os.Stderr, "projection:", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -828,7 +830,7 @@ func runAgent(ctx context.Context, args []string) error {
 	config.Timeout = 10 * time.Second
 	config, err = credential.Configure(config, credential.Options{
 		Namespace: *namespace, ServiceAccount: "idleloom-agent", KubeconfigPath: *kubeconfig,
-		Logf: func(format string, values ...any) { fmt.Fprintf(os.Stderr, "agent: "+format+"\n", values...) },
+		Logf: func(format string, values ...any) { _, _ = fmt.Fprintf(os.Stderr, "agent: "+format+"\n", values...) },
 	})
 	if err != nil {
 		return err
@@ -882,7 +884,7 @@ func runAgent(ctx context.Context, args []string) error {
 		KubeconfigPath: *kubeconfig, ListenAddress: *listen, ServeListenAddress: serveListenAddress,
 		ConnectivityStatus: connectivityStatus,
 		KubeletBridge:      kubeletBridge,
-		Logf:               func(format string, values ...any) { fmt.Fprintf(os.Stderr, "agent: "+format+"\n", values...) },
+		Logf:               func(format string, values ...any) { _, _ = fmt.Fprintf(os.Stderr, "agent: "+format+"\n", values...) },
 	})
 	if err != nil {
 		return err
@@ -907,11 +909,11 @@ func assignedMeshIPv4(value string) (string, error) {
 	}
 	ip, network, err := net.ParseCIDR(value)
 	if err != nil || ip.To4() == nil {
-		return "", fmt.Errorf("WireKube connected leaf has no valid assigned IPv4 address")
+		return "", fmt.Errorf("the WireKube connected leaf has no valid assigned IPv4 address")
 	}
 	ones, bits := network.Mask.Size()
 	if bits != 32 || ones != 32 {
-		return "", fmt.Errorf("WireKube connected leaf must have a single assigned IPv4 address")
+		return "", fmt.Errorf("the WireKube connected leaf must have a single assigned IPv4 address")
 	}
 	return ip.String(), nil
 }
@@ -924,6 +926,8 @@ func runWorkload(ctx context.Context, args []string) error {
 	network := flags.String("network", "", "shell network access: sandbox defaults to none; host requires outbound")
 	timeout := flags.Duration("timeout", time.Hour, "shell execution timeout, at most 24h")
 	memory := flags.String("memory", "1Gi", "unified memory reservation")
+	experiment := flags.String("experiment", "", "run experiment label; defaults to NAME")
+	attempt := flags.Int32("attempt", 1, "run attempt number")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -931,11 +935,20 @@ func runWorkload(ctx context.Context, args []string) error {
 		return fmt.Errorf("usage: idlectl run NAME --shell '<script>' [flags]")
 	}
 	name := flags.Args()[0]
-	if problems := validation.IsDNS1123Subdomain(name); len(problems) > 0 {
+	if problems := validation.IsDNS1123Label(name); len(problems) > 0 {
 		return fmt.Errorf("invalid workload name %q: %s", name, strings.Join(problems, "; "))
 	}
 	if strings.TrimSpace(*script) == "" {
 		return fmt.Errorf("--shell is required")
+	}
+	if *experiment == "" {
+		*experiment = name
+	}
+	if problems := validation.IsDNS1123Label(*experiment); len(problems) > 0 {
+		return fmt.Errorf("invalid --experiment %q: %s", *experiment, strings.Join(problems, "; "))
+	}
+	if *attempt < 1 || *attempt > 1000 {
+		return fmt.Errorf("--attempt must be between 1 and 1000")
 	}
 	resolvedIsolation, err := parseShellIsolation(*isolation)
 	if err != nil {
@@ -956,7 +969,7 @@ func runWorkload(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintln(os.Stderr, "warning: shell commands are stored in Kubernetes API objects; do not include secrets")
+	_, _ = fmt.Fprintln(os.Stderr, "warning: shell commands are stored in Kubernetes API objects; do not include secrets")
 	config, err := loadConfig(*kubeconfig, *kubeContext)
 	if err != nil {
 		return err
@@ -969,7 +982,11 @@ func runWorkload(ctx context.Context, args []string) error {
 		TypeMeta: metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomWorkload"},
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name, Namespace: resolvedNamespace,
-			Labels: map[string]string{"app.kubernetes.io/managed-by": "idleloom"},
+			Labels: map[string]string{
+				"app.kubernetes.io/managed-by": "idleloom",
+				"ai.idleloom.io/run":           name, "ai.idleloom.io/task": "shell",
+				"ai.idleloom.io/experiment": *experiment, "ai.idleloom.io/attempt": fmt.Sprint(*attempt),
+			},
 		},
 		Spec: nativev1alpha1.IdleloomWorkloadSpec{
 			Mode: nativev1alpha1.WorkloadModeShell,
@@ -977,6 +994,7 @@ func runWorkload(ctx context.Context, args []string) error {
 				Script: *script, Isolation: resolvedIsolation, Network: resolvedNetwork,
 				TimeoutSeconds: int32(*timeout / time.Second),
 			},
+			Run:       &nativev1alpha1.WorkloadRunSpec{Task: "shell", Experiment: *experiment, Attempt: *attempt},
 			Resources: nativev1alpha1.WorkloadResources{UnifiedMemoryRequest: request},
 		},
 	}
@@ -1217,7 +1235,7 @@ func runLogs(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 	_, err = io.Copy(os.Stdout, stream)
 	return err
 }
@@ -1549,15 +1567,35 @@ func printStructured(value any, format string) error {
 func printWorkloadTable(workloads []nativev1alpha1.IdleloomWorkload, showNamespace bool) error {
 	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	if showNamespace {
-		_, _ = fmt.Fprintln(writer, "NAMESPACE\tNAME\tMODE\tPHASE")
+		_, _ = fmt.Fprintln(writer, "NAMESPACE\tNAME\tTASK\tEXPERIMENT\tATTEMPT\tMODE\tPHASE\tMETRICS\tARTIFACTS\tDURATION")
 	} else {
-		_, _ = fmt.Fprintln(writer, "NAME\tMODE\tPHASE")
+		_, _ = fmt.Fprintln(writer, "NAME\tTASK\tEXPERIMENT\tATTEMPT\tMODE\tPHASE\tMETRICS\tARTIFACTS\tDURATION")
 	}
 	for _, workload := range workloads {
+		task, experiment, attempt := "-", "-", "-"
+		if workload.Spec.Run != nil {
+			task, experiment, attempt = workload.Spec.Run.Task, workload.Spec.Run.Experiment, fmt.Sprint(workload.Spec.Run.Attempt)
+		}
+		metrics, artifacts := 0, 0
+		duration := "-"
+		if workload.Status.Run != nil {
+			metrics, artifacts = len(workload.Status.Run.Metrics), len(workload.Status.Run.Artifacts)
+			if workload.Status.Run.StartedAt != nil {
+				finished := time.Now()
+				if workload.Status.Run.FinishedAt != nil {
+					finished = workload.Status.Run.FinishedAt.Time
+				}
+				elapsed := finished.Sub(workload.Status.Run.StartedAt.Time)
+				if elapsed < 0 {
+					elapsed = 0
+				}
+				duration = elapsed.Round(time.Second).String()
+			}
+		}
 		if showNamespace {
-			_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", workload.Namespace, workload.Name, workload.Spec.Mode, workload.Status.Phase)
+			_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n", workload.Namespace, workload.Name, task, experiment, attempt, workload.Spec.Mode, workload.Status.Phase, metrics, artifacts, duration)
 		} else {
-			_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\n", workload.Name, workload.Spec.Mode, workload.Status.Phase)
+			_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\n", workload.Name, task, experiment, attempt, workload.Spec.Mode, workload.Status.Phase, metrics, artifacts, duration)
 		}
 	}
 	return writer.Flush()
@@ -1565,6 +1603,7 @@ func printWorkloadTable(workloads []nativev1alpha1.IdleloomWorkload, showNamespa
 
 func printHostTable(hosts []nativev1alpha1.IdleloomHost, showNamespace bool) error {
 	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	now := time.Now()
 	if showNamespace {
 		_, _ = fmt.Fprintln(writer, "NAMESPACE\tNAME\tAGENT\tREADY\tCONNECTED\tSHELL")
 	} else {
@@ -1575,13 +1614,33 @@ func printHostTable(hosts []nativev1alpha1.IdleloomHost, showNamespace bool) err
 		if hostName == "" {
 			hostName = host.Name
 		}
+		ready := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now)
+		connected := liveHostConditionStatus(host, nativev1alpha1.HostConditionConnected, now)
 		if showNamespace {
-			_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", host.Namespace, hostName, host.Spec.AgentID, conditionStatus(host.Status.Conditions, nativev1alpha1.HostConditionReady), conditionStatus(host.Status.Conditions, nativev1alpha1.HostConditionConnected), host.Spec.ShellAccess)
+			_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\n", host.Namespace, hostName, host.Spec.AgentID, ready, connected, host.Spec.ShellAccess)
 		} else {
-			_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", hostName, host.Spec.AgentID, conditionStatus(host.Status.Conditions, nativev1alpha1.HostConditionReady), conditionStatus(host.Status.Conditions, nativev1alpha1.HostConditionConnected), host.Spec.ShellAccess)
+			_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", hostName, host.Spec.AgentID, ready, connected, host.Spec.ShellAccess)
 		}
 	}
 	return writer.Flush()
+}
+
+func liveHostConditionStatus(host nativev1alpha1.IdleloomHost, conditionType string, now time.Time) string {
+	status := conditionStatus(host.Status.Conditions, conditionType)
+	if status != string(metav1.ConditionTrue) {
+		return status
+	}
+	if host.Status.LastHeartbeatTime == nil {
+		return string(metav1.ConditionUnknown)
+	}
+	heartbeat := host.Status.LastHeartbeatTime.Time
+	if heartbeat.After(now.Add(nativev1alpha1.HeartbeatClockSkewAllowance)) {
+		return string(metav1.ConditionUnknown)
+	}
+	if now.Sub(heartbeat) > nativev1alpha1.DefaultAgentHeartbeatTimeout+nativev1alpha1.HeartbeatClockSkewAllowance {
+		return "Stale"
+	}
+	return status
 }
 
 func conditionStatus(conditions []metav1.Condition, conditionType string) string {
@@ -1641,7 +1700,7 @@ func clusterPFlags(name string) (*pflag.FlagSet, *string, *string) {
 	}[name]
 	flags.Usage = func() {
 		if commandUsage != "" {
-			fmt.Fprintf(flags.Output(), "Usage:\n  %s\n\nFlags:\n", commandUsage)
+			_, _ = fmt.Fprintf(flags.Output(), "Usage:\n  %s\n\nFlags:\n", commandUsage)
 		}
 		flags.PrintDefaults()
 	}

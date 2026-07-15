@@ -14,7 +14,7 @@ import (
 func TestRunLeaderElectedRunsReconcileAfterAcquiringLease(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client := kubernetesfake.NewSimpleClientset()
+	client := kubernetesfake.NewClientset()
 	var calls atomic.Int32
 	err := RunLeaderElected(ctx, client.CoordinationV1(), LeaderOptions{
 		Namespace: "system", Name: "controller", Identity: "host-one",
@@ -35,7 +35,7 @@ func TestRunLeaderElectedRunsReconcileAfterAcquiringLease(t *testing.T) {
 }
 
 func TestRunLeaderElectedValidatesDurations(t *testing.T) {
-	client := kubernetesfake.NewSimpleClientset()
+	client := kubernetesfake.NewClientset()
 	err := RunLeaderElected(context.Background(), client.CoordinationV1(), LeaderOptions{
 		Namespace: "system", Name: "controller", Identity: "host-one",
 		LeaseDuration: time.Second, RenewDeadline: time.Second, RetryPeriod: 100 * time.Millisecond,
@@ -49,7 +49,7 @@ func TestRunLeaderElectedValidatesDurations(t *testing.T) {
 func TestRunLeaderElectedStopsWhenReconcileExits(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	client := kubernetesfake.NewSimpleClientset()
+	client := kubernetesfake.NewClientset()
 	err := RunLeaderElected(ctx, client.CoordinationV1(), LeaderOptions{
 		Namespace: "system", Name: "controller", Identity: "host-one",
 		LeaseDuration: time.Second, RenewDeadline: 700 * time.Millisecond, RetryPeriod: 100 * time.Millisecond,

@@ -110,7 +110,7 @@ func Inspect(ctx context.Context, client dynamic.Interface) (DoctorReport, error
 	mesh, err := client.Resource(MeshesGVR).Get(ctx, defaultMeshName, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return DoctorReport{}, fmt.Errorf("WireKubeMesh/%s is not installed", defaultMeshName)
+			return DoctorReport{}, fmt.Errorf("the WireKubeMesh/%s is not installed", defaultMeshName)
 		}
 		return DoctorReport{}, fmt.Errorf("get WireKubeMesh/%s: %w", defaultMeshName, err)
 	}
@@ -124,7 +124,7 @@ func Inspect(ctx context.Context, client dynamic.Interface) (DoctorReport, error
 		mtu = 1420
 	}
 	if mtu < 576 || mtu > 1420 {
-		return DoctorReport{}, fmt.Errorf("WireKube mesh MTU %d is unsupported", mtu)
+		return DoctorReport{}, fmt.Errorf("the WireKube mesh MTU %d is unsupported", mtu)
 	}
 	report.MTU = int32(mtu)
 	report.RelayMode, _, _ = unstructured.NestedString(mesh.Object, "spec", "relay", "mode")
@@ -133,10 +133,10 @@ func Inspect(ctx context.Context, client dynamic.Interface) (DoctorReport, error
 		report.RelayMode = "auto"
 	}
 	if report.RelayMode == "never" {
-		return DoctorReport{}, fmt.Errorf("WireKube relay mode is never; connected leaf requires a relay")
+		return DoctorReport{}, fmt.Errorf("the WireKube relay mode is never; connected leaf requires a relay")
 	}
 	if report.RelayProvider != "managed" && report.RelayProvider != "external" {
-		return DoctorReport{}, fmt.Errorf("WireKube relay provider %q is unsupported", report.RelayProvider)
+		return DoctorReport{}, fmt.Errorf("the WireKube relay provider %q is unsupported", report.RelayProvider)
 	}
 	report.ReadyPeers, _, _ = unstructured.NestedInt64(mesh.Object, "status", "readyPeers")
 	if report.ReadyPeers < 1 {
@@ -144,7 +144,7 @@ func Inspect(ctx context.Context, client dynamic.Interface) (DoctorReport, error
 	}
 	if _, err := client.Resource(PeersGVR).List(ctx, metav1.ListOptions{Limit: 1}); err != nil {
 		if apierrors.IsNotFound(err) {
-			return DoctorReport{}, fmt.Errorf("WireKubePeer API is not installed")
+			return DoctorReport{}, fmt.Errorf("the WireKubePeer API is not installed")
 		}
 		return DoctorReport{}, fmt.Errorf("list WireKubePeer resources: %w", err)
 	}
@@ -168,7 +168,7 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 	}
 	peerName := "idleloom-" + config.HostID
 	if _, err := config.Kubernetes.CoreV1().Nodes().Get(ctx, peerName, metav1.GetOptions{}); err == nil {
-		return State{}, fmt.Errorf("WireKube peer name %s conflicts with an existing Kubernetes Node", peerName)
+		return State{}, fmt.Errorf("the WireKube peer name %s conflicts with an existing Kubernetes Node", peerName)
 	} else if !apierrors.IsNotFound(err) {
 		return State{}, fmt.Errorf("check WireKube peer name against Kubernetes Nodes: %w", err)
 	}
@@ -177,7 +177,7 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 		return State{}, err
 	}
 	if state.MeshCIDR != "" && state.MeshCIDR != report.MeshCIDR {
-		return State{}, fmt.Errorf("WireKube mesh CIDR changed from %s to %s; repair connectivity before reenrolling", state.MeshCIDR, report.MeshCIDR)
+		return State{}, fmt.Errorf("the WireKube mesh CIDR changed from %s to %s; repair connectivity before reenrolling", state.MeshCIDR, report.MeshCIDR)
 	}
 	state.MeshCIDR = report.MeshCIDR
 	state.KubernetesAPIEndpoint = config.APIEndpoint
@@ -218,7 +218,7 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 	}
 	state.PeerUID = peer.GetUID()
 	if state.PeerUID == "" {
-		err := fmt.Errorf("WireKubePeer/%s has no UID", peer.GetName())
+		err := fmt.Errorf("the WireKubePeer/%s has no UID", peer.GetName())
 		return State{}, errors.Join(err, rollbackNewWireKubeEnrollment(ctx, config.Dynamic, peer, claim, state, peerCreated, claimCreated))
 	}
 	if err := writeState(config.StateDirectory, state); err != nil {
@@ -258,22 +258,22 @@ func ReadState(directory string) (State, error) {
 		return State{}, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return State{}, fmt.Errorf("WireKube leaf state must be a regular file")
+		return State{}, fmt.Errorf("the WireKube leaf state must be a regular file")
 	}
 	file, err := os.Open(path)
 	if err != nil {
 		return State{}, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	openedInfo, err := file.Stat()
 	if err != nil {
 		return State{}, err
 	}
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
-		return State{}, fmt.Errorf("WireKube leaf state changed while opening")
+		return State{}, fmt.Errorf("the WireKube leaf state changed while opening")
 	}
 	if openedInfo.Mode().Perm()&0o077 != 0 {
-		return State{}, fmt.Errorf("WireKube leaf state permissions must be 0600 or stricter")
+		return State{}, fmt.Errorf("the WireKube leaf state permissions must be 0600 or stricter")
 	}
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -339,16 +339,16 @@ func hasOwnedPeerMetadata(peer *unstructured.Unstructured, state State) bool {
 
 func validateLegacyExternalPeer(peer *unstructured.Unstructured, state State) error {
 	if !hasOwnedPeerMetadata(peer, state) {
-		return fmt.Errorf("WireKubeExternalPeer/%s is not owned by this enrollment", peer.GetName())
+		return fmt.Errorf("the WireKubeExternalPeer/%s is not owned by this enrollment", peer.GetName())
 	}
 	if state.PeerUID != "" && peer.GetUID() != state.PeerUID {
-		return fmt.Errorf("WireKubeExternalPeer/%s identity changed", peer.GetName())
+		return fmt.Errorf("the WireKubeExternalPeer/%s identity changed", peer.GetName())
 	}
 	displayName, _, _ := unstructured.NestedString(peer.Object, "spec", "displayName")
 	publicKey, _, _ := unstructured.NestedString(peer.Object, "spec", "publicKey")
 	allowed, _, _ := unstructured.NestedStringSlice(peer.Object, "spec", "allowedDestinations")
 	if displayName != state.DisplayName || publicKey != state.PublicKey || len(allowed) != 1 || allowed[0] != state.MeshCIDR {
-		return fmt.Errorf("WireKubeExternalPeer/%s does not match the legacy enrollment contract", peer.GetName())
+		return fmt.Errorf("the WireKubeExternalPeer/%s does not match the legacy enrollment contract", peer.GetName())
 	}
 	return nil
 }
@@ -356,14 +356,14 @@ func validateLegacyExternalPeer(peer *unstructured.Unstructured, state State) er
 func validateMeshCIDR(value string) error {
 	ip, network, err := net.ParseCIDR(value)
 	if err != nil || ip.To4() == nil {
-		return fmt.Errorf("WireKube meshCIDR %q must be a valid IPv4 CIDR", value)
+		return fmt.Errorf("the WireKube meshCIDR %q must be a valid IPv4 CIDR", value)
 	}
 	ones, bits := network.Mask.Size()
 	if bits != 32 || ones > 30 {
-		return fmt.Errorf("WireKube meshCIDR %q is too small", value)
+		return fmt.Errorf("the WireKube meshCIDR %q is too small", value)
 	}
 	if !isSafeMeshNetwork(network) {
-		return fmt.Errorf("WireKube meshCIDR %q must be contained in RFC1918, CGNAT, or benchmark address space", value)
+		return fmt.Errorf("the WireKube meshCIDR %q must be contained in RFC1918, CGNAT, or benchmark address space", value)
 	}
 	return nil
 }
@@ -371,7 +371,7 @@ func validateMeshCIDR(value string) error {
 func validateAPIEndpoint(value string) error {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
-		return fmt.Errorf("Kubernetes API endpoint %q must be an HTTPS URL", value)
+		return fmt.Errorf("kubernetes API endpoint %q must be an HTTPS URL", value)
 	}
 	return nil
 }
@@ -408,7 +408,7 @@ func Revoke(ctx context.Context, config RevokeConfig) error {
 			return err
 		}
 		if active {
-			return fmt.Errorf("WireKube connectivity is still running; stop connectivity service or rerun with --force")
+			return fmt.Errorf("the WireKube connectivity service is still running; stop it or rerun with --force")
 		}
 	}
 	if state.PeerMode == peerModeWireKube {
@@ -430,14 +430,14 @@ func Revoke(ctx context.Context, config RevokeConfig) error {
 			return removeLocalState(config.StateDirectory)
 		}
 		if state.PeerUID != "" && peer.GetUID() != state.PeerUID {
-			return fmt.Errorf("WireKubeExternalPeer/%s identity changed", state.PeerName)
+			return fmt.Errorf("the WireKubeExternalPeer/%s identity changed", state.PeerName)
 		}
 		if err := validateLegacyExternalPeer(peer, state); err != nil {
 			return err
 		}
 		uid := peer.GetUID()
 		if uid == "" {
-			return fmt.Errorf("WireKubeExternalPeer/%s has no UID", state.PeerName)
+			return fmt.Errorf("the WireKubeExternalPeer/%s has no UID", state.PeerName)
 		}
 		if err := config.Dynamic.Resource(ExternalPeersGVR).Delete(ctx, state.PeerName, metav1.DeleteOptions{
 			Preconditions: &metav1.Preconditions{UID: &uid},
@@ -504,10 +504,10 @@ func decodeState(data []byte) (State, error) {
 		return State{}, fmt.Errorf("decode WireKube leaf state: %w", err)
 	}
 	if state.Version != stateVersion || state.PeerName == "" || state.PeerName != state.DisplayName || state.EnrollmentID == "" {
-		return State{}, fmt.Errorf("WireKube leaf state has an invalid identity")
+		return State{}, fmt.Errorf("the WireKube leaf state has an invalid identity")
 	}
 	if state.PeerMode != "" && state.PeerMode != peerModeWireKube {
-		return State{}, fmt.Errorf("WireKube leaf state has an unsupported peer mode %q", state.PeerMode)
+		return State{}, fmt.Errorf("the WireKube leaf state has an unsupported peer mode %q", state.PeerMode)
 	}
 	if err := validateKeyPair(state.PrivateKey, state.PublicKey); err != nil {
 		return State{}, err
@@ -518,16 +518,16 @@ func decodeState(data []byte) (State, error) {
 func validateKeyPair(privateValue, publicValue string) error {
 	privateBytes, err := base64.StdEncoding.DecodeString(privateValue)
 	if err != nil || len(privateBytes) != 32 {
-		return fmt.Errorf("WireKube private key is invalid")
+		return fmt.Errorf("the WireKube private key is invalid")
 	}
 	if err := validateKey(publicValue); err != nil {
-		return fmt.Errorf("WireKube public key is invalid: %w", err)
+		return fmt.Errorf("the WireKube public key is invalid: %w", err)
 	}
 	var private, expectedPublic [32]byte
 	copy(private[:], privateBytes)
 	curve25519.ScalarBaseMult(&expectedPublic, &private)
 	if base64.StdEncoding.EncodeToString(expectedPublic[:]) != publicValue {
-		return fmt.Errorf("WireKube public key does not match the private key")
+		return fmt.Errorf("the WireKube public key does not match the private key")
 	}
 	return nil
 }
@@ -557,18 +557,15 @@ func writePrivate(name string, data []byte) error {
 		return err
 	}
 	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
+	defer func() { _ = os.Remove(temporaryName) }()
 	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return err

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -58,7 +59,7 @@ type chatCompletionChoice struct {
 
 func (a *DevAgent) resolveServingKey(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) ([]byte, error) {
 	if a.config.Kubernetes == nil || assignment.Spec.Model == nil || assignment.Spec.Model.Server == nil {
-		return nil, fmt.Errorf("Kubernetes client and resolved server assignment are required")
+		return nil, fmt.Errorf("the Kubernetes client and resolved server assignment are required")
 	}
 	server := assignment.Spec.Model.Server
 	secret, err := a.config.Kubernetes.CoreV1().Secrets(assignment.Namespace).Get(ctx, server.AuthSecretName, metav1.GetOptions{})
@@ -69,11 +70,11 @@ func (a *DevAgent) resolveServingKey(ctx context.Context, assignment *nativev1al
 		secret.Labels["ai.idleloom.io/workload-uid"] != string(assignment.Spec.WorkloadRef.UID) ||
 		secret.Labels["ai.idleloom.io/execution-id"] != assignment.Spec.ExecutionID ||
 		secret.Labels["ai.idleloom.io/service-name"] != server.ServiceName {
-		return nil, fmt.Errorf("Native serving auth Secret identity does not match the assignment")
+		return nil, fmt.Errorf("the Native serving auth Secret identity does not match the assignment")
 	}
 	key := secret.Data["api-key"]
 	if len(key) < 32 || len(key) > 256 || strings.ContainsAny(string(key), "\r\n\x00") {
-		return nil, fmt.Errorf("Native serving API key must contain 32 to 256 bytes without line breaks")
+		return nil, fmt.Errorf("the Native serving API key must contain 32 to 256 bytes without line breaks")
 	}
 	return append([]byte(nil), key...), nil
 }
@@ -85,11 +86,11 @@ func startServeProcess(process Process, address, modelAlias string, apiKey []byt
 func startServeProcessWithListener(process Process, address, modelAlias string, apiKey []byte, agent *DevAgent, listen func(string, string) (net.Listener, error)) (Process, error) {
 	host, port, err := net.SplitHostPort(address)
 	if err != nil || port != fmt.Sprint(nativev1alpha1.NativeServingPort) {
-		return nil, fmt.Errorf("Native serving address must use port %d", nativev1alpha1.NativeServingPort)
+		return nil, fmt.Errorf("the Native serving address must use port %d", nativev1alpha1.NativeServingPort)
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.To4() == nil {
-		return nil, fmt.Errorf("Native serving address must use the WireKube IPv4 address")
+		return nil, fmt.Errorf("the Native serving address must use the WireKube IPv4 address")
 	}
 	listener, err := listen("tcp4", address)
 	if err != nil {
@@ -105,7 +106,7 @@ func startServeProcessWithListener(process Process, address, modelAlias string, 
 		err := serve.server.Serve(listener)
 		serve.mu.Lock()
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			serve.waitErr = fmt.Errorf("Native serving endpoint stopped: %w", err)
+			serve.waitErr = fmt.Errorf("the Native serving endpoint stopped: %w", err)
 		}
 		serve.mu.Unlock()
 		close(serve.done)
@@ -115,6 +116,7 @@ func startServeProcessWithListener(process Process, address, modelAlias string, 
 
 func servingHandler(process Process, modelAlias string, apiKey []byte, agent *DevAgent) http.Handler {
 	mux := http.NewServeMux()
+	generationSlots := make(chan struct{}, 1)
 	authorize := func(next http.HandlerFunc) http.HandlerFunc {
 		return func(response http.ResponseWriter, request *http.Request) {
 			expected := append([]byte("Bearer "), apiKey...)
@@ -153,12 +155,12 @@ func servingHandler(process Process, modelAlias string, apiKey []byte, agent *De
 		})
 	}))
 	mux.HandleFunc("/v1/chat/completions", authorize(func(response http.ResponseWriter, request *http.Request) {
-		handleChatCompletion(response, request, process, modelAlias, agent)
+		handleChatCompletion(response, request, process, modelAlias, generationSlots, agent)
 	}))
 	return mux
 }
 
-func handleChatCompletion(response http.ResponseWriter, request *http.Request, process Process, modelAlias string, agent *DevAgent) {
+func handleChatCompletion(response http.ResponseWriter, request *http.Request, process Process, modelAlias string, generationSlots chan struct{}, agent *DevAgent) {
 	if request.Method != http.MethodPost {
 		http.Error(response, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -166,7 +168,7 @@ func handleChatCompletion(response http.ResponseWriter, request *http.Request, p
 	var input chatCompletionRequest
 	decoder := json.NewDecoder(request.Body)
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&input); err != nil || input.Stream || input.Model != modelAlias {
+	if err := decoder.Decode(&input); err != nil || decoder.Decode(&struct{}{}) != io.EOF || input.Stream || input.Model != modelAlias {
 		http.Error(response, "invalid request", http.StatusBadRequest)
 		return
 	}
@@ -183,11 +185,21 @@ func handleChatCompletion(response http.ResponseWriter, request *http.Request, p
 		http.Error(response, "max_tokens must be between 1 and 512", http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(request.Context(), 5*time.Minute)
-	defer cancel()
+	select {
+	case generationSlots <- struct{}{}:
+		defer func() { <-generationSlots }()
+	default:
+		response.Header().Set("Retry-After", "1")
+		http.Error(response, "model is already processing a request", http.StatusTooManyRequests)
+		return
+	}
 	started := time.Now()
 	agent.appendLog(started, "serving request started: maxTokens=%d messages=%d", maxTokens, len(input.Messages))
-	result, err := process.Generate(ctx, devruntime.GenerateRequest{Prompt: prompt, MaxTokens: maxTokens})
+	// The runner protocol cannot cancel one request without terminating the
+	// shared model process, so client disconnects must not reach Generate.
+	generateCtx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), 5*time.Minute)
+	defer cancel()
+	result, err := process.Generate(generateCtx, devruntime.GenerateRequest{Prompt: prompt, MaxTokens: maxTokens})
 	if err != nil {
 		agent.appendLog(time.Now(), "serving request failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
 		http.Error(response, "model generation failed", http.StatusBadGateway)
@@ -265,7 +277,7 @@ func (p *serveProcess) Stop() error {
 		select {
 		case <-p.done:
 		case <-ctx.Done():
-			p.stopErr = errors.Join(p.stopErr, fmt.Errorf("Native serving endpoint did not stop: %w", ctx.Err()))
+			p.stopErr = errors.Join(p.stopErr, fmt.Errorf("the Native serving endpoint did not stop: %w", ctx.Err()))
 		}
 	})
 	return p.stopErr

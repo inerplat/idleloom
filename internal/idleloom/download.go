@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,27 +48,23 @@ func DownloadKubelet(ctx context.Context, version string) (string, error) {
 		return "", fmt.Errorf("create kubelet download: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
 	if err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("create kubelet request: %w", err)
+		return "", errors.Join(fmt.Errorf("create kubelet request: %w", err), temporary.Close())
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("download kubelet %s: %w", version, err)
+		return "", errors.Join(fmt.Errorf("download kubelet %s: %w", version, err), temporary.Close())
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		temporary.Close()
-		return "", fmt.Errorf("download kubelet %s: HTTP %s", version, response.Status)
+		return "", errors.Join(fmt.Errorf("download kubelet %s: HTTP %s", version, response.Status), temporary.Close())
 	}
 	hash := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(temporary, hash), response.Body); err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("write kubelet download: %w", err)
+		return "", errors.Join(fmt.Errorf("write kubelet download: %w", err), temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return "", fmt.Errorf("close kubelet download: %w", err)
@@ -94,7 +91,7 @@ func fetchChecksum(ctx context.Context, url string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("download kubelet checksum: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download kubelet checksum: HTTP %s", response.Status)
 	}
@@ -117,7 +114,7 @@ func fileSHA256(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
 		return "", err

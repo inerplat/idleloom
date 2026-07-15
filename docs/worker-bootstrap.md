@@ -3,13 +3,19 @@
 Idleloom enrolls a remote worker with Kubernetes TLS bootstrap. It does not
 copy an administrator certificate or the source kubeconfig into the worker VM.
 
+For repository acquisition, CLI build, WireKube installation choices, Worker
+join, Pod and storage examples, Vulkan DRA, and cleanup, start with
+[`getting-started.md`](getting-started.md).
+
 ## Enrollment sequence
 
 1. Read the selected cluster version, CA, DNS settings, and WireKube status.
-2. Reserve the worker network and create the krunkit VM.
-3. Create a short-lived bootstrap token and install the matching kubelet.
-4. Wait for the kubelet client certificate and Node registration.
-5. Label the Node, wait for the WireKube peer and Node readiness, then delete
+2. Inspect Linux node bootstrap DaemonSets before creating local state.
+3. Reserve the worker network and create the krunkit VM.
+4. Create a short-lived bootstrap token and install the matching kubelet.
+5. Wait for the kubelet client certificate and Node registration, label the
+   Node, then verify and approve its serving certificate.
+6. Wait for the WireKube peer and Node readiness, then delete
    the bootstrap token and guest bootstrap identity.
 
 ## Cluster permissions
@@ -17,6 +23,8 @@ copy an administrator certificate or the source kubeconfig into the worker VM.
 The enrollment kubeconfig needs permission to:
 
 - read the selected cluster version, DNS Service, and root CA ConfigMap;
+- list DaemonSets to check whether a new external Linux node can bootstrap its
+  CNI and node add-ons;
 - read WireKube CRDs and DaemonSets when `--network=wirekube` is used;
 - create and delete `bootstrap.kubernetes.io/token` Secrets;
 - create or reconcile Idleloom bootstrap ClusterRoleBindings;
@@ -31,6 +39,30 @@ Idleloom uses the bootstrap group
 It binds that group to the standard Kubernetes bootstrap and node-client CSR
 approval roles. The token defaults to a 30-minute TTL and is deleted as soon
 as enrollment succeeds. Failed enrollment also attempts token deletion.
+
+The serving CSR validator binds the exact node name and guest IP SAN. It
+accepts algorithm-appropriate usages: ECDSA and Ed25519 use digital signature
+plus server authentication, while RSA additionally uses key encipherment.
+Client authentication or other extra usages are rejected.
+
+## External-node compatibility preflight
+
+`idleloom init --dry-run` checks the same cluster prerequisites as a real
+enrollment without creating a VM or token. It does not require `--yes`.
+
+The preflight discovers `kube-dns`, `coredns`, or a Service labeled
+`k8s-app=kube-dns`; it does not require the Service object to be named
+`kube-dns`.
+
+It also identifies CNI-installing DaemonSets by their host CNI paths. If an
+image registry resolves only to private, loopback, or link-local addresses
+from the Mac, preflight prints a warning. Host-side DNS alone cannot prove
+whether a krunkit guest using host NAT, VPN routes, or private network routing
+can reach the registry. Critical CNI warnings should therefore be verified in
+the VM rather than treated as a structural incompatibility.
+
+This check deliberately reports warnings instead of rewriting managed
+provider manifests or mirroring images behind the operator's back.
 
 ## Persistent guest state
 
@@ -49,6 +81,17 @@ hostPath volumes live under `/var/lib/idleloom`.
 The first join uses the bootstrap token. Later starts use the kubelet client
 certificate stored under `/var/lib/kubelet`; no new bootstrap token is needed.
 The bootstrap kubeconfig is removed from the guest after successful enrollment.
+
+If `init` is interrupted after the kubelet has obtained its client certificate,
+the state remains in phase `enrolling`. Fix the external cause, then run
+`idleloom start` to resume Node labeling, serving certificate approval,
+WireKube checks, and bootstrap identity removal. The default state file is
+`~/.idleloom/state.json`. If `init` used `--state /absolute/path/state.json`,
+pass that same path to `status`, `start`, `stop`, and `delete`. Use
+`idleloom delete` with the matching state path when the partial worker should
+be discarded instead. Runtime logs are under
+`~/.idleloom/runtimes/<node-name>` by default; exact filenames are listed in
+[`getting-started.md`](getting-started.md).
 
 ## Why WireKube is part of onboarding
 
@@ -113,9 +156,26 @@ wirekubectl doctor --kubeconfig ~/.kube/config --context my-cluster
 The interactive plan must show a non-overlapping mesh CIDR, a reachable relay,
 the privileged agent DaemonSet, and
 `spec.autoAllowedIPs.includeNodeInternalIP=true`. A public TCP
-`LoadBalancer` is the simplest ingress path. Clusters that cannot provision one
-need a preconfigured WSS, NodePort, or external relay topology from the
-[WireKube relay guide](https://inerplat.github.io/wirekube/guides/relay-entrypoints/).
+`LoadBalancer` is the simplest ingress path. For a cluster without one, the
+same v0.0.15 easy installer can create a TCP NodePort without a source
+checkout. Replace the example address with a stable, publicly reachable node:
+
+```sh
+wirekubectl install \
+  --kubeconfig ~/.kube/config \
+  --context my-cluster \
+  --node-addresses internal-ip \
+  --relay node-port \
+  --relay-transport tcp \
+  --relay-endpoint 203.0.113.10:30478 \
+  --relay-udp=false
+
+nc -vz 203.0.113.10 30478
+```
+
+WSS requires an operator-managed public hostname, certificate, and HTTPS
+Gateway or Ingress. Follow the version-matched
+[WireKube v0.0.15 relay guide](https://github.com/inerplat/wirekube/blob/v0.0.15/docs/guides/relay-entrypoints.md).
 
 WireKube is a cluster-wide shared dependency. `idleloom delete` removes the
 worker Node and its Idleloom Lease, but never uninstalls WireKube. Use

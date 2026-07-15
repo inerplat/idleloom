@@ -54,7 +54,7 @@
     "modelURL": {
       "type": "string",
       "description": "Credential-free HTTPS URL for the GGUF model.",
-      "default": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf?download=true",
+      "default": "https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/23749fefcc72300e3a2ad315e1317431b06b590a/Qwen3-0.6B-Q8_0.gguf",
       "format": "httpsURL"
     },
     "namespace": {

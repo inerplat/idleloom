@@ -78,7 +78,7 @@ func TestResolverDownloadsAndCachesVerifiedRelease(t *testing.T) {
 		requests++
 		switch filepath.Base(request.URL.Path) {
 		case "wirekubectl-checksums.txt":
-			fmt.Fprintf(writer, "%s  %s\n", digestHex, asset)
+			_, _ = fmt.Fprintf(writer, "%s  %s\n", digestHex, asset)
 		case asset:
 			_, _ = writer.Write(binary)
 		default:

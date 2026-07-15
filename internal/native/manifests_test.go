@@ -1,6 +1,7 @@
 package native_test
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,7 +49,7 @@ func TestNativeCRDsExposeOnlyTheRestrictedWorkloadIntent(t *testing.T) {
 	workload := decodeObjects(t, filepath.Join(crdDir, "ai.idleloom.io_idleloomworkloads.yaml"))[0]
 	rootSchema := crdSchema(t, workload)
 	specProperties := nestedMap(t, rootSchema, "properties", "spec", "properties")
-	assertKeys(t, specProperties, []string{"batch", "mode", "model", "resources", "server", "shell"})
+	assertKeys(t, specProperties, []string{"batch", "mode", "model", "resources", "run", "server", "shell", "train"})
 	batchProperties := nestedMap(t, specProperties, "batch", "properties")
 	assertKeys(t, batchProperties, []string{"maxTokens", "prompt", "timeoutSeconds"})
 	modelProperties := nestedMap(t, specProperties, "model", "properties")
@@ -59,57 +60,83 @@ func TestNativeCRDsExposeOnlyTheRestrictedWorkloadIntent(t *testing.T) {
 	assertKeys(t, resourceProperties, []string{"unifiedMemoryRequest"})
 	shellProperties := nestedMap(t, specProperties, "shell", "properties")
 	assertKeys(t, shellProperties, []string{"isolation", "network", "script", "timeoutSeconds"})
+	trainProperties := nestedMap(t, specProperties, "train", "properties")
+	assertKeys(t, trainProperties, []string{"network", "runtimeProfile", "source", "timeoutSeconds"})
+	runProperties := nestedMap(t, specProperties, "run", "properties")
+	assertKeys(t, runProperties, []string{"attempt", "experiment", "parameters", "task"})
+	parameterSchema := nestedMap(t, runProperties, "parameters", "additionalProperties")
+	if fmt.Sprint(parameterSchema["maxLength"]) != "4096" || parameterSchema["pattern"] != `^[^\x00]*$` {
+		t.Fatalf("run parameter value schema = %#v", parameterSchema)
+	}
 	validations, ok := rootSchema["x-kubernetes-validations"].([]any)
 	if !ok || len(validations) == 0 {
 		t.Fatal("IdleloomWorkload CRD does not enforce immutable spec")
 	}
 	assertValidationRule(t, rootSchema, "self.spec == oldSelf.spec")
 	assertValidationRule(t, rootSchema, "quantity(self.spec.resources.unifiedMemoryRequest).isGreaterThan(quantity('0'))")
+	assertValidationRuleContains(t, rootSchema, "self.spec.mode == 'Server' && has(self.spec.model) && has(self.spec.server)")
+	assertValidationRuleContains(t, rootSchema, "k.matches('^[A-Z][A-Z0-9_]{0,62}$') && !k.startsWith('IDLELOOM_')")
+	assertValidationRule(t, rootSchema, "!has(self.spec.train) || !self.spec.train.source.inline.contains('\\u0000')")
 
 	model := decodeObjects(t, filepath.Join(crdDir, "ai.idleloom.io_idleloommodels.yaml"))[0]
-	assertValidationRule(t, crdSchema(t, model), "quantity(self.spec.minimumUnifiedMemory).isGreaterThan(quantity('0'))")
+	modelSchema := crdSchema(t, model)
+	assertValidationRule(t, modelSchema, "quantity(self.spec.minimumUnifiedMemory).isGreaterThan(quantity('0'))")
+	assertValidationRuleContains(t, modelSchema, "self.spec.runtimeProfile == 'ollama-gguf-v1' && self.spec.family == 'ollama-gguf'")
+	assertValidationRuleContains(t, modelSchema, "self.spec.runtimeProfile == 'llama-cpp-metal-v1' && self.spec.family == 'gguf'")
+	modelSpecProperties := nestedMap(t, modelSchema, "properties", "spec", "properties")
+	artifactSchema := nestedMap(t, modelSpecProperties, "artifact")
+	artifactProperties := nestedMap(t, artifactSchema, "properties")
+	assertKeys(t, artifactProperties, []string{"format", "ggufFile", "manifestDigest", "ociReference", "ollamaModel", "signature", "sizeBytes"})
+	assertValidationRuleContains(t, artifactSchema, "has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile)")
 	host := decodeObjects(t, filepath.Join(crdDir, "ai.idleloom.io_idleloomhosts.yaml"))[0]
 	hostSchema := crdSchema(t, host)
 	assertValidationRule(t, hostSchema, "self.metadata.name == 'host'")
 	hostSpecProperties := nestedMap(t, hostSchema, "properties", "spec", "properties")
 	assertKeys(t, hostSpecProperties, []string{"agentID", "shellAccess"})
+	hostStatusProperties := nestedMap(t, hostSchema, "properties", "status", "properties")
+	if _, ok := hostStatusProperties["availableModels"]; !ok {
+		t.Fatal("IdleloomHost status does not expose exact locally available models")
+	}
 	assignment := decodeObjects(t, filepath.Join(crdDir, "ai.idleloom.io_idleloomworkloadassignments.yaml"))[0]
 	assignmentSchema := crdSchema(t, assignment)
 	assertValidationRule(t, assignmentSchema, "self.metadata.name == 'active'")
 	assertValidationRule(t, assignmentSchema, "size(self.spec.workloadRef.uid) > 0 && size(self.spec.hostRef.uid) > 0")
-	assertValidationRule(t, assignmentSchema, "has(self.spec.model) != has(self.spec.shell)")
+	assertValidationRule(t, assignmentSchema, "(has(self.spec.model) && !has(self.spec.shell) && !has(self.spec.training)) || (!has(self.spec.model) && has(self.spec.shell) && !has(self.spec.training)) || (!has(self.spec.model) && !has(self.spec.shell) && has(self.spec.training))")
 	assertValidationRule(t, assignmentSchema, "has(self.spec.model) == has(oldSelf.spec.model) && (!has(self.spec.model) || self.spec.model == oldSelf.spec.model)")
 	assertValidationRule(t, assignmentSchema, "has(self.spec.shell) == has(oldSelf.spec.shell) && (!has(self.spec.shell) || self.spec.shell == oldSelf.spec.shell)")
+	assertValidationRule(t, assignmentSchema, "has(self.spec.training) == has(oldSelf.spec.training) && (!has(self.spec.training) || self.spec.training == oldSelf.spec.training)")
+	assertValidationRule(t, assignmentSchema, "has(self.spec.run) == has(oldSelf.spec.run) && (!has(self.spec.run) || self.spec.run == oldSelf.spec.run)")
 	assertValidationRule(t, assignmentSchema, "!has(self.spec.model) || (size(self.spec.model.catalogRef.uid) > 0 && quantity(self.spec.model.unifiedMemoryRequest).isGreaterThan(quantity('0')))")
 	assertValidationRule(t, assignmentSchema, "!has(self.spec.shell) || quantity(self.spec.shell.unifiedMemoryRequest).isGreaterThan(quantity('0'))")
+	assertValidationRule(t, assignmentSchema, "!has(self.spec.training) || quantity(self.spec.training.unifiedMemoryRequest).isGreaterThan(quantity('0'))")
+	assertValidationRule(t, assignmentSchema, "!has(self.spec.training) || (has(self.spec.run) && self.spec.run.task == 'train')")
+	assertValidationRuleContains(t, assignmentSchema, "has(self.spec.model.server) && self.spec.run.task == 'serve'")
+	assertValidationRuleContains(t, assignmentSchema, "self.spec.run.parameters.all(k, k.matches('^[A-Z][A-Z0-9_]{0,62}$')")
 }
 
-func TestProjectionImageUsesDedicatedBinary(t *testing.T) {
+func TestProjectionImageUsesCanonicalCLIInternalRole(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "Dockerfile.projection"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	entrypoint := string(data)
-	if !strings.Contains(entrypoint, `ENTRYPOINT ["/usr/local/bin/idleloom-projection", "--in-cluster"`) || strings.Contains(entrypoint, `"serve"`) {
-		t.Fatalf("projection image entrypoint does not use the dedicated binary directly: %s", entrypoint)
+	if !strings.Contains(entrypoint, `ENTRYPOINT ["/usr/local/bin/idlectl", "internal", "projection", "--in-cluster"`) || strings.Contains(entrypoint, `"serve"`) {
+		t.Fatalf("projection image entrypoint does not use the canonical internal role: %s", entrypoint)
 	}
 }
 
-func TestBuildUsesIdlectlDistributionNames(t *testing.T) {
+func TestBuildUsesOneCanonicalIdlectlBinary(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "Makefile"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	build := string(data)
-	for _, name := range []string{
-		"bin/idlectl",
-		"bin/idleloom-controller",
-		"bin/idleloom-agent",
-		"bin/idleloom-link",
-		"bin/idleloom-projection",
-	} {
-		if !strings.Contains(build, name) {
-			t.Fatalf("Makefile does not build %s", name)
+	if !strings.Contains(build, "bin/idlectl") {
+		t.Fatal("Makefile does not build bin/idlectl")
+	}
+	for _, copyCommand := range []string{"cp bin/idlectl bin/idleloom-controller", "cp bin/idlectl bin/idleloom-agent", "cp bin/idlectl bin/idleloom-link", "cp bin/idlectl bin/idleloom-projection"} {
+		if strings.Contains(build, copyCommand) {
+			t.Fatalf("Makefile still creates role-specific binary copy with %q", copyCommand)
 		}
 	}
 }
@@ -445,12 +472,25 @@ func TestProjectionAdmissionRestrictsControllerToManagedPodsAndNodes(t *testing.
 			t.Fatalf("projection admission does not enforce %q: %s", required, expressions)
 		}
 	}
+	variables, found, err := unstructured.NestedSlice(policy.Object, "spec", "variables")
+	if err != nil || !found {
+		t.Fatalf("projection admission variables: found=%v err=%v", found, err)
+	}
+	var variableExpressions string
+	for _, raw := range variables {
+		expression, _, _ := unstructured.NestedString(raw.(map[string]any), "expression")
+		variableExpressions += expression
+	}
+	const projectionNamePattern = "^idleloom-[0-9a-f]{20}$"
+	if !strings.Contains(variableExpressions, projectionNamePattern) || strings.Contains(variableExpressions, "startsWith('idleloom-')") {
+		t.Fatalf("projection ownership policy does not isolate the exact ephemeral name space: %s", variableExpressions)
+	}
 	podValidations, found, err := unstructured.NestedSlice(podBindingPolicy.Object, "spec", "validations")
 	if err != nil || !found || len(podValidations) != 1 {
 		t.Fatalf("projection Pod binding validations: found=%v count=%d err=%v", found, len(podValidations), err)
 	}
 	podExpression, _, _ := unstructured.NestedString(podValidations[0].(map[string]any), "expression")
-	if !strings.Contains(podExpression, "object.spec.nodeName") || !strings.Contains(podExpression, "currentManaged") {
+	if !strings.Contains(podExpression, "object.spec.nodeName") || !strings.Contains(podExpression, "currentManaged") || !strings.Contains(podExpression, projectionNamePattern) {
 		t.Fatalf("projection Pod binding policy is incomplete: %s", podExpression)
 	}
 	bindingRules, found, err := unstructured.NestedSlice(bindingSubresourcePolicy.Object, "spec", "matchConstraints", "resourceRules")
@@ -460,7 +500,7 @@ func TestProjectionAdmissionRestrictsControllerToManagedPodsAndNodes(t *testing.
 	bindingResources, _, _ := unstructured.NestedStringSlice(bindingRules[0].(map[string]any), "resources")
 	bindingValidations, _, _ := unstructured.NestedSlice(bindingSubresourcePolicy.Object, "spec", "validations")
 	bindingExpression, _, _ := unstructured.NestedString(bindingValidations[0].(map[string]any), "expression")
-	if !equalStrings(bindingResources, []string{"pods/binding"}) || !strings.Contains(bindingExpression, "object.target.name") {
+	if !equalStrings(bindingResources, []string{"pods/binding"}) || !strings.Contains(bindingExpression, "object.target.name") || !strings.Contains(bindingExpression, projectionNamePattern) {
 		t.Fatalf("projection binding subresource policy is incomplete: resources=%v expression=%s", bindingResources, bindingExpression)
 	}
 }
@@ -471,7 +511,7 @@ func decodeObjects(t *testing.T, path string) []*unstructured.Unstructured {
 	if err != nil {
 		t.Fatalf("open %s: %v", path, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	decoder := yaml.NewYAMLOrJSONDecoder(file, 4096)
 	var objects []*unstructured.Unstructured
 	for {
@@ -542,6 +582,21 @@ func assertValidationRule(t *testing.T, schema map[string]any, expected string) 
 		}
 	}
 	t.Fatalf("schema is missing validation rule %q", expected)
+}
+
+func assertValidationRuleContains(t *testing.T, schema map[string]any, expected string) {
+	t.Helper()
+	validations, ok := schema["x-kubernetes-validations"].([]any)
+	if !ok {
+		t.Fatalf("schema has no x-kubernetes-validations")
+	}
+	for _, rawValidation := range validations {
+		validation := rawValidation.(map[string]any)
+		if strings.Contains(validation["rule"].(string), expected) {
+			return
+		}
+	}
+	t.Fatalf("schema is missing validation rule containing %q", expected)
 }
 
 func equalStrings(left, right []string) bool {

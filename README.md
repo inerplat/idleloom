@@ -4,14 +4,15 @@
 
 Idleloom turns an after-hours Apple Silicon Mac into Kubernetes compute. It
 supports a full Linux worker for ordinary Pods and a Native Metal mode for
-running explicitly authorized MLX or shell workloads directly on macOS.
+running explicit MLX training, MLX inference, Ollama or llama.cpp GGUF
+inference and serving, and shell workloads directly on macOS.
 
 ## Choose a mode
 
 | Mode | Kubernetes view | Workloads | Host runtime | CLI |
 | --- | --- | --- | --- | --- |
 | Linux worker | A real kubelet-managed Node | OCI containers, hostPath, iSCSI, and DRA workloads | Ubuntu VM managed with krunkit and containerd | `idleloom` |
-| Native Metal alpha | Idleloom CRDs with optional ephemeral Node and Pod projection | Sandboxed or trusted shell commands and a locked MLX model | Regular macOS processes using Metal directly | `idlectl` |
+| Native Metal alpha | Idleloom CRDs with optional ephemeral Node and Pod projection | Tracked MLX runs, sandboxed or trusted shell commands, and digest-pinned MLX, Ollama, or llama.cpp models | Regular macOS processes using Metal directly | `idlectl` |
 
 Use the Linux worker when the workload expects normal Kubernetes Pod and
 container semantics. Use Native Metal when direct Metal access matters more
@@ -24,17 +25,58 @@ explicit `IdleloomWorkload`; the resulting YAML is applied and operated with
 the native resource semantics of that backend. See
 [`docs/recipes.md`](docs/recipes.md).
 
+New users should start with the copyable checklist in
+[`docs/getting-started.md`](docs/getting-started.md). It covers both modes,
+ordinary Worker Pods, hostPath and Longhorn storage, Native API-only logging,
+MLX/Ollama/llama.cpp runs, Vulkan DRA, serving clients, recovery, and cleanup.
+
 ## Native Metal quick start
 
-Install the complete macOS bundle and Kubernetes CLI from Homebrew:
+Install the macOS CLI and Kubernetes CLI from Homebrew:
 
 ```sh
-brew install kubectl
+brew install kubectl python@3.12
 brew install inerplat/tap/idleloom
 idlectl version
 kubectl version --client
 kubectl cluster-info
 ```
+
+The locked Native MLX 0.32 wheels require macOS 26 or later and CPython 3.12.
+Shell-only workloads keep the broader macOS support and do not need Python,
+but MLX training and inference require `python@3.12` when the runtime is
+prepared for the first time.
+
+Ollama GGUF workloads use a separate Idleloom-owned Ollama process and do not
+reuse or stop the user's normal Ollama daemon. Install Ollama 0.17.1 or later
+and the pinned local model before running the Ollama recipes:
+
+```sh
+brew install --cask ollama
+ollama pull qwen3.5:9b
+ollama list
+```
+
+The current `qwen3-5-9b-ollama` catalog entry requires manifest digest
+`sha256:6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7`.
+If the mutable upstream tag resolves to a different digest, Idleloom refuses
+to run it instead of silently changing model contents.
+Operators can catalog other already-installed GGUF models as immutable
+`IdleloomModel` objects with `family: ollama-gguf`; see
+[`docs/recipes.md`](docs/recipes.md) for the manifest and digest workflow.
+
+For direct GGUF execution without an Ollama model store, install llama.cpp and
+place an operator-approved `.gguf` file in Idleloom's managed model directory:
+
+```sh
+brew install llama.cpp
+mkdir -p /var/tmp/idleloom/models/gguf
+```
+
+The llama.cpp path runs a private loopback-only `llama-server` in the macOS
+sandbox and requires complete Metal layer offload. Idleloom does not download
+GGUF files or import mutable Ollama tags into this directory. The catalog and
+execution commands are documented in [`docs/recipes.md`](docs/recipes.md).
 
 This documentation follows the current repository checkout. Before joining a
 host, verify that the installed release contains the manifest recipe surface:
@@ -45,10 +87,12 @@ idlectl recipe list
 
 If that command reports `unknown command "recipe"`, the Homebrew release is
 older than this checkout. Build the current checkout instead and keep its
-bundle first on `PATH` for the rest of the guide:
+binary first on `PATH` for the rest of the guide:
 
 ```sh
 brew install go
+git clone https://github.com/inerplat/idleloom.git
+cd idleloom
 make build-idlectl
 export PATH="$PWD/bin:$PATH"
 idlectl recipe list
@@ -57,7 +101,7 @@ idlectl recipe list
 Join the current Kubernetes context and run a sandboxed command:
 
 ```sh
-idlectl join studio-idle
+idlectl join evening-mac
 idlectl run inventory --shell 'uname -a; sysctl -n hw.memsize'
 idlectl logs -f workload/inventory
 ```
@@ -85,7 +129,8 @@ Connected mode does not require a WireKube checkout or a preinstalled
 its checksum, shows the combined infrastructure plan, installs WireKube, and
 continues the same host enrollment transaction.
 
-Each execution mode starts with one command:
+After its mode-specific prerequisites are installed, each execution mode starts
+with one enrollment command:
 
 ```sh
 # Full Linux worker
@@ -121,7 +166,7 @@ The repository provides:
 - checksum-verified WireKube dependency installation, compatibility checks, and node enrollment;
 - hostPath and iSCSI support in the worker base system;
 - an Apple Vulkan DRA node driver and example ResourceClaims;
-- direct Native Metal execution with API-only and WireKube link modes;
+- direct Native Metal MLX, Ollama GGUF, and llama.cpp Metal execution with API-only and WireKube link modes;
 - version-pinned Native and Worker training, batch inference, and serving recipes that render Kubernetes YAML.
 
 ## How the Linux worker works
@@ -160,9 +205,12 @@ brew install krunkit
 ```
 
 The current Idleloom Homebrew formula installs the Native Metal bundle only.
-Build `idleloom` from this checkout for the Linux worker path. WireKube must be
-installed separately with its released easy installer before enrollment; see
-[`docs/worker-bootstrap.md`](docs/worker-bootstrap.md).
+Clone the repository and build `idleloom` for the Linux worker path. WireKube
+must be installed separately with its released easy installer before
+enrollment; see [`docs/getting-started.md`](docs/getting-started.md) for the
+complete source, LoadBalancer, NodePort, join, and smoke-test sequence, and
+[`docs/worker-bootstrap.md`](docs/worker-bootstrap.md) for the bootstrap
+contract.
 
 `WireKubeMesh/default` must advertise Node InternalIPs:
 
@@ -180,6 +228,8 @@ from other cluster nodes.
 ## Build from source
 
 ```sh
+git clone https://github.com/inerplat/idleloom.git
+cd idleloom
 make build
 export PATH="$PWD/bin:$PATH"
 idleloom version
@@ -208,22 +258,31 @@ idleloom init \
   --yes \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
-  --name studio-idle \
+  --name evening-mac \
   --cpus 4 \
   --memory 8g \
   --disk 40g
 ```
 
 Run read-only preflight checks without downloading an image, creating a token,
-or starting a VM:
+or starting a VM. `--dry-run` does not require `--yes`:
 
 ```sh
-idleloom init --yes --dry-run --kubeconfig ~/.kube/config
+idleloom init --dry-run --kubeconfig ~/.kube/config
 ```
+
+Preflight also inspects Linux node bootstrap DaemonSets. Registries that
+resolve only to non-public addresses are reported as warnings because
+host-side DNS cannot prove whether the worker VM shares the required private
+routing. Idleloom does not rewrite managed CNI manifests automatically.
 
 The advanced `--runtime-dir` flag changes where VM disks, SSH keys, sockets,
 and local logs are stored. The default is
 `~/.idleloom/runtimes/<node-name>`.
+The default lifecycle state file is `~/.idleloom/state.json`. When `init` uses
+a custom `--state`, pass the same path to `status`, `start`, `stop`, and
+`delete`. Exact recovery and log paths are listed in
+[`docs/getting-started.md`](docs/getting-started.md).
 
 ## Linux worker lifecycle
 
@@ -255,19 +314,22 @@ recovers.
 
 Enrollment intent, the network reservation identity, and the planned canonical
 runtime path are written before VM creation with phase `enrolling`. If the CLI
-or host stops during creation, `idleloom delete` can recover the Lease and find
-the partially created runtime. Inspect later bootstrap failures with
-`idleloom status` and the local logs under the runtime directory. `idleloom
-delete` removes the Node, VM processes, disks, keys, runtime logs, and the
-certificate maintainer. It refuses active workloads unless `--force` is
-supplied.
+or host stops after the VM and kubelet identity exist, `idleloom start` resumes
+Node labeling, serving certificate approval, WireKube readiness, and final
+bootstrap identity removal from the saved phase. `idleloom delete` remains the
+recovery path when enrollment cannot be completed. Inspect bootstrap failures
+with `idleloom status` and the local logs under the runtime directory.
+`idleloom delete` removes the Node, VM processes, disks, keys, runtime logs,
+and the certificate maintainer. It refuses active workloads unless `--force`
+is supplied.
 
 ## Linux worker capabilities
 
 The Ubuntu base installs and configures:
 
 - containerd with systemd cgroups;
-- standard CNI plugins and Kubernetes networking sysctls;
+- standard CNI plugins linked into containerd's `/opt/cni/bin` path and
+  Kubernetes networking sysctls;
 - `open-iscsi` and `iscsid` for Longhorn-style volumes;
 - NFS client utilities;
 - a persistent filesystem backing `/var/lib/containerd` and `/var/lib/kubelet`;
@@ -277,6 +339,9 @@ Ordinary Pod `hostPath` volumes use the persistent VM filesystem. Use paths
 under `/var/lib/idleloom/volumes` when the data should live on the large worker
 disk. These paths are inside the worker VM, not on macOS. Sharing a macOS
 directory through virtio-fs is a separate future feature.
+Runnable writer/reader, Longhorn PVC, and NFS smoke manifests are provided
+under [`examples/worker`](examples/worker) and exercised in
+[`docs/getting-started.md`](docs/getting-started.md).
 
 ## Apple Vulkan backend
 
@@ -288,6 +353,10 @@ Kubernetes Dynamic Resource Allocation:
 - node-local `ResourceSlice` publication;
 - kubelet DRA v1 prepare/unprepare service;
 - exclusive Claim leases and stable CDI device injection.
+
+The public DRA DaemonSet and Worker recipes tolerate Idleloom's default
+`idleloom-dedicated` taint. Other operator-added taints still require explicit
+tolerations in an overlay or rendered manifest.
 
 The Vulkan recipes require Kubernetes 1.35 or later with the stable
 `resource.k8s.io/v1` API enabled on the API server, scheduler, and kubelet.
@@ -338,27 +407,32 @@ The public manifests use the development driver name
 `gpu.apple-vulkan.example`. Operators must replace it with a DNS name they
 control before production deployment.
 
+The complete Worker verification path, including ordinary Pod `exec`,
+port-forward, hostPath persistence, Longhorn, DRA allocation, training,
+inference, and serving, is in
+[`docs/getting-started.md`](docs/getting-started.md).
+
 ## Native Metal mode (alpha)
 
-The Native Metal backend runs an explicitly authorized shell workload or a
-locked MLX model directly on macOS. It does not present the Mac as a
-general-purpose container host. Kubernetes execution state remains in
+The Native Metal backend runs explicit MLX training, MLX, Ollama GGUF, or
+llama.cpp GGUF inference and serving, or shell workloads directly on macOS. It
+does not present the Mac as a general-purpose container host. Kubernetes execution state remains in
 `IdleloomHost`, `IdleloomWorkload`, and `IdleloomWorkloadAssignment` resources.
-The public `run` command currently creates shell workloads; curated model
-workloads remain declarative Kubernetes resources in this alpha.
+The public `run` command creates shell workloads; training and curated model
+workloads use manifest-first recipes or hand-written Kubernetes YAML.
 
 For a tested MLX training walkthrough in both link modes, see
 [`docs/native-training.md`](docs/native-training.md).
 For the shared manifest-first Native and Worker workflow, see
 [`docs/recipes.md`](docs/recipes.md).
 
-Homebrew installs the complete macOS bundle used by `join`:
+Homebrew installs the canonical `idlectl` executable used by `join`:
 
 ```sh
 brew install inerplat/tap/idleloom
 ```
 
-Contributors can build the same bundle from source:
+Contributors can build the same executable from source:
 
 ```sh
 make build-idlectl
@@ -377,13 +451,17 @@ idlectl delete (host|workload)/NAME
 idlectl version
 ```
 
-Controller, agent, link, and projection processes are implementation
-details. `join` installs and starts them with launchd; users do not run service
-subcommands or keep terminal sessions open.
+Controller, agent, link, and projection processes are implementation details.
+`join` installs one captured copy of the running `idlectl` binary and starts
+hidden internal roles with launchd. Users do not manage companion binaries,
+service subcommands, or terminal sessions.
 
 The agent runs workloads and reports host state as the regular login user. The
 link is the smaller root service that maintains the WireKube tunnel and routes.
 API-only mode needs the agent but does not install the link service.
+The compute agent uses launchd's Standard process class so Metal discovery
+and model loading are not throttled as background maintenance; controller,
+projection, and link services remain Background processes.
 
 The CLI accepts the CRD singular, plural, short, and API-qualified resource
 names. For example, `workload`, `idleloomworkloads`, `ilw`, and
@@ -405,7 +483,7 @@ default WireKube mode it also installs the root link LaunchDaemon and
 waits until the host is ready and connected:
 
 ```sh
-idlectl join studio-idle \
+idlectl join evening-mac \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 ```
@@ -446,7 +524,7 @@ certificate, Gateway, or Ingress is not created by Idleloom.
 For non-interactive onboarding, explicitly authorize dependency installation:
 
 ```sh
-idlectl join studio-idle \
+idlectl join evening-mac \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   --install-dependencies \
@@ -457,7 +535,7 @@ If the source kubeconfig disables TLS verification, explicitly pin the API
 certificate observed during the first connection:
 
 ```sh
-idlectl join studio-idle \
+idlectl join evening-mac \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   --allow-tofu
@@ -481,6 +559,11 @@ shell runtime. `host` executes trusted commands with the full access of the
 regular macOS login user. Changing this boundary requires deleting and joining
 the host again.
 
+The trusted-host example in [`docs/getting-started.md`](docs/getting-started.md)
+shows both the required `--shell-access host` enrollment and an explicit
+`--isolation host --network outbound` workload. Do not enable it for untrusted
+commands.
+
 Sandbox mode denies the user home, `/Users`, `/Volumes`, `/Network`, the
 Idleloom state directory, and the agent kubeconfig, and permits writes only in
 the assignment work directory. It is a constrained execution boundary, not a
@@ -497,7 +580,7 @@ Commands use the namespace from the selected kubeconfig context unless `-n`
 is supplied:
 
 ```sh
-idlectl get host/studio-idle \
+idlectl get host/evening-mac \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 
@@ -525,7 +608,7 @@ Check the installed binary without contacting a cluster:
 idlectl version
 ```
 
-After `join`, `idlectl get host/studio-idle` must show `READY=True`. The
+After `join`, `idlectl get host/evening-mac` must show `READY=True`. The
 default WireKube mode must also show `CONNECTED=True`; API-only mode reports
 `CONNECTED=False` or `Unknown` by design. While a projected workload is
 running, inspect its observability-only Node and Pod with:
@@ -556,7 +639,7 @@ Delete every workload that references the host, wait for its assignment to be
 removed, and then delete the joined Mac:
 
 ```sh
-idlectl delete host/studio-idle \
+idlectl delete host/evening-mac \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 ```

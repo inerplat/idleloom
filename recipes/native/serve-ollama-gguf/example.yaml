@@ -1,0 +1,5 @@
+namespace: default
+model: qwen3-5-9b-ollama
+modelAlias: qwen3-5-9b
+servicePort: 8000
+unifiedMemory: 16Gi

@@ -29,7 +29,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build signed Native Metal bundle
+      - name: Build signed Native Metal CLI
         env:
           VERSION: ${{ github.ref_name }}
           COMMIT: ${{ github.sha }}
@@ -41,9 +41,6 @@ jobs:
           ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${build_date}"
           CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$ldflags" -o "$package/idlectl" ./cmd/idlectl
           codesign --force --sign - "$package/idlectl"
-          for helper in idleloom-controller idleloom-agent idleloom-link idleloom-projection; do
-            cp "$package/idlectl" "$package/$helper"
-          done
           cp LICENSE "$package/LICENSE"
           codesign --verify --strict "$package/idlectl"
           "$package/idlectl" version

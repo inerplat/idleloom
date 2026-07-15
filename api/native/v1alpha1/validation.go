@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -15,6 +16,9 @@ var (
 	sha256Pattern       = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 	uuidPattern         = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	ociReferencePattern = regexp.MustCompile(`^oci://[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$`)
+	ollamaModelPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}$`)
+	ggufFilePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf$`)
+	runParameterPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,62}$`)
 )
 
 const (
@@ -29,18 +33,16 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 	specPath := field.NewPath("spec")
 	switch workload.Spec.Mode {
 	case WorkloadModeServer:
-		if workload.Spec.Model == nil || workload.Spec.Batch != nil || workload.Spec.Shell != nil {
-			errs = append(errs, field.Invalid(specPath, workload.Spec, "Server mode requires model and forbids batch and shell"))
+		if workload.Spec.Model == nil || workload.Spec.Server == nil || workload.Spec.Batch != nil || workload.Spec.Shell != nil || workload.Spec.Train != nil {
+			errs = append(errs, field.Invalid(specPath, workload.Spec, "Server mode requires model and server and forbids batch, shell, and train"))
 		} else {
 			if problems := validation.IsDNS1123Subdomain(workload.Spec.Model.CatalogRef); len(problems) > 0 {
 				errs = append(errs, field.Invalid(specPath.Child("model", "catalogRef"), workload.Spec.Model.CatalogRef, strings.Join(problems, "; ")))
 			}
-			if workload.Spec.Server != nil {
-				errs = append(errs, validateWorkloadServer(workload.Spec.Server, specPath.Child("server"))...)
-			}
+			errs = append(errs, validateWorkloadServer(workload.Spec.Server, specPath.Child("server"))...)
 		}
 	case WorkloadModeBatch:
-		if workload.Spec.Model == nil || workload.Spec.Server != nil || workload.Spec.Batch == nil || workload.Spec.Shell != nil {
+		if workload.Spec.Model == nil || workload.Spec.Server != nil || workload.Spec.Batch == nil || workload.Spec.Shell != nil || workload.Spec.Train != nil {
 			errs = append(errs, field.Invalid(specPath, workload.Spec, "Batch mode requires model and batch and forbids server and shell"))
 		} else {
 			if problems := validation.IsDNS1123Subdomain(workload.Spec.Model.CatalogRef); len(problems) > 0 {
@@ -49,7 +51,7 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 			errs = append(errs, validateBatchInference(workload.Spec.Batch, specPath.Child("batch"))...)
 		}
 	case WorkloadModeShell:
-		if workload.Spec.Shell == nil || workload.Spec.Model != nil || workload.Spec.Server != nil || workload.Spec.Batch != nil {
+		if workload.Spec.Shell == nil || workload.Spec.Model != nil || workload.Spec.Server != nil || workload.Spec.Batch != nil || workload.Spec.Train != nil {
 			errs = append(errs, field.Invalid(specPath, workload.Spec, "Shell mode requires shell and forbids model, server, and batch"))
 		} else {
 			if strings.TrimSpace(workload.Spec.Shell.Script) == "" || strings.ContainsRune(workload.Spec.Shell.Script, '\x00') {
@@ -71,8 +73,26 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 				errs = append(errs, field.Invalid(specPath.Child("shell", "timeoutSeconds"), workload.Spec.Shell.TimeoutSeconds, "must be between 1 and 86400 when set"))
 			}
 		}
+	case WorkloadModeTrain:
+		if workload.Spec.Train == nil || workload.Spec.Model != nil || workload.Spec.Server != nil || workload.Spec.Batch != nil || workload.Spec.Shell != nil {
+			errs = append(errs, field.Invalid(specPath, workload.Spec, "Train mode requires train and forbids model, server, batch, and shell"))
+		} else {
+			errs = append(errs, validateTraining(workload.Spec.Train, specPath.Child("train"))...)
+			if workload.Spec.Run == nil || workload.Spec.Run.Task != "train" {
+				errs = append(errs, field.Invalid(specPath.Child("run"), workload.Spec.Run, "Train mode requires run.task=train"))
+			}
+		}
 	default:
-		errs = append(errs, field.NotSupported(specPath.Child("mode"), workload.Spec.Mode, []string{WorkloadModeServer, WorkloadModeBatch, WorkloadModeShell}))
+		errs = append(errs, field.NotSupported(specPath.Child("mode"), workload.Spec.Mode, []string{WorkloadModeServer, WorkloadModeBatch, WorkloadModeShell, WorkloadModeTrain}))
+	}
+	if workload.Spec.Run != nil {
+		errs = append(errs, validateRunSpec(workload.Spec.Run, specPath.Child("run"))...)
+		expectedTask := map[string]string{
+			WorkloadModeServer: "serve", WorkloadModeBatch: "infer", WorkloadModeShell: "shell", WorkloadModeTrain: "train",
+		}[workload.Spec.Mode]
+		if expectedTask != "" && workload.Spec.Run.Task != expectedTask {
+			errs = append(errs, field.Invalid(specPath.Child("run", "task"), workload.Spec.Run.Task, fmt.Sprintf("must be %q for %s mode", expectedTask, workload.Spec.Mode)))
+		}
 	}
 	if workload.Spec.Resources.UnifiedMemoryRequest.Sign() <= 0 {
 		errs = append(errs, field.Invalid(specPath.Child("resources", "unifiedMemoryRequest"), workload.Spec.Resources.UnifiedMemoryRequest.String(), "must be positive"))
@@ -83,13 +103,22 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 func ValidateModel(model *IdleloomModel) error {
 	var errs field.ErrorList
 	specPath := field.NewPath("spec")
-	if model.Spec.Family != ModelFamilyQwen35 {
-		errs = append(errs, field.NotSupported(specPath.Child("family"), model.Spec.Family, []string{ModelFamilyQwen35}))
+	if model.Spec.Family != ModelFamilyQwen35 && model.Spec.Family != ModelFamilyOllamaGGUF && model.Spec.Family != ModelFamilyGGUF {
+		errs = append(errs, field.NotSupported(specPath.Child("family"), model.Spec.Family, []string{ModelFamilyQwen35, ModelFamilyOllamaGGUF, ModelFamilyGGUF}))
 	}
-	if model.Spec.RuntimeProfile != RuntimeProfileMLXLMV1 {
-		errs = append(errs, field.NotSupported(specPath.Child("runtimeProfile"), model.Spec.RuntimeProfile, []string{RuntimeProfileMLXLMV1}))
+	if model.Spec.RuntimeProfile != RuntimeProfileMLXLMV1 && model.Spec.RuntimeProfile != RuntimeProfileOllamaGGUFV1 && model.Spec.RuntimeProfile != RuntimeProfileLlamaCppMetalV1 {
+		errs = append(errs, field.NotSupported(specPath.Child("runtimeProfile"), model.Spec.RuntimeProfile, []string{RuntimeProfileMLXLMV1, RuntimeProfileOllamaGGUFV1, RuntimeProfileLlamaCppMetalV1}))
 	}
-	errs = append(errs, validateArtifact(model.Spec.Artifact, specPath.Child("artifact"))...)
+	if model.Spec.RuntimeProfile == RuntimeProfileMLXLMV1 && model.Spec.Family != ModelFamilyQwen35 {
+		errs = append(errs, field.Invalid(specPath.Child("family"), model.Spec.Family, "mlx-lm-v1 requires qwen3.5"))
+	}
+	if model.Spec.RuntimeProfile == RuntimeProfileOllamaGGUFV1 && model.Spec.Family != ModelFamilyOllamaGGUF {
+		errs = append(errs, field.Invalid(specPath.Child("family"), model.Spec.Family, "ollama-gguf-v1 requires ollama-gguf"))
+	}
+	if model.Spec.RuntimeProfile == RuntimeProfileLlamaCppMetalV1 && model.Spec.Family != ModelFamilyGGUF {
+		errs = append(errs, field.Invalid(specPath.Child("family"), model.Spec.Family, "llama-cpp-metal-v1 requires gguf"))
+	}
+	errs = append(errs, validateArtifact(model.Spec.Artifact, model.Spec.RuntimeProfile, specPath.Child("artifact"))...)
 	if model.Spec.MinimumUnifiedMemory.Sign() <= 0 {
 		errs = append(errs, field.Invalid(specPath.Child("minimumUnifiedMemory"), model.Spec.MinimumUnifiedMemory.String(), "must be positive"))
 	}
@@ -146,9 +175,27 @@ func ValidateAssignment(assignment *IdleloomWorkloadAssignment) error {
 	if assignment.Spec.LeaseDurationSeconds < 10 || assignment.Spec.LeaseDurationSeconds > 300 {
 		errs = append(errs, field.Invalid(specPath.Child("leaseDurationSeconds"), assignment.Spec.LeaseDurationSeconds, "must be between 10 and 300 seconds"))
 	}
-	if (assignment.Spec.Model == nil) == (assignment.Spec.Shell == nil) {
-		errs = append(errs, field.Invalid(specPath, assignment.Spec, "exactly one model or shell is required"))
+	if assignment.Spec.Run != nil {
+		errs = append(errs, validateRunSpec(assignment.Spec.Run, specPath.Child("run"))...)
+	}
+	intents := 0
+	for _, present := range []bool{assignment.Spec.Model != nil, assignment.Spec.Shell != nil, assignment.Spec.Training != nil} {
+		if present {
+			intents++
+		}
+	}
+	if intents != 1 {
+		errs = append(errs, field.Invalid(specPath, assignment.Spec, "exactly one model, shell, or training run is required"))
 	} else if assignment.Spec.Model != nil {
+		if assignment.Spec.Run != nil {
+			expectedTask := "serve"
+			if assignment.Spec.Model.Batch != nil {
+				expectedTask = "infer"
+			}
+			if assignment.Spec.Run.Task != expectedTask {
+				errs = append(errs, field.Invalid(specPath.Child("run", "task"), assignment.Spec.Run.Task, fmt.Sprintf("must be %q for the resolved model intent", expectedTask)))
+			}
+		}
 		model := &IdleloomModel{Spec: IdleloomModelSpec{
 			Family:                assignment.Spec.Model.Family,
 			RuntimeProfile:        assignment.Spec.Model.RuntimeProfile,
@@ -169,12 +216,18 @@ func ValidateAssignment(assignment *IdleloomWorkloadAssignment) error {
 		if assignment.Spec.Model.Server != nil {
 			errs = append(errs, validateResolvedServer(assignment.Spec.Model.Server, specPath.Child("model", "server"))...)
 		}
-		if assignment.Spec.Model.Batch != nil && assignment.Spec.Model.Server != nil {
-			errs = append(errs, field.Invalid(specPath.Child("model"), assignment.Spec.Model, "batch and server intents are mutually exclusive"))
+		if (assignment.Spec.Model.Batch == nil) == (assignment.Spec.Model.Server == nil) {
+			errs = append(errs, field.Invalid(specPath.Child("model"), assignment.Spec.Model, "exactly one batch or server intent is required"))
 		}
-	} else {
+	} else if assignment.Spec.Shell != nil {
+		if assignment.Spec.Run != nil && assignment.Spec.Run.Task != "shell" {
+			errs = append(errs, field.Invalid(specPath.Child("run", "task"), assignment.Spec.Run.Task, "must be shell for the resolved shell intent"))
+		}
 		if strings.TrimSpace(assignment.Spec.Shell.Script) == "" || strings.ContainsRune(assignment.Spec.Shell.Script, '\x00') {
 			errs = append(errs, field.Invalid(specPath.Child("shell", "script"), assignment.Spec.Shell.Script, "must contain a non-empty script without NUL bytes"))
+		}
+		if len([]byte(assignment.Spec.Shell.Script)) > 64<<10 {
+			errs = append(errs, field.TooLong(specPath.Child("shell", "script"), "", 64<<10))
 		}
 		if assignment.Spec.Shell.Network != ShellNetworkNone && assignment.Spec.Shell.Network != ShellNetworkOutbound {
 			errs = append(errs, field.NotSupported(specPath.Child("shell", "network"), assignment.Spec.Shell.Network, []string{ShellNetworkNone, ShellNetworkOutbound}))
@@ -191,8 +244,89 @@ func ValidateAssignment(assignment *IdleloomWorkloadAssignment) error {
 		if assignment.Spec.Shell.UnifiedMemoryRequest.Sign() <= 0 {
 			errs = append(errs, field.Invalid(specPath.Child("shell", "unifiedMemoryRequest"), assignment.Spec.Shell.UnifiedMemoryRequest.String(), "must be positive"))
 		}
+	} else {
+		errs = append(errs, validateResolvedTraining(assignment.Spec.Training, specPath.Child("training"))...)
+		if assignment.Spec.Run == nil || assignment.Spec.Run.Task != "train" {
+			errs = append(errs, field.Invalid(specPath.Child("run"), assignment.Spec.Run, "resolved training requires run.task=train"))
+		}
 	}
 	return errs.ToAggregate()
+}
+
+func validateRunSpec(run *WorkloadRunSpec, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if run == nil {
+		return append(errs, field.Required(path, "run metadata is required"))
+	}
+	if run.Task != "train" && run.Task != "infer" && run.Task != "serve" && run.Task != "shell" {
+		errs = append(errs, field.NotSupported(path.Child("task"), run.Task, []string{"train", "infer", "serve", "shell"}))
+	}
+	if problems := validation.IsDNS1123Label(run.Experiment); len(problems) > 0 {
+		errs = append(errs, field.Invalid(path.Child("experiment"), run.Experiment, strings.Join(problems, "; ")))
+	}
+	if run.Attempt < 1 || run.Attempt > 1000 {
+		errs = append(errs, field.Invalid(path.Child("attempt"), run.Attempt, "must be between 1 and 1000"))
+	}
+	if len(run.Parameters) > 64 {
+		errs = append(errs, field.TooMany(path.Child("parameters"), len(run.Parameters), 64))
+	}
+	for name, value := range run.Parameters {
+		parameterPath := path.Child("parameters").Key(name)
+		if !runParameterPattern.MatchString(name) || strings.HasPrefix(name, "IDLELOOM_") {
+			errs = append(errs, field.Invalid(parameterPath, name, "must be a safe environment name and must not use the IDLELOOM_ prefix"))
+		}
+		text := string(value)
+		if utf8.RuneCountInString(text) > 4096 || strings.ContainsRune(text, '\x00') {
+			errs = append(errs, field.Invalid(parameterPath, "", "must not contain NUL bytes or exceed 4096 characters"))
+		}
+	}
+	return errs
+}
+
+func validateTraining(training *WorkloadTraining, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if training == nil {
+		return append(errs, field.Required(path, "training intent is required"))
+	}
+	if training.RuntimeProfile != RuntimeProfileMLXTrainV1 {
+		errs = append(errs, field.NotSupported(path.Child("runtimeProfile"), training.RuntimeProfile, []string{RuntimeProfileMLXTrainV1}))
+	}
+	if training.Source.Inline == "" || strings.ContainsRune(training.Source.Inline, '\x00') {
+		errs = append(errs, field.Invalid(path.Child("source", "inline"), "", "must contain a non-empty Python program without NUL bytes"))
+	}
+	if len([]byte(training.Source.Inline)) > 64<<10 {
+		errs = append(errs, field.TooLong(path.Child("source", "inline"), "", 64<<10))
+	}
+	if training.Network != "" && training.Network != ShellNetworkNone && training.Network != ShellNetworkOutbound {
+		errs = append(errs, field.NotSupported(path.Child("network"), training.Network, []string{ShellNetworkNone, ShellNetworkOutbound}))
+	}
+	if training.TimeoutSeconds < 0 || training.TimeoutSeconds > 86400 {
+		errs = append(errs, field.Invalid(path.Child("timeoutSeconds"), training.TimeoutSeconds, "must be between 1 and 86400 when set"))
+	}
+	return errs
+}
+
+func validateResolvedTraining(training *ResolvedTraining, path *field.Path) field.ErrorList {
+	var errs field.ErrorList
+	if training == nil {
+		return append(errs, field.Required(path, "resolved training run is required"))
+	}
+	errs = append(errs, validateTraining(&WorkloadTraining{
+		RuntimeProfile: training.RuntimeProfile,
+		Source:         WorkloadTrainingSource{Inline: training.Source},
+		Network:        training.Network,
+		TimeoutSeconds: training.TimeoutSeconds,
+	}, path)...)
+	if training.TimeoutSeconds < 1 || training.TimeoutSeconds > 86400 {
+		errs = append(errs, field.Invalid(path.Child("timeoutSeconds"), training.TimeoutSeconds, "must be between 1 and 86400"))
+	}
+	if !sha256Pattern.MatchString(training.SourceDigest) {
+		errs = append(errs, field.Invalid(path.Child("sourceDigest"), training.SourceDigest, "must be a sha256 digest"))
+	}
+	if training.UnifiedMemoryRequest.Sign() <= 0 {
+		errs = append(errs, field.Invalid(path.Child("unifiedMemoryRequest"), training.UnifiedMemoryRequest.String(), "must be positive"))
+	}
+	return errs
 }
 
 func validateWorkloadServer(server *WorkloadServer, path *field.Path) field.ErrorList {
@@ -272,29 +406,57 @@ func ValidateStopAcknowledgement(assignment *IdleloomWorkloadAssignment) error {
 	return nil
 }
 
-func validateArtifact(artifact ModelArtifact, path *field.Path) field.ErrorList {
+func validateArtifact(artifact ModelArtifact, runtimeProfile string, path *field.Path) field.ErrorList {
 	var errs field.ErrorList
-	parsed, err := url.Parse(artifact.OCIReference)
-	if err != nil || !ociReferencePattern.MatchString(artifact.OCIReference) || parsed.Scheme != "oci" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		errs = append(errs, field.Invalid(path.Child("ociReference"), artifact.OCIReference, "must be a credential-free OCI reference pinned by digest"))
-	} else {
-		at := strings.LastIndex(parsed.Path, "@")
-		if at <= 1 || !sha256Pattern.MatchString(parsed.Path[at+1:]) {
-			errs = append(errs, field.Invalid(path.Child("ociReference"), artifact.OCIReference, "must end in @sha256:<64 lowercase hex characters>"))
+	if artifact.OCIReference != "" {
+		parsed, err := url.Parse(artifact.OCIReference)
+		if err != nil || !ociReferencePattern.MatchString(artifact.OCIReference) || parsed.Scheme != "oci" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+			errs = append(errs, field.Invalid(path.Child("ociReference"), artifact.OCIReference, "must be a credential-free OCI reference pinned by digest"))
+		} else {
+			at := strings.LastIndex(parsed.Path, "@")
+			if at <= 1 || !sha256Pattern.MatchString(parsed.Path[at+1:]) {
+				errs = append(errs, field.Invalid(path.Child("ociReference"), artifact.OCIReference, "must end in @sha256:<64 lowercase hex characters>"))
+			}
 		}
+	}
+	if artifact.OllamaModel != "" && !ollamaModelPattern.MatchString(artifact.OllamaModel) {
+		errs = append(errs, field.Invalid(path.Child("ollamaModel"), artifact.OllamaModel, "must be an unqualified lowercase Ollama model and tag"))
+	}
+	if artifact.GGUFFile != "" && !ggufFilePattern.MatchString(artifact.GGUFFile) {
+		errs = append(errs, field.Invalid(path.Child("ggufFile"), artifact.GGUFFile, "must be a safe GGUF filename without a path"))
+	}
+	sources := 0
+	for _, present := range []bool{artifact.OCIReference != "", artifact.OllamaModel != "", artifact.GGUFFile != ""} {
+		if present {
+			sources++
+		}
+	}
+	if sources != 1 {
+		errs = append(errs, field.Invalid(path, artifact, "exactly one OCI, Ollama, or direct GGUF source is required"))
 	}
 	if !sha256Pattern.MatchString(artifact.ManifestDigest) {
 		errs = append(errs, field.Invalid(path.Child("manifestDigest"), artifact.ManifestDigest, "must be sha256:<64 lowercase hex characters>"))
 	}
-	if artifact.Format != ArtifactFormatSafetensorsV1 {
-		errs = append(errs, field.NotSupported(path.Child("format"), artifact.Format, []string{ArtifactFormatSafetensorsV1}))
+	switch runtimeProfile {
+	case RuntimeProfileMLXLMV1:
+		if artifact.OCIReference == "" || artifact.Format != ArtifactFormatSafetensorsV1 || artifact.Signature == nil {
+			errs = append(errs, field.Invalid(path, artifact, "mlx-lm-v1 requires a signed OCI mlx-safetensors-v1 artifact"))
+		}
+	case RuntimeProfileOllamaGGUFV1:
+		if artifact.OllamaModel == "" || artifact.Format != ArtifactFormatGGUFV1 || artifact.Signature != nil {
+			errs = append(errs, field.Invalid(path, artifact, "ollama-gguf-v1 requires an unsigned local Ollama gguf-v1 artifact pinned by manifest digest"))
+		}
+	case RuntimeProfileLlamaCppMetalV1:
+		if artifact.GGUFFile == "" || artifact.Format != ArtifactFormatGGUFV1 || artifact.Signature != nil {
+			errs = append(errs, field.Invalid(path, artifact, "llama-cpp-metal-v1 requires an unsigned managed GGUF file pinned by SHA-256"))
+		}
 	}
 	if artifact.SizeBytes <= 0 {
 		errs = append(errs, field.Invalid(path.Child("sizeBytes"), artifact.SizeBytes, "must be positive"))
 	} else if artifact.SizeBytes > maxArtifactBytes {
 		errs = append(errs, field.Invalid(path.Child("sizeBytes"), artifact.SizeBytes, fmt.Sprintf("must not exceed %d bytes", maxArtifactBytes)))
 	}
-	if strings.TrimSpace(artifact.Signature.Issuer) == "" || strings.TrimSpace(artifact.Signature.Subject) == "" {
+	if artifact.Signature != nil && (strings.TrimSpace(artifact.Signature.Issuer) == "" || strings.TrimSpace(artifact.Signature.Subject) == "") {
 		errs = append(errs, field.Invalid(path.Child("signature"), artifact.Signature, "issuer and subject are required"))
 	}
 	return errs
@@ -319,7 +481,7 @@ func ArtifactDigestFromOCIReference(reference string) (string, error) {
 	}
 	at := strings.LastIndex(parsed.Path, "@")
 	if at < 0 || !sha256Pattern.MatchString(parsed.Path[at+1:]) {
-		return "", fmt.Errorf("OCI reference %q is not pinned by digest", reference)
+		return "", fmt.Errorf("the OCI reference %q is not pinned by digest", reference)
 	}
 	return parsed.Path[at+1:], nil
 }

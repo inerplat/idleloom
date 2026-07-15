@@ -34,7 +34,7 @@ func runRecipe(args []string, input io.Reader, output io.Writer) error {
 	case "render":
 		return runRecipeRender(registry, args[1:], input, output)
 	case "help", "-h", "--help":
-		fmt.Fprint(output, recipeUsageText)
+		_, _ = fmt.Fprint(output, recipeUsageText)
 		return nil
 	default:
 		return fmt.Errorf("unknown recipe command %q\n%s", args[0], strings.TrimSpace(recipeUsageText))
@@ -50,9 +50,9 @@ func runRecipeList(registry *recipe.Registry, args []string, output io.Writer) e
 		return fmt.Errorf("usage: idlectl recipe list")
 	}
 	writer := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "RECIPE\tBACKEND\tTASK\tRUNTIME\tDESCRIPTION")
+	_, _ = fmt.Fprintln(writer, "RECIPE\tBACKEND\tTASK\tRUNTIME\tDESCRIPTION")
 	for _, definition := range registry.List() {
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", definition.ID(), definition.Backend, definition.Task, definition.Runtime, definition.Description)
+		_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\n", definition.ID(), definition.Backend, definition.Task, definition.Runtime, definition.Description)
 	}
 	return writer.Flush()
 }
@@ -122,6 +122,6 @@ func readRecipeValues(path string, input io.Reader) ([]byte, error) {
 func recipeFlags(name, usage string, output io.Writer) *pflag.FlagSet {
 	flags := pflag.NewFlagSet("recipe "+name, pflag.ContinueOnError)
 	flags.SetOutput(output)
-	flags.Usage = func() { fmt.Fprintf(flags.Output(), "Usage:\n  %s\n", usage) }
+	flags.Usage = func() { _, _ = fmt.Fprintf(flags.Output(), "Usage:\n  %s\n", usage) }
 	return flags
 }

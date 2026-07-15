@@ -40,12 +40,19 @@ spec:
                   format:
                     enum:
                     - mlx-safetensors-v1
+                    - gguf-v1
+                    type: string
+                  ggufFile:
+                    pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf$
                     type: string
                   manifestDigest:
                     pattern: ^sha256:[a-f0-9]{64}$
                     type: string
                   ociReference:
                     pattern: ^oci://[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$
+                    type: string
+                  ollamaModel:
+                    pattern: ^[a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}$
                     type: string
                   signature:
                     properties:
@@ -69,13 +76,20 @@ spec:
                 required:
                 - format
                 - manifestDigest
-                - ociReference
-                - signature
                 - sizeBytes
                 type: object
+                x-kubernetes-validations:
+                - message: exactly one artifact source is required; OCI artifacts
+                    require a signature and local GGUF sources are unsigned
+                  rule: (has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile)
+                    && has(self.signature)) || (!has(self.ociReference) && has(self.ollamaModel)
+                    && !has(self.ggufFile) && !has(self.signature)) || (!has(self.ociReference)
+                    && !has(self.ollamaModel) && has(self.ggufFile) && !has(self.signature))
               family:
                 enum:
                 - qwen3.5
+                - ollama-gguf
+                - gguf
                 type: string
               maxConcurrentRequests:
                 format: int32
@@ -96,6 +110,8 @@ spec:
               runtimeProfile:
                 enum:
                 - mlx-lm-v1
+                - ollama-gguf-v1
+                - llama-cpp-metal-v1
                 type: string
             required:
             - artifact
@@ -155,6 +171,13 @@ spec:
           rule: self.spec == oldSelf.spec
         - message: minimumUnifiedMemory must be positive
           rule: quantity(self.spec.minimumUnifiedMemory).isGreaterThan(quantity('0'))
+        - message: runtime profile, model family, and artifact source must match
+          rule: (self.spec.runtimeProfile == 'mlx-lm-v1' && self.spec.family == 'qwen3.5'
+            && self.spec.artifact.format == 'mlx-safetensors-v1' && has(self.spec.artifact.ociReference))
+            || (self.spec.runtimeProfile == 'ollama-gguf-v1' && self.spec.family ==
+            'ollama-gguf' && self.spec.artifact.format == 'gguf-v1' && has(self.spec.artifact.ollamaModel))
+            || (self.spec.runtimeProfile == 'llama-cpp-metal-v1' && self.spec.family
+            == 'gguf' && self.spec.artifact.format == 'gguf-v1' && has(self.spec.artifact.ggufFile))
     served: true
     storage: true
     subresources:

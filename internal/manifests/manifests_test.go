@@ -16,9 +16,19 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 )
 
-func TestDeploymentManifestsDecodeStrictly(t *testing.T) {
-	root := filepath.Join("..", "..", "deploy")
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+func TestPublicManifestsDecodeStrictly(t *testing.T) {
+	for _, root := range []string{
+		filepath.Join("..", "..", "deploy"),
+		filepath.Join("..", "..", "examples"),
+	} {
+		if err := walkManifests(root); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func walkManifests(root string) error {
+	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -63,7 +73,4 @@ func TestDeploymentManifestsDecodeStrictly(t *testing.T) {
 		}
 		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 }

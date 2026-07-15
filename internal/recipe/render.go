@@ -197,7 +197,7 @@ func validateRenderedManifest(manifest []byte, definition Definition, data templ
 			}
 			executionRoots++
 			if typed.Name != data.Name {
-				return fmt.Errorf("Native execution root must be named %q", data.Name)
+				return fmt.Errorf("native execution root must be named %q", data.Name)
 			}
 			if err := nativev1alpha1.ValidateWorkload(typed); err != nil {
 				return err
@@ -208,7 +208,7 @@ func validateRenderedManifest(manifest []byte, definition Definition, data templ
 			}
 			executionRoots++
 			if typed.Name != data.Name {
-				return fmt.Errorf("Worker execution root must be named %q", data.Name)
+				return fmt.Errorf("worker execution root must be named %q", data.Name)
 			}
 			if typed.Spec.Template.Spec.RestartPolicy != "Never" || len(typed.Spec.Template.Spec.Containers) == 0 {
 				return fmt.Errorf("worker Job must use restartPolicy Never and define a container")
@@ -222,7 +222,7 @@ func validateRenderedManifest(manifest []byte, definition Definition, data templ
 			}
 			executionRoots++
 			if typed.Name != data.Name || len(typed.Spec.JobTemplate.Spec.Template.Spec.Containers) == 0 {
-				return fmt.Errorf("Worker CronJob execution root must be named %q and define a container", data.Name)
+				return fmt.Errorf("worker CronJob execution root must be named %q and define a container", data.Name)
 			}
 			if err := validateMetadata(typed.Spec.JobTemplate.Spec.Template.Labels, typed.Spec.JobTemplate.Spec.Template.Annotations, definition, data); err != nil {
 				return fmt.Errorf("pod template metadata: %w", err)
@@ -233,7 +233,7 @@ func validateRenderedManifest(manifest []byte, definition Definition, data templ
 			}
 			executionRoots++
 			if typed.Name != data.Name || len(typed.Spec.Template.Spec.Containers) == 0 {
-				return fmt.Errorf("Worker Deployment execution root must be named %q and define a container", data.Name)
+				return fmt.Errorf("worker Deployment execution root must be named %q and define a container", data.Name)
 			}
 			if err := validateMetadata(typed.Spec.Template.Labels, typed.Spec.Template.Annotations, definition, data); err != nil {
 				return fmt.Errorf("pod template metadata: %w", err)
@@ -244,7 +244,7 @@ func validateRenderedManifest(manifest []byte, definition Definition, data templ
 			}
 			executionRoots++
 			if typed.Name != data.Name || len(typed.Spec.Containers) == 0 {
-				return fmt.Errorf("Worker Pod execution root must be named %q and define a container", data.Name)
+				return fmt.Errorf("worker Pod execution root must be named %q and define a container", data.Name)
 			}
 		}
 	}

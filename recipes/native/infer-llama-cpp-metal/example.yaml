@@ -1,0 +1,6 @@
+namespace: default
+model: local-gguf
+prompt: Explain why idle compute is useful in one sentence.
+maxTokens: 128
+timeoutSeconds: 600
+unifiedMemory: 8Gi

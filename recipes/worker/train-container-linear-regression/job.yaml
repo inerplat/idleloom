@@ -32,6 +32,10 @@ spec:
       nodeSelector:
         kubernetes.io/os: linux
         idleloom-worker: "true"
+      tolerations:
+      - key: idleloom-dedicated
+        operator: Exists
+        effect: NoSchedule
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532

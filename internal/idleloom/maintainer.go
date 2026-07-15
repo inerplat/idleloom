@@ -41,7 +41,7 @@ func (a *App) Maintain(ctx context.Context, statePath string) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	state, err := LoadState(canonicalState)
 	if err != nil {
 		return err
@@ -78,7 +78,7 @@ func (a *App) Maintain(ctx context.Context, statePath string) error {
 			if errors.Is(err, errMaintainerRuntimeStopped) {
 				return nil
 			}
-			fmt.Fprintf(a.Err, "idleloom maintainer: %v\n", err)
+			_, _ = fmt.Fprintf(a.Err, "idleloom maintainer: %v\n", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -158,8 +158,7 @@ func startMaintainer(ctx context.Context, statePath string, stderr io.Writer) er
 	command.Stdout = logFile
 	command.Stderr = logFile
 	if err := command.Start(); err != nil {
-		logFile.Close()
-		return fmt.Errorf("start certificate maintainer: %w", err)
+		return errors.Join(fmt.Errorf("start certificate maintainer: %w", err), logFile.Close())
 	}
 	pid := command.Process.Pid
 	_ = command.Process.Release()
@@ -170,7 +169,7 @@ func startMaintainer(ctx context.Context, statePath string, stderr io.Writer) er
 	}); err != nil {
 		cleanupErr := terminatePID(pid, filepath.Base(executable), 5*time.Second)
 		if cleanupErr != nil {
-			fmt.Fprintf(stderr, "warning: failed to clean up certificate maintainer: %v\n", cleanupErr)
+			_, _ = fmt.Fprintf(stderr, "warning: failed to clean up certificate maintainer: %v\n", cleanupErr)
 		}
 		return fmt.Errorf("wait for certificate maintainer: %w", err)
 	}
@@ -235,11 +234,11 @@ func acquireMaintainerLock(statePath string) (*maintainerLock, error) {
 		return nil, fmt.Errorf("open certificate maintainer lock: %w", err)
 	}
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		file.Close()
+		closeErr := file.Close()
 		if err == unix.EWOULDBLOCK || err == unix.EAGAIN {
-			return nil, fmt.Errorf("certificate maintainer is already running")
+			return nil, errors.Join(fmt.Errorf("certificate maintainer is already running"), closeErr)
 		}
-		return nil, fmt.Errorf("lock certificate maintainer: %w", err)
+		return nil, errors.Join(fmt.Errorf("lock certificate maintainer: %w", err), closeErr)
 	}
 	return &maintainerLock{file: file}, nil
 }
@@ -261,7 +260,7 @@ func maintainerLockHeld(statePath string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("open certificate maintainer lock: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		if err == unix.EWOULDBLOCK || err == unix.EAGAIN {
 			return true, nil
@@ -384,7 +383,7 @@ func cleanupMaintainerFiles(statePath string) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	for _, path := range []string{
 		maintainerMetadataFile(canonical),
 		canonical + ".maintainer.log", canonical + ".maintainer.log.1",

@@ -28,7 +28,7 @@ func TestRunRejectsAPIOnlyDowngradeWithWireKubeState(t *testing.T) {
 	}
 	_, err := Run(context.Background(), Config{
 		REST: &rest.Config{Host: "https://203.0.113.10:6443"}, Dynamic: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme()),
-		Kubernetes: fake.NewSimpleClientset(), HostID: "mac-one", StateDirectory: directory,
+		Kubernetes: fake.NewClientset(), HostID: "mac-one", StateDirectory: directory,
 		Connectivity: nativewirekube.ConnectivityAPIOnly,
 	})
 	if err == nil {
@@ -67,7 +67,7 @@ func TestEnsureHostRecoversFromPersistedCreateNotFound(t *testing.T) {
 }
 
 func TestKubernetesClientCAUsesAuthenticationConfigMap(t *testing.T) {
-	client := fake.NewSimpleClientset(&corev1.ConfigMap{
+	client := fake.NewClientset(&corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: "extension-apiserver-authentication", Namespace: "kube-system"},
 		Data:       map[string]string{"client-ca-file": "certificate"},
 	})
@@ -81,7 +81,7 @@ func TestKubernetesClientCAUsesAuthenticationConfigMap(t *testing.T) {
 }
 
 func TestRequestKubeletServingCertificateCreatesAndApprovesCSR(t *testing.T) {
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 	client.PrependReactor("update", "certificatesigningrequests", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		update := action.(clienttesting.UpdateAction)
 		csr := update.GetObject().(*certificatesv1.CertificateSigningRequest).DeepCopy()

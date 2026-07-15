@@ -1,0 +1,13 @@
+name: infer/ollama-gguf
+version: v1
+description: Run one prompt with a digest-pinned local GGUF model through an Idleloom-owned Ollama runtime.
+task: infer
+backend: native
+runtime: ollama
+manifest: native-workload.yaml
+parametersSchema: parameters.schema.json
+example: example.yaml
+prerequisites:
+- A joined Native Metal host with Ollama 0.17.1 or later on PATH.
+- The exact qwen3.5:9b GGUF model installed locally before the workload is created.
+- The built-in qwen3-5-9b-ollama model catalog installed by idlectl join.

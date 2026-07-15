@@ -3,6 +3,7 @@ package idleloom
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,9 @@ type State struct {
 	KubeconfigPath       string       `json:"kubeconfigPath"`
 	Context              string       `json:"context"`
 	Network              string       `json:"network"`
+	Taint                string       `json:"taint,omitempty"`
+	TaintConfigured      bool         `json:"taintConfigured,omitempty"`
+	TokenTTLSeconds      int64        `json:"tokenTTLSeconds,omitempty"`
 	NetworkLease         string       `json:"networkLease,omitempty"`
 	NetworkLeaseUID      string       `json:"networkLeaseUID,omitempty"`
 	NetworkReservationID string       `json:"networkReservationID,omitempty"`
@@ -44,13 +48,11 @@ func AcquireStateLock(ctx context.Context, statePath string) (*stateLock, error)
 			return &stateLock{file: file}, nil
 		}
 		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
-			file.Close()
-			return nil, fmt.Errorf("lock Idleloom state: %w", err)
+			return nil, errors.Join(fmt.Errorf("lock Idleloom state: %w", err), file.Close())
 		}
 		select {
 		case <-ctx.Done():
-			file.Close()
-			return nil, fmt.Errorf("wait for Idleloom state lock: %w", ctx.Err())
+			return nil, errors.Join(fmt.Errorf("wait for Idleloom state lock: %w", ctx.Err()), file.Close())
 		case <-ticker.C:
 		}
 	}
@@ -116,18 +118,15 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("create temporary file: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	if err := temporary.Chmod(mode); err != nil {
-		temporary.Close()
-		return fmt.Errorf("set temporary file permissions: %w", err)
+		return errors.Join(fmt.Errorf("set temporary file permissions: %w", err), temporary.Close())
 	}
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return fmt.Errorf("write temporary file: %w", err)
+		return errors.Join(fmt.Errorf("write temporary file: %w", err), temporary.Close())
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return fmt.Errorf("sync temporary file: %w", err)
+		return errors.Join(fmt.Errorf("sync temporary file: %w", err), temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close temporary file: %w", err)
@@ -140,8 +139,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("open parent directory: %w", err)
 	}
 	if err := directory.Sync(); err != nil {
-		directory.Close()
-		return fmt.Errorf("sync parent directory: %w", err)
+		return errors.Join(fmt.Errorf("sync parent directory: %w", err), directory.Close())
 	}
 	if err := directory.Close(); err != nil {
 		return fmt.Errorf("close parent directory: %w", err)
@@ -151,7 +149,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 
 func EnsureStatePathAvailable(path string) error {
 	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("Idleloom state already exists at %s; use it or choose a different --state path", path)
+		return fmt.Errorf("idleloom state already exists at %s; use it or choose a different --state path", path)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect state path %s: %w", path, err)
 	}
@@ -185,6 +183,16 @@ func LoadState(path string) (State, error) {
 	}
 	if state.NodeName == "" || state.Runtime.NodeName != state.NodeName {
 		return State{}, fmt.Errorf("state %s has inconsistent node ownership: state=%q runtime=%q", path, state.NodeName, state.Runtime.NodeName)
+	}
+	if state.TaintConfigured {
+		if err := validateTaint(state.Taint); err != nil {
+			return State{}, fmt.Errorf("state %s has an invalid taint: %w", path, err)
+		}
+	} else if state.Taint != "" {
+		return State{}, fmt.Errorf("state %s has taint data without a configuration marker", path)
+	}
+	if state.TokenTTLSeconds < 0 {
+		return State{}, fmt.Errorf("state %s has a negative bootstrap token lifetime", path)
 	}
 	return state, nil
 }

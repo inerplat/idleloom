@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -41,12 +42,69 @@ func TestServingHandlerRequiresAPIKeyAndReturnsChatCompletion(t *testing.T) {
 	if runner.request.MaxTokens != 32 || !strings.Contains(runner.request.Prompt, "User: hello") {
 		t.Fatalf("generation request = %#v", runner.request)
 	}
+	trailing := httptest.NewRecorder()
+	trailingRequest := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body+`{}`))
+	trailingRequest.Header.Set("Authorization", "Bearer 0123456789abcdef0123456789abcdef")
+	handler.ServeHTTP(trailing, trailingRequest)
+	if trailing.Code != http.StatusBadRequest {
+		t.Fatalf("trailing JSON status = %d", trailing.Code)
+	}
 	models := httptest.NewRecorder()
 	modelsRequest := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	modelsRequest.Header.Set("X-Idleloom-API-Key", "0123456789abcdef0123456789abcdef")
 	handler.ServeHTTP(models, modelsRequest)
 	if models.Code != http.StatusOK || !strings.Contains(models.Body.String(), "qwen3-5-0-8b") {
 		t.Fatalf("models response = %d %s", models.Code, models.Body.String())
+	}
+}
+
+func TestServingRequestCancellationDoesNotStopSharedModel(t *testing.T) {
+	runner := &cancelAwareRunner{
+		alive:     true,
+		started:   make(chan struct{}),
+		release:   make(chan struct{}),
+		cancelled: make(chan struct{}),
+	}
+	handler := servingHandler(runner, "qwen3-5-0-8b", []byte("0123456789abcdef0123456789abcdef"), &DevAgent{})
+	requestContext, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		strings.NewReader(`{"model":"qwen3-5-0-8b","messages":[{"role":"user","content":"hello"}]}`),
+	).WithContext(requestContext)
+	request.Header.Set("Authorization", "Bearer 0123456789abcdef0123456789abcdef")
+	response := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(response, request)
+		close(done)
+	}()
+	<-runner.started
+	cancel()
+	select {
+	case <-runner.cancelled:
+		t.Fatal("client cancellation reached the shared model process")
+	case <-time.After(50 * time.Millisecond):
+	}
+	busy := httptest.NewRecorder()
+	busyRequest := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/chat/completions",
+		strings.NewReader(`{"model":"qwen3-5-0-8b","messages":[{"role":"user","content":"second"}]}`),
+	)
+	busyRequest.Header.Set("Authorization", "Bearer 0123456789abcdef0123456789abcdef")
+	handler.ServeHTTP(busy, busyRequest)
+	if busy.Code != http.StatusTooManyRequests || busy.Header().Get("Retry-After") != "1" {
+		t.Fatalf("concurrent response = %d headers=%v", busy.Code, busy.Header())
+	}
+	close(runner.release)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("serving request did not finish")
+	}
+	if response.Code != http.StatusOK || !runner.Alive() || runner.stopCalls != 0 {
+		t.Fatalf("response=%d alive=%v stopCalls=%d", response.Code, runner.Alive(), runner.stopCalls)
 	}
 }
 
@@ -105,13 +163,13 @@ func TestResolveServingKeyChecksAssignmentIdentity(t *testing.T) {
 		},
 		Data: map[string][]byte{"api-key": []byte("0123456789abcdef0123456789abcdef")},
 	}
-	agent := &DevAgent{config: DevAgentConfig{Kubernetes: kubernetesfake.NewSimpleClientset(secret)}}
+	agent := &DevAgent{config: DevAgentConfig{Kubernetes: kubernetesfake.NewClientset(secret)}}
 	key, err := agent.resolveServingKey(context.Background(), assignment)
 	if err != nil || string(key) != "0123456789abcdef0123456789abcdef" {
 		t.Fatalf("resolveServingKey = %q, %v", key, err)
 	}
 	secret.Labels["ai.idleloom.io/execution-id"] = "different"
-	agent.config.Kubernetes = kubernetesfake.NewSimpleClientset(secret)
+	agent.config.Kubernetes = kubernetesfake.NewClientset(secret)
 	if _, err := agent.resolveServingKey(context.Background(), assignment); err == nil {
 		t.Fatal("resolveServingKey accepted a Secret for another execution")
 	}
@@ -170,3 +228,41 @@ func TestHostAdvertisesNativeServiceOnlyWhenWireKubeConnected(t *testing.T) {
 		t.Fatalf("API-only capabilities = %v", updated.Status.Capabilities)
 	}
 }
+
+type cancelAwareRunner struct {
+	mu        sync.Mutex
+	alive     bool
+	stopCalls int
+	started   chan struct{}
+	release   chan struct{}
+	cancelled chan struct{}
+}
+
+func (p *cancelAwareRunner) Alive() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.alive
+}
+
+func (p *cancelAwareRunner) Stop() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.alive = false
+	p.stopCalls++
+	return nil
+}
+
+func (p *cancelAwareRunner) Generate(ctx context.Context, _ devruntime.GenerateRequest) (devruntime.GenerateResponse, error) {
+	close(p.started)
+	select {
+	case <-ctx.Done():
+		close(p.cancelled)
+		return devruntime.GenerateResponse{}, ctx.Err()
+	case <-p.release:
+		return devruntime.GenerateResponse{Text: "ready"}, nil
+	}
+}
+
+func (p *cancelAwareRunner) Stderr() string { return "" }
+
+func (p *cancelAwareRunner) WaitError() error { return nil }

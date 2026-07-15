@@ -1,12 +1,12 @@
-FROM golang:1.25-bookworm AS build
+FROM golang:1.25-bookworm@sha256:9b8bad821dbd3993215fb06ff9193cf34087f684ff113f391cb04c7cc3ecea15 AS build
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/idleloom-projection ./cmd/idlectl
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags='-s -w' -o /out/idlectl ./cmd/idlectl
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:nonroot@sha256:aef9602f8710ec12bde19d593fed1f76c708531bb7aba205110f1029786ead7b
 
-COPY --from=build /out/idleloom-projection /usr/local/bin/idleloom-projection
-ENTRYPOINT ["/usr/local/bin/idleloom-projection", "--in-cluster", "--enable-kubernetes-projection"]
+COPY --from=build /out/idlectl /usr/local/bin/idlectl
+ENTRYPOINT ["/usr/local/bin/idlectl", "internal", "projection", "--in-cluster", "--enable-kubernetes-projection"]

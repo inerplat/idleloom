@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -62,7 +63,7 @@ func (r Resolver) Resolve(ctx context.Context) (string, error) {
 		goarch = runtime.GOARCH
 	}
 	if (goos != "darwin" && goos != "linux") || (goarch != "arm64" && goarch != "amd64") {
-		return "", fmt.Errorf("WireKube CLI has no supported release asset for %s/%s", goos, goarch)
+		return "", fmt.Errorf("the WireKube CLI has no supported release asset for %s/%s", goos, goarch)
 	}
 	asset := "wirekubectl-" + goos + "-" + goarch
 	cacheRoot := r.CacheRoot
@@ -104,7 +105,7 @@ func (r Resolver) Resolve(ctx context.Context) (string, error) {
 	actual := sha256.Sum256(binary)
 	actualHex := hex.EncodeToString(actual[:])
 	if actualHex != expected {
-		return "", fmt.Errorf("WireKube CLI checksum mismatch: expected %s, got %s", expected, actualHex)
+		return "", fmt.Errorf("the WireKube CLI checksum mismatch: expected %s, got %s", expected, actualHex)
 	}
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", fmt.Errorf("create WireKube dependency cache: %w", err)
@@ -203,7 +204,7 @@ func checksumForAsset(checksums, asset string) (string, error) {
 		}
 		return strings.ToLower(fields[0]), nil
 	}
-	return "", fmt.Errorf("WireKube release checksums do not contain %s", asset)
+	return "", fmt.Errorf("the WireKube release checksums do not contain %s", asset)
 }
 
 func download(ctx context.Context, client *http.Client, url string, limit int64) ([]byte, error) {
@@ -215,7 +216,7 @@ func download(ctx context.Context, client *http.Client, url string, limit int64)
 	if err != nil {
 		return nil, fmt.Errorf("download WireKube release asset: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download WireKube release asset: HTTP %s", response.Status)
 	}
@@ -224,7 +225,7 @@ func download(ctx context.Context, client *http.Client, url string, limit int64)
 		return nil, fmt.Errorf("download WireKube release asset: %w", err)
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("WireKube release asset exceeds the maximum allowed size")
+		return nil, fmt.Errorf("the WireKube release asset exceeds the maximum allowed size")
 	}
 	return data, nil
 }
@@ -235,18 +236,15 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("create temporary dependency file: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	if err := temporary.Chmod(mode); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return err

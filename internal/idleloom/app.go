@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -43,11 +44,13 @@ type InitOptions struct {
 }
 
 type App struct {
-	Out       io.Writer
-	Err       io.Writer
-	Now       func() time.Time
-	Runtime   WorkerRuntime
-	StepIndex int
+	Out                      io.Writer
+	Err                      io.Writer
+	Now                      func() time.Time
+	Runtime                  WorkerRuntime
+	DownloadKubelet          func(context.Context, string) (string, error)
+	ApproveKubeletServingCSR func(context.Context, *Cluster, string, string, time.Time, bool, time.Duration) error
+	StepIndex                int
 }
 
 func NewApp(out, errOut io.Writer) *App {
@@ -83,12 +86,12 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		return err
 	}
 	if _, err := cluster.Client.CoreV1().Nodes().Get(ctx, opts.NodeName, metav1.GetOptions{}); err == nil {
-		return fmt.Errorf("Kubernetes node %q already exists", opts.NodeName)
+		return fmt.Errorf("kubernetes node %q already exists", opts.NodeName)
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("check existing Kubernetes node: %w", err)
 	}
-	fmt.Fprintf(a.Out, "  Cluster: %s (%s)\n", cluster.Context, cluster.Version)
-	fmt.Fprintf(a.Out, "  API:     %s\n", cluster.Server)
+	_, _ = fmt.Fprintf(a.Out, "  Cluster: %s (%s)\n", cluster.Context, cluster.Version)
+	_, _ = fmt.Fprintf(a.Out, "  API:     %s\n", cluster.Server)
 
 	var wireKube WireKubeStatus
 	if opts.Network == NetworkWireKube {
@@ -97,16 +100,25 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Out, "  Agent:   %s/%s\n", wireKube.AgentNamespace, wireKube.AgentName)
-		fmt.Fprintf(a.Out, "  Peers:   %d ready\n", wireKube.ReadyPeers)
+		_, _ = fmt.Fprintf(a.Out, "  Agent:   %s/%s\n", wireKube.AgentNamespace, wireKube.AgentName)
+		_, _ = fmt.Fprintf(a.Out, "  Peers:   %d ready\n", wireKube.ReadyPeers)
+	}
+	a.step("Checking external worker compatibility")
+	compatibility, err := CheckWorkerCompatibility(ctx, cluster)
+	if err != nil {
+		return err
+	}
+	for _, warning := range compatibility.Warnings {
+		_, _ = fmt.Fprintf(a.Err, "warning: %s\n", warning)
 	}
 
-	a.step("Fetching the matching kubelet")
 	if opts.DryRun {
-		fmt.Fprintf(a.Out, "  Dry run: would download kubelet %s and create worker %s\n", cluster.KubeletVersion, opts.NodeName)
+		a.step("Planning the matching kubelet")
+		_, _ = fmt.Fprintf(a.Out, "  Dry run: would download kubelet %s and create worker %s\n", cluster.KubeletVersion, opts.NodeName)
 		return nil
 	}
-	kubeletPath, err := DownloadKubelet(ctx, cluster.KubeletVersion)
+	a.step("Fetching the matching kubelet")
+	kubeletPath, err := a.downloadKubelet(ctx, cluster.KubeletVersion)
 	if err != nil {
 		return err
 	}
@@ -121,18 +133,21 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	if err != nil {
 		return err
 	}
-	defer stateLock.Close()
+	defer func() { _ = stateLock.Close() }()
 	if err := EnsureStatePathAvailable(statePath); err != nil {
 		return err
 	}
 	state := State{
-		NodeName:       opts.NodeName,
-		KubeconfigPath: cluster.KubeconfigPath,
-		Context:        cluster.Context,
-		Network:        opts.Network,
-		Phase:          PhaseEnrolling,
-		CreatedAt:      a.Now().UTC(),
-		Runtime:        RuntimeState{NodeName: opts.NodeName},
+		NodeName:        opts.NodeName,
+		KubeconfigPath:  cluster.KubeconfigPath,
+		Context:         cluster.Context,
+		Network:         opts.Network,
+		Taint:           opts.Taint,
+		TaintConfigured: true,
+		TokenTTLSeconds: durationSecondsCeil(opts.TokenTTL),
+		Phase:           PhaseEnrolling,
+		CreatedAt:       a.Now().UTC(),
+		Runtime:         RuntimeState{NodeName: opts.NodeName},
 	}
 	reservationID, err := NewNetworkReservationID()
 	if err != nil {
@@ -165,7 +180,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		}
 		return errors.Join(err, removeStateFile(statePath))
 	}
-	fmt.Fprintf(a.Out, "  Guest:   %s (%s)\n", runtimeNetwork.GuestIP, runtimeNetwork.Subnet)
+	_, _ = fmt.Fprintf(a.Out, "  Guest:   %s (%s)\n", runtimeNetwork.GuestIP, runtimeNetwork.Subnet)
 
 	plannedRuntime, err := a.Runtime.Plan(ctx, RuntimeConfig{
 		NodeName: opts.NodeName, CPUs: opts.CPUs, MemoryMB: opts.MemoryMB,
@@ -205,7 +220,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := token.Delete(cleanupCtx); err != nil {
-			fmt.Fprintf(a.Err, "warning: %v\n", err)
+			_, _ = fmt.Fprintf(a.Err, "warning: %v\n", err)
 		}
 	}()
 
@@ -236,13 +251,13 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		return err
 	}
 	a.step("Approving the kubelet serving certificate")
-	if err := ApproveKubeletServingCSR(ctx, cluster.Client, opts.NodeName, state.Runtime.GuestIP, state.CreatedAt, true, opts.Timeout); err != nil {
+	if err := a.approveKubeletServingCSR(ctx, cluster, opts.NodeName, state.Runtime.GuestIP, state.CreatedAt, true, opts.Timeout); err != nil {
 		return err
 	}
 
 	if opts.Network == NetworkWireKube {
 		a.step("Waiting for the WireKube tunnel")
-		fmt.Fprintln(a.Out, "  The first handshake may take a few minutes while the CNI becomes ready.")
+		_, _ = fmt.Fprintln(a.Out, "  The first handshake may take a few minutes while the CNI becomes ready.")
 		if err := waitForWireKubeAgent(ctx, cluster, opts.NodeName, wireKube, opts.Timeout); err != nil {
 			return err
 		}
@@ -270,7 +285,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		return err
 	}
 
-	fmt.Fprintf(a.Out, "\nIdleloom worker %s is Ready.\n", opts.NodeName)
+	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is Ready.\n", opts.NodeName)
 	return nil
 }
 
@@ -283,7 +298,7 @@ func (a *App) Status(ctx context.Context, statePath string) error {
 	if err != nil {
 		return err
 	}
-	defer stateLock.Close()
+	defer func() { _ = stateLock.Close() }()
 	state, err := LoadState(resolvedPath)
 	if err != nil {
 		return err
@@ -306,21 +321,21 @@ func (a *App) Status(ctx context.Context, statePath string) error {
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("get node %s: %w", state.NodeName, err)
 	}
-	fmt.Fprintf(a.Out, "Node:       %s\n", state.NodeName)
-	fmt.Fprintf(a.Out, "Phase:      %s\n", state.Phase)
+	_, _ = fmt.Fprintf(a.Out, "Node:       %s\n", state.NodeName)
+	_, _ = fmt.Fprintf(a.Out, "Phase:      %s\n", state.Phase)
 	if node == nil {
-		fmt.Fprintf(a.Out, "Kubernetes: absent\n")
+		_, _ = fmt.Fprintf(a.Out, "Kubernetes: absent\n")
 	} else {
-		fmt.Fprintf(a.Out, "Kubernetes: %s\n", readyWord(nodeReady(node)))
+		_, _ = fmt.Fprintf(a.Out, "Kubernetes: %s\n", readyWord(nodeReady(node)))
 	}
-	fmt.Fprintf(a.Out, "VM:         %s\n", runtimeStatus.VM)
-	fmt.Fprintf(a.Out, "Network:    %s (%s)\n", runtimeStatus.Network, state.Runtime.GuestIP)
+	_, _ = fmt.Fprintf(a.Out, "VM:         %s\n", runtimeStatus.VM)
+	_, _ = fmt.Fprintf(a.Out, "Network:    %s (%s)\n", runtimeStatus.Network, state.Runtime.GuestIP)
 	if state.Network == NetworkWireKube {
 		connected, peerErr := WireKubePeerConnected(ctx, cluster.Client, state.NodeName)
 		if peerErr != nil {
-			fmt.Fprintf(a.Out, "WireKube:   unavailable\n")
+			_, _ = fmt.Fprintf(a.Out, "WireKube:   unavailable\n")
 		} else {
-			fmt.Fprintf(a.Out, "WireKube:   %s\n", readyWord(connected))
+			_, _ = fmt.Fprintf(a.Out, "WireKube:   %s\n", readyWord(connected))
 		}
 	}
 	if state.Phase == PhaseReady && runtimeStatus.VM == "running" && runtimeStatus.Network == "running" {
@@ -340,7 +355,7 @@ func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration
 	if err != nil {
 		return err
 	}
-	defer stateLock.Close()
+	defer func() { _ = stateLock.Close() }()
 	state, err := LoadState(resolvedPath)
 	if err != nil {
 		return err
@@ -351,6 +366,12 @@ func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration
 	}
 	if err := ValidateRuntimeNetworkReservation(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime); err != nil {
 		return err
+	}
+	if state.Phase == PhaseEnrolling {
+		return a.resumeEnrollment(ctx, resolvedPath, &state, cluster, timeout)
+	}
+	if state.Phase != PhaseReady {
+		return fmt.Errorf("worker state phase %q cannot be started", state.Phase)
 	}
 	previousNode, err := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
 	if err != nil {
@@ -398,7 +419,7 @@ func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration
 		}
 	}
 	a.step("Checking the kubelet serving certificate")
-	if err := ApproveKubeletServingCSR(ctx, cluster.Client, state.NodeName, state.Runtime.GuestIP, startNotBefore, false, timeout); err != nil {
+	if err := a.approveKubeletServingCSR(ctx, cluster, state.NodeName, state.Runtime.GuestIP, startNotBefore, false, timeout); err != nil {
 		return err
 	}
 	if state.Network == NetworkWireKube {
@@ -416,8 +437,154 @@ func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration
 	if err := startMaintainer(ctx, resolvedPath, a.Err); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Out, "\nIdleloom worker %s is Ready.\n", state.NodeName)
+	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is Ready.\n", state.NodeName)
 	return nil
+}
+
+func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *State, cluster *Cluster, timeout time.Duration) error {
+	if state == nil || state.Phase != PhaseEnrolling {
+		return fmt.Errorf("an enrolling worker state is required")
+	}
+	if state.Runtime.Planned {
+		return fmt.Errorf("worker enrollment stopped before the VM was created; delete the local state with idleloom delete --local-only --force --state %s, then run idleloom init again", statePath)
+	}
+	_, nodeErr := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
+	if nodeErr != nil && !apierrors.IsNotFound(nodeErr) {
+		return fmt.Errorf("inspect interrupted worker enrollment: %w", nodeErr)
+	}
+	nodeMissing := apierrors.IsNotFound(nodeErr)
+	if nodeMissing && !state.TaintConfigured {
+		return fmt.Errorf("interrupted enrollment state predates resumable taint metadata and Kubernetes Node %q is absent; delete the local state with idleloom delete --local-only --force --state %s, then run idleloom init again", state.NodeName, statePath)
+	}
+	if state.TaintConfigured {
+		if err := validateTaint(state.Taint); err != nil {
+			return fmt.Errorf("interrupted enrollment state has an invalid taint: %w", err)
+		}
+		if state.TokenTTLSeconds < 0 || state.TokenTTLSeconds > math.MaxInt64/int64(time.Second) {
+			return fmt.Errorf("interrupted enrollment state has an invalid bootstrap token lifetime")
+		}
+	}
+	a.step("Resuming the interrupted worker enrollment")
+	previousSSHPort := state.Runtime.SSHPort
+	if err := a.Runtime.Start(ctx, &state.Runtime); err != nil {
+		return err
+	}
+	if state.Runtime.SSHPort != previousSSHPort {
+		if err := SaveState(statePath, *state); err != nil {
+			_ = a.Runtime.Stop(context.Background(), state.Runtime)
+			return err
+		}
+	}
+	if err := a.Runtime.WaitReady(ctx, state.Runtime, 5*time.Minute); err != nil {
+		return err
+	}
+	servingNotBefore := state.CreatedAt
+	var token *BootstrapToken
+	if state.TaintConfigured {
+		a.step("Refreshing the interrupted TLS bootstrap identity")
+		if nodeMissing {
+			servingNotBefore = a.Now().UTC()
+		}
+		kubeletPath, err := a.downloadKubelet(ctx, cluster.KubeletVersion)
+		if err != nil {
+			return err
+		}
+		tokenTTL := time.Duration(state.TokenTTLSeconds) * time.Second
+		if tokenTTL <= 0 {
+			tokenTTL = 30 * time.Minute
+		}
+		token, err = CreateBootstrapToken(ctx, cluster.Client, tokenTTL)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			if err := token.Delete(cleanupCtx); err != nil {
+				_, _ = fmt.Fprintf(a.Err, "warning: %v\n", err)
+			}
+		}()
+		bundlePath, cleanupBundle, err := CreateWorkerBundle(BundleConfig{
+			NodeName: state.NodeName, Taint: state.Taint, Server: cluster.Server,
+			TLSServerName: cluster.TLSServerName, CAData: cluster.CAData, Token: token.Value,
+			ClusterDNS: cluster.ClusterDNS, ClusterDomain: cluster.ClusterDomain, KubeletPath: kubeletPath,
+		})
+		if err != nil {
+			return err
+		}
+		defer cleanupBundle()
+		if err := a.Runtime.InstallBundle(ctx, state.Runtime, bundlePath); err != nil {
+			return err
+		}
+	}
+	a.step("Waiting for kubelet TLS bootstrap")
+	if err := waitForNode(ctx, cluster, state.NodeName, timeout); err != nil {
+		return err
+	}
+	if err := labelNode(ctx, cluster, state.NodeName, state.Network); err != nil {
+		return err
+	}
+	a.step("Approving the kubelet serving certificate")
+	if err := a.approveKubeletServingCSR(ctx, cluster, state.NodeName, state.Runtime.GuestIP, servingNotBefore, true, timeout); err != nil {
+		return err
+	}
+	if state.Network == NetworkWireKube {
+		wireKube, err := CheckWireKube(ctx, cluster.Client)
+		if err != nil {
+			return err
+		}
+		a.step("Waiting for the WireKube tunnel")
+		if err := waitForWireKubeAgent(ctx, cluster, state.NodeName, wireKube, timeout); err != nil {
+			return err
+		}
+		if err := waitForWireKube(ctx, cluster, state.NodeName, timeout); err != nil {
+			return err
+		}
+	}
+	a.step("Waiting for the worker to become Ready")
+	if err := waitForNodeReady(ctx, cluster, state.NodeName, timeout); err != nil {
+		return err
+	}
+	if token != nil {
+		if err := token.Delete(ctx); err != nil {
+			return err
+		}
+		token.client = nil
+	}
+	if err := a.Runtime.RemoveBootstrapIdentity(ctx, state.Runtime); err != nil {
+		return err
+	}
+	state.Phase = PhaseReady
+	if err := SaveState(statePath, *state); err != nil {
+		return err
+	}
+	if err := startMaintainer(ctx, statePath, a.Err); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s enrollment resumed and is Ready.\n", state.NodeName)
+	return nil
+}
+
+func (a *App) downloadKubelet(ctx context.Context, version string) (string, error) {
+	if a.DownloadKubelet != nil {
+		return a.DownloadKubelet(ctx, version)
+	}
+	return DownloadKubelet(ctx, version)
+}
+
+func (a *App) approveKubeletServingCSR(ctx context.Context, cluster *Cluster, nodeName, guestIP string, notBefore time.Time, wait bool, timeout time.Duration) error {
+	if a.ApproveKubeletServingCSR != nil {
+		return a.ApproveKubeletServingCSR(ctx, cluster, nodeName, guestIP, notBefore, wait, timeout)
+	}
+	return ApproveKubeletServingCSR(ctx, cluster.Client, nodeName, guestIP, notBefore, wait, timeout)
+}
+
+func durationSecondsCeil(duration time.Duration) int64 {
+	seconds := int64(duration / time.Second)
+	if duration%time.Second != 0 {
+		seconds++
+	}
+	return seconds
 }
 
 func (a *App) Stop(ctx context.Context, statePath string, localOnly bool) error {
@@ -429,7 +596,7 @@ func (a *App) Stop(ctx context.Context, statePath string, localOnly bool) error 
 	if err != nil {
 		return err
 	}
-	defer stateLock.Close()
+	defer func() { _ = stateLock.Close() }()
 	state, err := LoadState(resolvedPath)
 	if err != nil {
 		return err
@@ -442,7 +609,7 @@ func (a *App) Stop(ctx context.Context, statePath string, localOnly bool) error 
 		if err := stopMaintainer(resolvedPath); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Out, "\nIdleloom worker %s is stopped locally; the Kubernetes Node was not cordoned.\n", state.NodeName)
+		_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is stopped locally; the Kubernetes Node was not cordoned.\n", state.NodeName)
 		return nil
 	}
 	if err := a.Runtime.Validate(ctx, state.Runtime); err != nil {
@@ -487,7 +654,7 @@ func (a *App) Stop(ctx context.Context, statePath string, localOnly bool) error 
 	if err := stopMaintainer(resolvedPath); err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Out, "\nIdleloom worker %s is stopped and cordoned.\n", state.NodeName)
+	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is stopped and cordoned.\n", state.NodeName)
 	return nil
 }
 
@@ -500,7 +667,7 @@ func (a *App) Delete(ctx context.Context, statePath string, force, localOnly boo
 	if err != nil {
 		return err
 	}
-	defer stateLock.Close()
+	defer func() { _ = stateLock.Close() }()
 	state, err := LoadState(resolvedPath)
 	if err != nil {
 		return err
@@ -524,7 +691,7 @@ func (a *App) Delete(ctx context.Context, statePath string, force, localOnly boo
 		if err := SaveState(resolvedPath, state); err != nil {
 			return err
 		}
-		fmt.Fprintf(a.Out, "\nIdleloom worker %s was deleted locally; run delete again without --local-only when Kubernetes recovers.\n", state.NodeName)
+		_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s was deleted locally; run delete again without --local-only when Kubernetes recovers.\n", state.NodeName)
 		return nil
 	}
 	cluster, err := LoadCluster(ctx, state.KubeconfigPath, state.Context)
@@ -550,7 +717,7 @@ func (a *App) Delete(ctx context.Context, statePath string, force, localOnly boo
 		}
 	}
 	if state.NetworkLease != "" {
-		if err := ValidateRuntimeNetworkReservation(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime); err != nil && !(state.Phase == PhaseLocalGone && errors.Is(err, ErrRuntimeNetworkReservationNotFound)) {
+		if err := ValidateRuntimeNetworkReservation(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime); err != nil && (state.Phase != PhaseLocalGone || !errors.Is(err, ErrRuntimeNetworkReservationNotFound)) {
 			return err
 		}
 	}
@@ -625,7 +792,7 @@ func (a *App) Delete(ctx context.Context, statePath string, force, localOnly boo
 	if err := os.Remove(resolvedPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove Idleloom state %s: %w", resolvedPath, err)
 	}
-	fmt.Fprintf(a.Out, "\nIdleloom worker %s was deleted.\n", state.NodeName)
+	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s was deleted.\n", state.NodeName)
 	return nil
 }
 
@@ -817,16 +984,29 @@ func waitForWireKube(ctx context.Context, cluster *Cluster, nodeName string, tim
 }
 
 func poll(ctx context.Context, timeout time.Duration, check func() (bool, error), description string) error {
+	return pollWithInterval(ctx, timeout, 2*time.Second, check, description)
+}
+
+func pollWithInterval(ctx context.Context, timeout, interval time.Duration, check func() (bool, error), description string) error {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
-	ticker := time.NewTicker(2 * time.Second)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	unauthorizedRetries := 0
 	for {
 		ready, err := check()
 		if err != nil {
-			return fmt.Errorf("wait for %s: %w", description, err)
+			// Exec-based kubeconfigs can rotate credentials while a long enrollment
+			// is polling. Give the transport time to refresh an expired credential.
+			if apierrors.IsUnauthorized(err) && unauthorizedRetries < 15 {
+				unauthorizedRetries++
+			} else {
+				return fmt.Errorf("wait for %s: %w", description, err)
+			}
+		} else {
+			unauthorizedRetries = 0
 		}
-		if ready {
+		if err == nil && ready {
 			return nil
 		}
 		select {
@@ -841,7 +1021,7 @@ func poll(ctx context.Context, timeout time.Duration, check func() (bool, error)
 
 func (a *App) step(message string) {
 	a.StepIndex++
-	fmt.Fprintf(a.Out, "\n[%d] %s...\n", a.StepIndex, message)
+	_, _ = fmt.Fprintf(a.Out, "\n[%d] %s...\n", a.StepIndex, message)
 }
 
 func readyWord(ready bool) string {

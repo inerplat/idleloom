@@ -67,7 +67,7 @@ func TestRuntimeStatusDetectsLiveProcessEvenWhenReceiptIsStale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := WriteRuntimeStatus(directory, RuntimeStatus{
 		Version: RuntimeStatusVersion, InstanceID: lock.InstanceID, ProcessID: os.Getpid(),
 		PeerUID: state.PeerUID, ObservedAt: time.Now().Add(-time.Hour),

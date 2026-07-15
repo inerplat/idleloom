@@ -58,6 +58,10 @@ spec:
         kubernetes.io/os: linux
         idleloom-worker: "true"
         idleloom-accelerator: apple-vulkan
+      tolerations:
+      - key: idleloom-dedicated
+        operator: Exists
+        effect: NoSchedule
       securityContext:
         fsGroup: 65532
         seccompProfile:
@@ -67,7 +71,7 @@ spec:
         resourceClaimName: {{ quote .Name }}
       initContainers:
       - name: model-fetch
-        image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:6f1a66f0576550c5145cd240d1c4dc5ee4cc08d9492551bbfaf4202efd3a0d95
+        image: quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4
         imagePullPolicy: IfNotPresent
         command:
         - /bin/sh
@@ -101,12 +105,18 @@ spec:
           mountPath: /models
       containers:
       - name: inference
-        image: ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:6f1a66f0576550c5145cd240d1c4dc5ee4cc08d9492551bbfaf4202efd3a0d95
+        image: quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4
         imagePullPolicy: IfNotPresent
         command:
-        - /app/llama
-        - completion
+        - /bin/sh
+        - -ec
         args:
+        - |
+          devices="$(/usr/bin/llama-cli --list-devices 2>&1)"
+          printf '%s\n' "$devices"
+          printf '%s\n' "$devices" | grep -Eq 'Vulkan[0-9]+: Virtio-GPU Venus'
+          exec /usr/bin/llama-cli "$@"
+        - idleloom-llama
         - --model
         - /models/model.gguf
         - --prompt
@@ -118,9 +128,15 @@ spec:
         - --ctx-size
         - "2048"
         - --no-display-prompt
+        - --single-turn
+        - --simple-io
         env:
         - name: VK_ICD_FILENAMES
           value: /usr/share/vulkan/icd.d/virtio_icd.aarch64.json
+        - name: HOME
+          value: /tmp
+        - name: XDG_CACHE_HOME
+          value: /tmp/xdg-cache
         resources:
           requests:
             cpu: {{ quote (index .Values "cpu") }}
@@ -137,11 +153,18 @@ spec:
             drop:
             - ALL
           readOnlyRootFilesystem: true
+          runAsGroup: 65532
+          runAsNonRoot: true
+          runAsUser: 65532
         volumeMounts:
         - name: model
           mountPath: /models
           readOnly: true
+        - name: runtime-cache
+          mountPath: /tmp
       volumes:
       - name: model
         emptyDir:
           sizeLimit: {{ quote (index .Values "modelStorage") }}
+      - name: runtime-cache
+        emptyDir: {}

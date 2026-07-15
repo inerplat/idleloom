@@ -67,7 +67,7 @@ func readBundle(t *testing.T, path string) map[string][]byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	entries := make(map[string][]byte)
 	reader := tar.NewReader(file)
 	for {

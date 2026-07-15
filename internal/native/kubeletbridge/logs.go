@@ -66,7 +66,7 @@ func ReadLogSnapshot(path, assignment string, maximumBytes int, since time.Time,
 	if err != nil {
 		return nil, fmt.Errorf("open native container log: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -160,6 +160,12 @@ func (buffer *LogBuffer) Snapshot(assignment string, since time.Time, tailLines 
 	return buffer.snapshotLocked(assignment, since, tailLines)
 }
 
+func (buffer *LogBuffer) MatchesAssignment(assignment string) bool {
+	buffer.mu.RLock()
+	defer buffer.mu.RUnlock()
+	return assignment != "" && buffer.assignment == assignment
+}
+
 func (buffer *LogBuffer) SnapshotAndSubscribe(assignment string, since time.Time, tailLines int64) ([]LogEntry, uint64, <-chan struct{}, func()) {
 	notifications := make(chan struct{}, 1)
 	buffer.mu.Lock()
@@ -236,7 +242,7 @@ func (buffer *LogBuffer) load() error {
 	if err != nil {
 		return fmt.Errorf("open native container log: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return err
@@ -308,8 +314,7 @@ func (buffer *LogBuffer) appendDiskLocked(entry LogEntry) error {
 		return err
 	}
 	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return err
+		return joinErrors(err, file.Close())
 	}
 	_, writeErr := file.Write(data)
 	syncErr := file.Sync()

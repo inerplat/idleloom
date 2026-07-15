@@ -1,6 +1,6 @@
-FROM ghcr.io/ggml-org/llama.cpp:server-vulkan AS llama
+FROM ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:5c9c880045f1d6131aa7c90bf2695dbb3e9c9bf2e3f4513eb0672f1500318e02 AS llama
 
-FROM quay.io/ramalama/ramalama:latest
+FROM quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4
 
 COPY --from=llama /app /app
 

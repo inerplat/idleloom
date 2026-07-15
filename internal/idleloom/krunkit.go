@@ -131,7 +131,7 @@ func (k KrunkitRuntime) Create(ctx context.Context, state *RuntimeState) (err er
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { err = errors.Join(err, lock.Close()) }()
 	cleanup := true
 	defer func() {
 		if cleanup {
@@ -156,8 +156,7 @@ func (k KrunkitRuntime) Create(ctx context.Context, state *RuntimeState) (err er
 		return fmt.Errorf("create worker data disk: %w", err)
 	}
 	if err := dataDisk.Truncate(int64(state.DiskMB) * 1024 * 1024); err != nil {
-		dataDisk.Close()
-		return fmt.Errorf("size worker data disk: %w", err)
+		return errors.Join(fmt.Errorf("size worker data disk: %w", err), dataDisk.Close())
 	}
 	if err := dataDisk.Close(); err != nil {
 		return fmt.Errorf("close worker data disk: %w", err)
@@ -196,7 +195,7 @@ func (k KrunkitRuntime) Start(ctx context.Context, state *RuntimeState) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := validateRuntimeOwnership(*state); err != nil {
 		return err
 	}
@@ -227,7 +226,7 @@ func (k KrunkitRuntime) Validate(ctx context.Context, state RuntimeState) error 
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	return validateRuntimeOwnership(state)
 }
 
@@ -261,9 +260,9 @@ func (k KrunkitRuntime) startUnlocked(ctx context.Context, state *RuntimeState) 
 	command.Stdout = krunkitLog
 	command.Stderr = krunkitLog
 	if err := command.Start(); err != nil {
-		krunkitLog.Close()
+		closeErr := krunkitLog.Close()
 		cleanupErr := terminatePID(gvproxyPID, "gvproxy", 5*time.Second)
-		return errors.Join(fmt.Errorf("start krunkit: %w", err), cleanupErr)
+		return errors.Join(fmt.Errorf("start krunkit: %w", err), closeErr, cleanupErr)
 	}
 	krunkitPID := command.Process.Pid
 	_ = command.Process.Release()
@@ -306,8 +305,7 @@ func (k KrunkitRuntime) startGVProxy(ctx context.Context, state *RuntimeState) (
 		gvproxy.Stdout = gvproxyLog
 		gvproxy.Stderr = gvproxyLog
 		if err := gvproxy.Start(); err != nil {
-			gvproxyLog.Close()
-			return 0, fmt.Errorf("start gvproxy: %w", err)
+			return 0, errors.Join(fmt.Errorf("start gvproxy: %w", err), gvproxyLog.Close())
 		}
 		pid := gvproxy.Process.Pid
 		_ = gvproxy.Process.Release()
@@ -341,7 +339,7 @@ func (k KrunkitRuntime) Stop(ctx context.Context, state RuntimeState) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := validateRuntimeOwnership(state); err != nil {
 		return err
 	}
@@ -391,7 +389,7 @@ func (k KrunkitRuntime) Delete(ctx context.Context, state RuntimeState) error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := validateRuntimeOwnership(state); err != nil {
 		return err
 	}
@@ -448,7 +446,7 @@ func (k KrunkitRuntime) Status(ctx context.Context, state *RuntimeState) (Worker
 	if err != nil {
 		return WorkerStatus{}, err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := validateRuntimeOwnership(*state); err != nil {
 		return WorkerStatus{}, err
 	}
@@ -670,6 +668,11 @@ write_files:
       apt-get update
       apt-get install -y --no-install-recommends containerd containernetworking-plugins conntrack ebtables ethtool ipset iptables nfs-common open-iscsi socat
       apt-get clean
+      install -d -m 0755 /opt/cni/bin
+      for plugin in /usr/lib/cni/*; do
+        [ -f "$plugin" ] || continue
+        ln -sf "$plugin" "/opt/cni/bin/${plugin##*/}"
+      done
       install -d -m 0755 /etc/containerd
       containerd config default > /etc/containerd/config.toml
       sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
@@ -704,33 +707,29 @@ func downloadUbuntuImage(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("create Ubuntu image download: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, ubuntuImageBase+ubuntuImageName, nil)
 	if err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("create Ubuntu image request: %w", err)
+		return "", errors.Join(fmt.Errorf("create Ubuntu image request: %w", err), temporary.Close())
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("download Ubuntu image: %w", err)
+		return "", errors.Join(fmt.Errorf("download Ubuntu image: %w", err), temporary.Close())
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
-		temporary.Close()
-		return "", fmt.Errorf("download Ubuntu image: HTTP %s", response.Status)
+		return "", errors.Join(fmt.Errorf("download Ubuntu image: HTTP %s", response.Status), temporary.Close())
 	}
 	hash := sha256.New()
 	if _, err := io.Copy(io.MultiWriter(temporary, hash), response.Body); err != nil {
-		temporary.Close()
-		return "", fmt.Errorf("write Ubuntu image: %w", err)
+		return "", errors.Join(fmt.Errorf("write Ubuntu image: %w", err), temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return "", fmt.Errorf("close Ubuntu image: %w", err)
 	}
 	actual := hex.EncodeToString(hash.Sum(nil))
 	if actual != expected {
-		return "", fmt.Errorf("Ubuntu image checksum mismatch: expected %s, got %s", expected, actual)
+		return "", fmt.Errorf("ubuntu image checksum mismatch: expected %s, got %s", expected, actual)
 	}
 	if err := os.Chmod(temporaryPath, 0o600); err != nil {
 		return "", fmt.Errorf("protect Ubuntu image: %w", err)
@@ -750,7 +749,7 @@ func ubuntuImageChecksum(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("download Ubuntu checksums: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download Ubuntu checksums: HTTP %s", response.Status)
 	}
@@ -770,7 +769,7 @@ func ubuntuImageChecksum(ctx context.Context) (string, error) {
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("read Ubuntu checksums: %w", err)
 	}
-	return "", fmt.Errorf("Ubuntu checksums do not contain %s", ubuntuImageName)
+	return "", fmt.Errorf("ubuntu checksums do not contain %s", ubuntuImageName)
 }
 
 func cloneOrCopyFile(source, destination string, mode os.FileMode) error {
@@ -782,14 +781,13 @@ func cloneOrCopyFile(source, destination string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	defer input.Close()
+	defer func() { _ = input.Close() }()
 	output, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(output, input); err != nil {
-		output.Close()
-		return err
+		return errors.Join(err, output.Close())
 	}
 	return output.Close()
 }
@@ -1022,13 +1020,11 @@ func acquireRuntimeLock(ctx context.Context, state RuntimeState, create bool) (*
 			return &runtimeLock{file: file}, nil
 		}
 		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
-			file.Close()
-			return nil, fmt.Errorf("lock runtime directory: %w", err)
+			return nil, errors.Join(fmt.Errorf("lock runtime directory: %w", err), file.Close())
 		}
 		select {
 		case <-ctx.Done():
-			file.Close()
-			return nil, fmt.Errorf("wait for runtime lock: %w", ctx.Err())
+			return nil, errors.Join(fmt.Errorf("wait for runtime lock: %w", ctx.Err()), file.Close())
 		case <-ticker.C:
 		}
 	}
@@ -1051,8 +1047,8 @@ func availableTCPPort() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("allocate worker SSH port: %w", err)
 	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
+	port := listener.Addr().(*net.TCPAddr).Port
+	return port, listener.Close()
 }
 
 func tcpPortAvailable(port int) bool {
@@ -1199,7 +1195,7 @@ func requestVMStop(ctx context.Context, socketPath string) error {
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return fmt.Errorf("krunkit stop returned HTTP %s", response.Status)
 	}

@@ -2,6 +2,9 @@ apiVersion: resource.k8s.io/v1
 kind: ResourceClaim
 metadata:
   name: apple-vulkan-smoke
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/example: vulkan-dra-smoke
 spec:
   devices:
     requests:

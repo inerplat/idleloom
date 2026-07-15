@@ -92,7 +92,7 @@ func Start(ctx context.Context, config ProcessConfig) (*Process, error) {
 		return nil, err
 	}
 	python := filepath.Join(config.Layout.Venv, "bin", "python")
-	cmd := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, python, "-I", config.Layout.Runner, config.Layout.Model, config.Nonce)
+	cmd := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, python, "-I", "-B", config.Layout.Runner, config.Layout.Model, config.Nonce)
 	cmd.Dir = config.Layout.Work
 	cmd.Env = runnerEnv(config.Layout.Work)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -139,14 +139,12 @@ func Start(ctx context.Context, config ProcessConfig) (*Process, error) {
 	select {
 	case response, ok := <-process.responses:
 		if !ok || response.Type != "ready" {
-			process.Stop()
-			return nil, fmt.Errorf("MLX runner did not report readiness: %s", process.Stderr())
+			return nil, errors.Join(fmt.Errorf("the MLX runner did not report readiness: %s", process.Stderr()), process.Stop())
 		}
 	case <-process.done:
-		return nil, fmt.Errorf("MLX runner exited before readiness: %w: %s", process.WaitError(), process.Stderr())
+		return nil, fmt.Errorf("the MLX runner exited before readiness: %w: %s", process.WaitError(), process.Stderr())
 	case <-readyCtx.Done():
-		process.Stop()
-		return nil, fmt.Errorf("wait for MLX runner readiness: %w", readyCtx.Err())
+		return nil, errors.Join(fmt.Errorf("wait for MLX runner readiness: %w", readyCtx.Err()), process.Stop())
 	}
 	return process, nil
 }
@@ -175,25 +173,22 @@ func (p *Process) Generate(ctx context.Context, request GenerateRequest) (Genera
 	select {
 	case response, ok := <-p.responses:
 		if !ok {
-			return GenerateResponse{}, fmt.Errorf("MLX runner output closed: %s", p.Stderr())
+			return GenerateResponse{}, fmt.Errorf("the MLX runner output closed: %s", p.Stderr())
 		}
 		if response.ID != id {
-			p.Stop()
-			return GenerateResponse{}, fmt.Errorf("MLX runner returned an unexpected request identity")
+			return GenerateResponse{}, errors.Join(fmt.Errorf("the MLX runner returned an unexpected request identity"), p.Stop())
 		}
 		if response.Type == "error" {
 			return GenerateResponse{}, errors.New(response.Error)
 		}
 		if response.Type != "result" || len([]byte(response.Text)) > 1<<20 {
-			p.Stop()
-			return GenerateResponse{}, fmt.Errorf("MLX runner returned an invalid response")
+			return GenerateResponse{}, errors.Join(fmt.Errorf("the MLX runner returned an invalid response"), p.Stop())
 		}
 		return GenerateResponse{Text: response.Text, ElapsedMillis: response.ElapsedMillis}, nil
 	case <-p.done:
-		return GenerateResponse{}, fmt.Errorf("MLX runner exited: %w: %s", p.WaitError(), p.Stderr())
+		return GenerateResponse{}, fmt.Errorf("the MLX runner exited: %w: %s", p.WaitError(), p.Stderr())
 	case <-ctx.Done():
-		p.Stop()
-		return GenerateResponse{}, ctx.Err()
+		return GenerateResponse{}, errors.Join(ctx.Err(), p.Stop())
 	}
 }
 
@@ -238,12 +233,29 @@ func (p *Process) stopLocked() error {
 	select {
 	case <-p.done:
 	case <-timer.C:
-		return fmt.Errorf("MLX runner process group did not exit within 10 seconds")
+		return fmt.Errorf("the MLX runner process group did not exit within 10 seconds")
 	}
-	if err := unix.Kill(-pid, 0); err == nil || !errors.Is(err, unix.ESRCH) {
-		return fmt.Errorf("MLX runner process group %d is still alive", pid)
+	if err := waitProcessGroupGone(pid, time.Second); err != nil {
+		return fmt.Errorf("the MLX runner %w", err)
 	}
 	return nil
+}
+
+func waitProcessGroupGone(pid int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		err := unix.Kill(-pid, 0)
+		if errors.Is(err, unix.ESRCH) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, unix.EPERM) {
+			return fmt.Errorf("inspect process group %d: %w", pid, err)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("process group %d is still alive", pid)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (p *Process) WaitError() error {
@@ -271,13 +283,13 @@ func (p *Process) readResponses(reader io.Reader) {
 		decoder := json.NewDecoder(strings.NewReader(scanner.Text()))
 		decoder.DisallowUnknownFields()
 		if err := decoder.Decode(&response); err != nil {
-			p.stderr.Write([]byte("invalid runner response: " + err.Error()))
+			_, _ = p.stderr.Write([]byte("invalid runner response: " + err.Error()))
 			return
 		}
 		p.responses <- response
 	}
 	if err := scanner.Err(); err != nil {
-		p.stderr.Write([]byte("runner output: " + err.Error()))
+		_, _ = p.stderr.Write([]byte("runner output: " + err.Error()))
 	}
 }
 
@@ -380,7 +392,7 @@ func metalCompilerCaches() ([]string, error) {
 	}
 	root := strings.TrimSpace(string(output))
 	if !filepath.IsAbs(root) {
-		return nil, fmt.Errorf("Darwin user cache is not absolute")
+		return nil, fmt.Errorf("the Darwin user cache is not absolute")
 	}
 	pythonCache := filepath.Join(root, "org.python.python")
 	return []string{
@@ -435,13 +447,19 @@ func (b *boundedBuffer) Write(data []byte) (int, error) {
 	written := len(data)
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	remaining := b.limit - len(b.data)
-	if remaining > 0 {
-		if len(data) > remaining {
-			data = data[:remaining]
-		}
-		b.data = append(b.data, data...)
+	if b.limit <= 0 {
+		return written, nil
 	}
+	if len(data) >= b.limit {
+		b.data = append(b.data[:0], data[len(data)-b.limit:]...)
+		return written, nil
+	}
+	overflow := len(b.data) + len(data) - b.limit
+	if overflow > 0 {
+		copy(b.data, b.data[overflow:])
+		b.data = b.data[:len(b.data)-overflow]
+	}
+	b.data = append(b.data, data...)
 	return written, nil
 }
 

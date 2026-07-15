@@ -21,22 +21,31 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const (
-	receiptVersion = 2
-	venvMarkerV3   = "sealed-v3-no-bytecode"
+	receiptVersion        = 2
+	runtimeReceiptVersion = 1
+	venvMarkerV3          = "sealed-v3-no-bytecode"
 )
 
 type Layout struct {
-	Root       string
-	Wheelhouse string
-	Venv       string
-	Model      string
-	Work       string
-	Runner     string
-	Receipt    string
+	Root           string
+	Wheelhouse     string
+	Venv           string
+	Model          string
+	Work           string
+	Runner         string
+	Receipt        string
+	RuntimeReceipt string
+}
+
+type RuntimeReceipt struct {
+	Version           int    `json:"version"`
+	RuntimeLockDigest string `json:"runtimeLockDigest"`
+	RuntimeVersion    string `json:"runtimeVersion"`
 }
 
 type Receipt struct {
@@ -59,61 +68,44 @@ type Preparer struct {
 	Progress   func(string)
 }
 
+var mlxPlatformCheck struct {
+	once sync.Once
+	err  error
+}
+
 func DefaultRoot() string {
 	return filepath.Join(string(filepath.Separator), "var", "tmp", "idleloom")
 }
 
 func NewLayout(root string) Layout {
 	return Layout{
-		Root:       root,
-		Wheelhouse: filepath.Join(root, "wheelhouse"),
-		Venv:       filepath.Join(root, "runtime", "venv"),
-		Model:      filepath.Join(root, "models", "qwen3.5-0.8b-4bit"),
-		Work:       filepath.Join(root, "work"),
-		Runner:     filepath.Join(root, "runtime", "runner.py"),
-		Receipt:    filepath.Join(root, "receipt.json"),
+		Root:           root,
+		Wheelhouse:     filepath.Join(root, "wheelhouse"),
+		Venv:           filepath.Join(root, "runtime", "venv"),
+		Model:          filepath.Join(root, "models", "qwen3.5-0.8b-4bit"),
+		Work:           filepath.Join(root, "work"),
+		Runner:         filepath.Join(root, "runtime", "runner.py"),
+		Receipt:        filepath.Join(root, "receipt.json"),
+		RuntimeReceipt: filepath.Join(root, "runtime", "receipt.json"),
 	}
 }
 
 func (p Preparer) Prepare(ctx context.Context) (Receipt, error) {
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return Receipt{}, fmt.Errorf("native development runtime requires macOS on Apple Silicon")
-	}
-	root := p.Root
-	if root == "" {
-		root = DefaultRoot()
-	}
-	python := p.Python
-	if python == "" {
-		python = "python3"
-	}
-	layout := NewLayout(root)
-	for _, dir := range []string{layout.Root, layout.Wheelhouse, filepath.Dir(layout.Venv), layout.Model, layout.Work} {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return Receipt{}, fmt.Errorf("create development runtime directory: %w", err)
-		}
-		if err := os.Chmod(dir, 0o700); err != nil {
-			return Receipt{}, fmt.Errorf("restrict development runtime directory: %w", err)
-		}
-	}
-
-	runtimeFiles, runtimeDigest, err := RuntimeLock()
+	runtimeReceipt, err := p.PrepareRuntime(ctx)
 	if err != nil {
 		return Receipt{}, err
 	}
+	layout := NewLayout(p.root())
 	modelFiles, modelDigest, err := ModelLock()
 	if err != nil {
 		return Receipt{}, err
 	}
-	client := p.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Minute}
+	client := p.client()
+	if err := os.MkdirAll(layout.Model, 0o700); err != nil {
+		return Receipt{}, fmt.Errorf("create development model directory: %w", err)
 	}
-	for _, file := range runtimeFiles {
-		p.progress("runtime " + file.Package + "==" + file.Version)
-		if err := ensureDownload(ctx, client, file.URL, filepath.Join(layout.Wheelhouse, file.Name), 1<<30, file.SHA256, 0); err != nil {
-			return Receipt{}, err
-		}
+	if err := os.Chmod(layout.Model, 0o700); err != nil {
+		return Receipt{}, fmt.Errorf("restrict development model directory: %w", err)
 	}
 	for _, file := range modelFiles {
 		p.progress("model " + file.Path)
@@ -121,10 +113,6 @@ func (p Preparer) Prepare(ctx context.Context) (Receipt, error) {
 		if err := ensureDownload(ctx, client, url, filepath.Join(layout.Model, file.Path), file.Size, file.SHA256, file.Size); err != nil {
 			return Receipt{}, err
 		}
-	}
-
-	if err := p.prepareVenv(ctx, python, layout, runtimeDigest); err != nil {
-		return Receipt{}, err
 	}
 	runner, err := RunnerSource()
 	if err != nil {
@@ -139,10 +127,10 @@ func (p Preparer) Prepare(ctx context.Context) (Receipt, error) {
 		DevelopmentOnly:   true,
 		ArtifactIdentity:  descriptor.ArtifactIdentity,
 		ManifestDigest:    descriptor.ManifestDigest,
-		RuntimeLockDigest: "sha256:" + runtimeDigest,
+		RuntimeLockDigest: runtimeReceipt.RuntimeLockDigest,
 		ModelRepository:   ModelRepository,
 		ModelRevision:     ModelRevision,
-		RuntimeVersion:    RuntimeVersion,
+		RuntimeVersion:    runtimeReceipt.RuntimeVersion,
 		RunnerDigest:      "sha256:" + digest(runner),
 		ModelFiles:        modelFiles,
 	}
@@ -150,24 +138,159 @@ func (p Preparer) Prepare(ctx context.Context) (Receipt, error) {
 	if err != nil {
 		return Receipt{}, err
 	}
-	data = append(data, '\n')
-	if err := atomicWrite(layout.Receipt, data, 0o600); err != nil {
+	if err := atomicWrite(layout.Receipt, append(data, '\n'), 0o600); err != nil {
 		return Receipt{}, fmt.Errorf("write development receipt: %w", err)
 	}
 	return receipt, nil
 }
 
-func (p Preparer) prepareVenv(ctx context.Context, python string, layout Layout, runtimeDigest string) error {
+func (p Preparer) PrepareRuntime(ctx context.Context) (RuntimeReceipt, error) {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		return RuntimeReceipt{}, fmt.Errorf("native development runtime requires macOS on Apple Silicon")
+	}
+	if err := CheckMLXPlatform(); err != nil {
+		return RuntimeReceipt{}, err
+	}
+	root := p.root()
+	python, err := FindPython312(p.Python)
+	if err != nil {
+		return RuntimeReceipt{}, err
+	}
+	layout := NewLayout(root)
+	for _, dir := range []string{layout.Root, layout.Wheelhouse, filepath.Dir(layout.Venv), layout.Work} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return RuntimeReceipt{}, fmt.Errorf("create development runtime directory: %w", err)
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return RuntimeReceipt{}, fmt.Errorf("restrict development runtime directory: %w", err)
+		}
+	}
+
+	runtimeFiles, runtimeDigest, err := RuntimeLock()
+	if err != nil {
+		return RuntimeReceipt{}, err
+	}
+	client := p.client()
+	for _, file := range runtimeFiles {
+		p.progress("runtime " + file.Package + "==" + file.Version)
+		if err := ensureDownload(ctx, client, file.URL, filepath.Join(layout.Wheelhouse, file.Name), 1<<30, file.SHA256, 0); err != nil {
+			return RuntimeReceipt{}, err
+		}
+	}
+
+	if err := p.prepareVenv(ctx, python, layout, runtimeDigest, runtimeFiles); err != nil {
+		return RuntimeReceipt{}, err
+	}
+	receipt := RuntimeReceipt{
+		Version:           runtimeReceiptVersion,
+		RuntimeLockDigest: "sha256:" + runtimeDigest,
+		RuntimeVersion:    RuntimeVersion,
+	}
+	data, err := json.MarshalIndent(receipt, "", "  ")
+	if err != nil {
+		return RuntimeReceipt{}, err
+	}
+	if err := atomicWrite(layout.RuntimeReceipt, append(data, '\n'), 0o600); err != nil {
+		return RuntimeReceipt{}, fmt.Errorf("write runtime receipt: %w", err)
+	}
+	return receipt, nil
+}
+
+func CheckMLXPlatform() error {
+	mlxPlatformCheck.once.Do(func() {
+		mlxPlatformCheck.err = checkMLXPlatform()
+	})
+	return mlxPlatformCheck.err
+}
+
+func checkMLXPlatform() error {
+	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
+		return fmt.Errorf("locked MLX runtime requires macOS on Apple Silicon")
+	}
+	output, err := exec.Command("/usr/bin/sw_vers", "-productVersion").Output()
+	if err != nil {
+		return fmt.Errorf("read macOS product version: %w", err)
+	}
+	version := strings.TrimSpace(string(output))
+	if !mlxPlatformVersionSupported(version) {
+		return fmt.Errorf("locked MLX 0.32 runtime requires macOS 26 or later; found %q", version)
+	}
+	return nil
+}
+
+func mlxPlatformVersionSupported(version string) bool {
+	majorText, _, _ := strings.Cut(version, ".")
+	major, err := strconv.Atoi(majorText)
+	return err == nil && major >= 26
+}
+
+func FindPython312(explicit string) (string, error) {
+	candidates := []string{explicit}
+	if explicit == "" {
+		candidates = []string{"python3.12", "python3"}
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	var detected []string
+	for _, candidate := range candidates {
+		if candidate == "" {
+			continue
+		}
+		path, err := exec.LookPath(candidate)
+		if err != nil {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		command := exec.Command(path, "-I", "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+		command.Env = offlineEnv()
+		output, err := command.Output()
+		if err != nil {
+			detected = append(detected, filepath.Base(path)+" (unusable)")
+			continue
+		}
+		version := strings.TrimSpace(string(output))
+		if version == "3.12" {
+			return path, nil
+		}
+		detected = append(detected, filepath.Base(path)+" "+version)
+	}
+	if len(detected) > 0 {
+		return "", fmt.Errorf("locked MLX runtime requires Python 3.12; found %s", strings.Join(detected, ", "))
+	}
+	return "", fmt.Errorf("locked MLX runtime requires Python 3.12; install python@3.12 and restart the Native agent")
+}
+
+func (p Preparer) root() string {
+	if p.Root != "" {
+		return p.Root
+	}
+	return DefaultRoot()
+}
+
+func (p Preparer) client() *http.Client {
+	if p.HTTPClient != nil {
+		return p.HTTPClient
+	}
+	return &http.Client{Timeout: 30 * time.Minute}
+}
+
+func (p Preparer) prepareVenv(ctx context.Context, python string, layout Layout, runtimeDigest string, runtimeFiles []RuntimeFile) error {
 	marker := filepath.Join(layout.Venv, ".idleloom-runtime-lock")
 	expectedMarker := runtimeDigest + ":" + venvMarkerV3
 	if data, err := os.ReadFile(marker); err == nil && strings.TrimSpace(string(data)) == expectedMarker {
-		return nil
+		if err := verifyInstalledPackages(layout, runtimeFiles); err == nil {
+			if err := verifyInstalledRuntime(layout, runtimeFiles); err == nil {
+				return nil
+			}
+		}
 	}
 	tmp := layout.Venv + ".tmp"
 	if err := os.RemoveAll(tmp); err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
+	defer func() { _ = os.RemoveAll(tmp) }()
 	cmd := exec.CommandContext(ctx, python, "-m", "venv", tmp)
 	cmd.Env = offlineEnv()
 	if output, err := cmd.CombinedOutput(); err != nil {
@@ -210,7 +333,18 @@ func VerifyFast(layout Layout) (Receipt, error) {
 	return verify(layout, false)
 }
 
+func VerifyRuntime(layout Layout) (RuntimeReceipt, error) {
+	return verifyRuntime(layout, true)
+}
+
+func VerifyRuntimeFast(layout Layout) (RuntimeReceipt, error) {
+	return verifyRuntime(layout, false)
+}
+
 func verify(layout Layout, strong bool) (Receipt, error) {
+	if _, err := verifyRuntime(layout, strong); err != nil {
+		return Receipt{}, err
+	}
 	data, err := os.ReadFile(layout.Receipt)
 	if err != nil {
 		return Receipt{}, fmt.Errorf("read development receipt: %w", err)
@@ -221,7 +355,7 @@ func verify(layout Layout, strong bool) (Receipt, error) {
 	if err := decoder.Decode(&receipt); err != nil {
 		return Receipt{}, fmt.Errorf("decode development receipt: %w", err)
 	}
-	runtimeFiles, runtimeDigest, err := RuntimeLock()
+	_, runtimeDigest, err := RuntimeLock()
 	if err != nil {
 		return Receipt{}, err
 	}
@@ -239,18 +373,6 @@ func verify(layout Layout, strong bool) (Receipt, error) {
 	if err := verifyFile(layout.Runner, digest(runner), int64(len(runner))); err != nil {
 		return Receipt{}, fmt.Errorf("verify embedded runner: %w", err)
 	}
-	marker, err := os.ReadFile(filepath.Join(layout.Venv, ".idleloom-runtime-lock"))
-	if err != nil || strings.TrimSpace(string(marker)) != runtimeDigest+":"+venvMarkerV3 {
-		return Receipt{}, fmt.Errorf("Python environment lock marker does not match this binary")
-	}
-	if err := verifyInstalledPackages(layout, runtimeFiles); err != nil {
-		return Receipt{}, err
-	}
-	if strong {
-		if err := verifyInstalledRuntime(layout, runtimeFiles); err != nil {
-			return Receipt{}, err
-		}
-	}
 	for _, file := range files {
 		path := filepath.Join(layout.Model, file.Path)
 		var err error
@@ -263,8 +385,44 @@ func verify(layout Layout, strong bool) (Receipt, error) {
 			return Receipt{}, err
 		}
 	}
+	return receipt, nil
+}
+
+func verifyRuntime(layout Layout, strong bool) (RuntimeReceipt, error) {
+	if err := CheckMLXPlatform(); err != nil {
+		return RuntimeReceipt{}, err
+	}
+	data, err := os.ReadFile(layout.RuntimeReceipt)
+	if err != nil {
+		return RuntimeReceipt{}, fmt.Errorf("read runtime receipt: %w", err)
+	}
+	var receipt RuntimeReceipt
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&receipt); err != nil {
+		return RuntimeReceipt{}, fmt.Errorf("decode runtime receipt: %w", err)
+	}
+	runtimeFiles, runtimeDigest, err := RuntimeLock()
+	if err != nil {
+		return RuntimeReceipt{}, err
+	}
+	if receipt.Version != runtimeReceiptVersion || receipt.RuntimeLockDigest != "sha256:"+runtimeDigest || receipt.RuntimeVersion != RuntimeVersion {
+		return RuntimeReceipt{}, fmt.Errorf("runtime receipt does not match this binary")
+	}
+	marker, err := os.ReadFile(filepath.Join(layout.Venv, ".idleloom-runtime-lock"))
+	if err != nil || strings.TrimSpace(string(marker)) != runtimeDigest+":"+venvMarkerV3 {
+		return RuntimeReceipt{}, fmt.Errorf("the Python environment lock marker does not match this binary")
+	}
+	if err := verifyInstalledPackages(layout, runtimeFiles); err != nil {
+		return RuntimeReceipt{}, err
+	}
+	if strong {
+		if err := verifyInstalledRuntime(layout, runtimeFiles); err != nil {
+			return RuntimeReceipt{}, err
+		}
+	}
 	if _, err := os.Stat(filepath.Join(layout.Venv, "bin", "python")); err != nil {
-		return Receipt{}, fmt.Errorf("verify Python environment: %w", err)
+		return RuntimeReceipt{}, fmt.Errorf("verify Python environment: %w", err)
 	}
 	return receipt, nil
 }
@@ -283,7 +441,7 @@ func verifyRegularFile(name string, expectedSize int64) error {
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() || info.Size() != expectedSize {
+	if err := validateLockedRegularInfo(name, info, expectedSize); err != nil {
 		return fmt.Errorf("%s does not match the locked regular file shape", filepath.Base(name))
 	}
 	return nil
@@ -343,9 +501,9 @@ func verifyInstalledRuntime(layout Layout, expected []RuntimeFile) error {
 		if err != nil {
 			return fmt.Errorf("open locked wheel %s: %w", locked.Name, err)
 		}
-		err = verifyWheelInstallation(sitePackages, wheel.File, allowed)
-		wheel.Close()
-		if err != nil {
+		verifyErr := verifyWheelInstallation(sitePackages, wheel.File, allowed)
+		closeErr := wheel.Close()
+		if err := errors.Join(verifyErr, closeErr); err != nil {
 			return fmt.Errorf("verify installed wheel %s: %w", locked.Name, err)
 		}
 	}
@@ -388,7 +546,7 @@ func verifyWheelInstallation(sitePackages string, files []*zip.File, allowed map
 	if err != nil {
 		return err
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 	rows := csv.NewReader(io.LimitReader(reader, 16<<20))
 	for {
 		row, err := rows.Read()
@@ -479,20 +637,15 @@ func removeBytecodeCaches(root string) error {
 }
 
 func verifyDigestOnly(name, expectedDigest string) error {
-	info, err := os.Lstat(name)
+	file, before, err := openLockedRegular(name, 0)
 	if err != nil {
 		return err
 	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", filepath.Base(name))
-	}
-	file, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	_, copyErr := io.Copy(hash, file)
+	stableErr := verifyStableLockedFile(name, file, before, 0)
+	closeErr := file.Close()
+	if err := errors.Join(copyErr, stableErr, closeErr); err != nil {
 		return err
 	}
 	if actual := hex.EncodeToString(hash.Sum(nil)); actual != expectedDigest {
@@ -523,8 +676,8 @@ func ensureDownload(ctx context.Context, client *http.Client, url, destination s
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	defer tmp.Close()
+	defer func() { _ = os.Remove(tmpName) }()
+	defer func() { _ = tmp.Close() }()
 	if err := tmp.Chmod(0o600); err != nil {
 		return err
 	}
@@ -536,7 +689,7 @@ func ensureDownload(ctx context.Context, client *http.Client, url, destination s
 	if err != nil {
 		return fmt.Errorf("download %s: %w", filepath.Base(destination), err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("download %s: unexpected HTTP status %s", filepath.Base(destination), response.Status)
 	}
@@ -564,26 +717,118 @@ func ensureDownload(ctx context.Context, client *http.Client, url, destination s
 }
 
 func verifyFile(name, expectedDigest string, expectedSize int64) error {
-	file, err := os.Open(name)
+	file, before, err := openLockedRegular(name, expectedSize)
 	if err != nil {
 		return err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() || (expectedSize > 0 && info.Size() != expectedSize) {
-		return fmt.Errorf("%s does not match the locked regular file", filepath.Base(name))
 	}
 	hash := sha256.New()
-	if _, err := io.Copy(hash, file); err != nil {
+	_, copyErr := io.Copy(hash, file)
+	stableErr := verifyStableLockedFile(name, file, before, expectedSize)
+	closeErr := file.Close()
+	if err := errors.Join(copyErr, stableErr, closeErr); err != nil {
 		return err
 	}
 	if hex.EncodeToString(hash.Sum(nil)) != expectedDigest {
 		return fmt.Errorf("%s SHA-256 mismatch", filepath.Base(name))
 	}
 	return nil
+}
+
+func openLockedRegular(name string, expectedSize int64) (*os.File, os.FileInfo, error) {
+	before, err := os.Lstat(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := validateLockedRegularInfo(name, before, expectedSize); err != nil {
+		return nil, nil, err
+	}
+	file, err := os.Open(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	if !os.SameFile(before, opened) || !sameLockedMetadata(before, opened) {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("%s changed while it was opened", filepath.Base(name))
+	}
+	if err := validateLockedRegularInfo(name, opened, expectedSize); err != nil {
+		_ = file.Close()
+		return nil, nil, err
+	}
+	return file, before, nil
+}
+
+func verifyStableLockedFile(name string, file *os.File, before os.FileInfo, expectedSize int64) error {
+	opened, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	after, err := os.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if err := validateLockedRegularInfo(name, opened, expectedSize); err != nil {
+		return err
+	}
+	if err := validateLockedRegularInfo(name, after, expectedSize); err != nil {
+		return err
+	}
+	if !os.SameFile(before, opened) || !os.SameFile(opened, after) ||
+		!sameLockedMetadata(before, opened) || !sameLockedMetadata(opened, after) {
+		return fmt.Errorf("%s changed during verification", filepath.Base(name))
+	}
+	return nil
+}
+
+func validateLockedRegularInfo(name string, info os.FileInfo, expectedSize int64) error {
+	if info == nil || !info.Mode().IsRegular() || expectedSize > 0 && info.Size() != expectedSize {
+		return fmt.Errorf("%s does not match the locked regular file", filepath.Base(name))
+	}
+	links, ok := fileLinkCount(info)
+	if !ok || links != 1 {
+		return fmt.Errorf("%s must have exactly one filesystem link", filepath.Base(name))
+	}
+	return nil
+}
+
+func fileLinkCount(info os.FileInfo) (uint64, bool) {
+	if info == nil {
+		return 0, false
+	}
+	value := reflect.ValueOf(info.Sys())
+	if !value.IsValid() {
+		return 0, false
+	}
+	if value.Kind() == reflect.Pointer {
+		if value.IsNil() {
+			return 0, false
+		}
+		value = value.Elem()
+	}
+	if value.Kind() != reflect.Struct {
+		return 0, false
+	}
+	field := value.FieldByName("Nlink")
+	if !field.IsValid() {
+		return 0, false
+	}
+	switch field.Kind() {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return field.Uint(), true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		count := field.Int()
+		return uint64(count), count >= 0
+	default:
+		return 0, false
+	}
+}
+
+func sameLockedMetadata(left, right os.FileInfo) bool {
+	return left.Mode() == right.Mode() && left.Size() == right.Size() && left.ModTime().Equal(right.ModTime())
 }
 
 func atomicWrite(name string, data []byte, mode os.FileMode) error {
@@ -595,18 +840,15 @@ func atomicWrite(name string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Close(); err != nil {
 		return err

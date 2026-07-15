@@ -40,7 +40,7 @@ var ServicesGVR = schema.GroupVersionResource{Version: "v1", Resource: "services
 func relayDialTarget(ctx context.Context, client dynamic.Interface, mesh *unstructured.Unstructured) (string, string, error) {
 	provider, _, _ := unstructured.NestedString(mesh.Object, "spec", "relay", "provider")
 	if provider == "" {
-		return "", "", fmt.Errorf("WireKube relay provider is not configured")
+		return "", "", fmt.Errorf("the WireKube relay provider is not configured")
 	}
 	transport, _, _ := unstructured.NestedString(mesh.Object, "spec", "relay", provider, "transport")
 	if transport == "" {
@@ -51,11 +51,11 @@ func relayDialTarget(ctx context.Context, client dynamic.Interface, mesh *unstru
 		endpoint, _, _ := unstructured.NestedString(mesh.Object, "spec", "relay", provider, "controlEndpoint")
 		parsed, err := url.Parse(endpoint)
 		if err != nil || parsed.Scheme != "wss" || parsed.Host == "" {
-			return "", "", fmt.Errorf("WireKube %s relay requires a public wss:// controlEndpoint", provider)
+			return "", "", fmt.Errorf("the WireKube %s relay requires a public wss:// controlEndpoint", provider)
 		}
 		return transport, endpoint, nil
 	case "ws":
-		return "", "", fmt.Errorf("WireKube ws relay transport is insecure; configure wss")
+		return "", "", fmt.Errorf("the WireKube ws relay transport is insecure; configure wss")
 	case "tcp":
 		if provider == "external" {
 			endpoint, _, _ := unstructured.NestedString(mesh.Object, "spec", "relay", "external", "controlEndpoint")
@@ -63,7 +63,7 @@ func relayDialTarget(ctx context.Context, client dynamic.Interface, mesh *unstru
 				endpoint, _, _ = unstructured.NestedString(mesh.Object, "spec", "relay", "external", "endpoint")
 			}
 			if _, _, err := net.SplitHostPort(endpoint); err != nil {
-				return "", "", fmt.Errorf("WireKube external TCP relay endpoint %q is invalid: %w", endpoint, err)
+				return "", "", fmt.Errorf("the WireKube external TCP relay endpoint %q is invalid: %w", endpoint, err)
 			}
 			return transport, endpoint, nil
 		}
@@ -73,7 +73,7 @@ func relayDialTarget(ctx context.Context, client dynamic.Interface, mesh *unstru
 		}
 		return transport, endpoint, nil
 	default:
-		return "", "", fmt.Errorf("WireKube relay transport %q is unsupported", transport)
+		return "", "", fmt.Errorf("the WireKube relay transport %q is unsupported", transport)
 	}
 }
 
@@ -89,7 +89,7 @@ func managedRelayLoadBalancer(ctx context.Context, client dynamic.Interface) (st
 		}
 		serviceType, _, _ := unstructured.NestedString(service.Object, "spec", "type")
 		if serviceType != string(corev1.ServiceTypeLoadBalancer) {
-			return "", fmt.Errorf("WireKube managed TCP relay Service %s/%s is %s; configure a public WSS control endpoint or a LoadBalancer", service.GetNamespace(), service.GetName(), serviceType)
+			return "", fmt.Errorf("the WireKube managed TCP relay Service %s/%s is %s; configure a public WSS control endpoint or a LoadBalancer", service.GetNamespace(), service.GetName(), serviceType)
 		}
 		port, err := relayServicePort(service)
 		if err != nil {
@@ -109,9 +109,9 @@ func managedRelayLoadBalancer(ctx context.Context, client dynamic.Interface) (st
 				return net.JoinHostPort(host, fmt.Sprint(port)), nil
 			}
 		}
-		return "", fmt.Errorf("WireKube managed TCP relay LoadBalancer %s/%s has no public address yet", service.GetNamespace(), service.GetName())
+		return "", fmt.Errorf("the WireKube managed TCP relay LoadBalancer %s/%s has no public address yet", service.GetNamespace(), service.GetName())
 	}
-	return "", fmt.Errorf("WireKube managed TCP relay Service was not found; configure a public WSS control endpoint")
+	return "", fmt.Errorf("the WireKube managed TCP relay Service was not found; configure a public WSS control endpoint")
 }
 
 func relayServicePort(service *unstructured.Unstructured) (int64, error) {
@@ -128,7 +128,7 @@ func relayServicePort(service *unstructured.Unstructured) (int64, error) {
 			return value, nil
 		}
 	}
-	return 0, fmt.Errorf("WireKube relay Service %s/%s has no TCP relay port", service.GetNamespace(), service.GetName())
+	return 0, fmt.Errorf("the WireKube relay Service %s/%s has no TCP relay port", service.GetNamespace(), service.GetName())
 }
 
 func relayTokenAudience(transport string) string {
@@ -188,15 +188,15 @@ func ensureWireKubePeer(ctx context.Context, client dynamic.Interface, desired *
 
 func validateOwnedWireKubePeer(existing, desired *unstructured.Unstructured, state State) error {
 	if !hasOwnedPeerMetadata(existing, state) {
-		return fmt.Errorf("WireKubePeer/%s is not owned by this enrollment", existing.GetName())
+		return fmt.Errorf("the WireKubePeer/%s is not owned by this enrollment", existing.GetName())
 	}
 	if state.PeerUID != "" && existing.GetUID() != state.PeerUID {
-		return fmt.Errorf("WireKubePeer/%s identity changed", existing.GetName())
+		return fmt.Errorf("the WireKubePeer/%s identity changed", existing.GetName())
 	}
 	existingSpec, _, _ := unstructured.NestedMap(existing.Object, "spec")
 	desiredSpec, _, _ := unstructured.NestedMap(desired.Object, "spec")
 	if !reflect.DeepEqual(existingSpec, desiredSpec) {
-		return fmt.Errorf("WireKubePeer/%s does not match the enrolled key and route contract", existing.GetName())
+		return fmt.Errorf("the WireKubePeer/%s does not match the enrolled key and route contract", existing.GetName())
 	}
 	return nil
 }
@@ -207,7 +207,7 @@ func refreshWireKubePeerState(ctx context.Context, client dynamic.Interface, dir
 		return State{}, fmt.Errorf("get WireKubePeer/%s: %w", state.PeerName, err)
 	}
 	if peer.GetUID() != state.PeerUID {
-		return State{}, fmt.Errorf("WireKubePeer/%s identity changed", state.PeerName)
+		return State{}, fmt.Errorf("the WireKubePeer/%s identity changed", state.PeerName)
 	}
 	desired := desiredWireKubePeer(state, strings.TrimPrefix(state.PeerName, "idleloom-"), state.AssignedMeshIP)
 	if err := validateOwnedWireKubePeer(peer, desired, state); err != nil {
@@ -369,7 +369,7 @@ func writePeerKubeconfig(ctx context.Context, client kubernetes.Interface, sourc
 		return fmt.Errorf("create restricted WireKube peer token: %w", err)
 	}
 	if request.Status.Token == "" || request.Status.ExpirationTimestamp.IsZero() {
-		return fmt.Errorf("WireKube peer TokenRequest returned an incomplete credential")
+		return fmt.Errorf("the WireKube peer TokenRequest returned an incomplete credential")
 	}
 	if source.Host == "" || source.Insecure {
 		return fmt.Errorf("a TLS Kubernetes API endpoint is required")
@@ -405,7 +405,7 @@ func WriteRelayToken(ctx context.Context, client kubernetes.Interface, state Sta
 		return time.Time{}, nil
 	}
 	if client == nil || state.PeerNamespace == "" || state.PeerServiceAccount == "" || state.RelayTokenAudience == "" {
-		return time.Time{}, fmt.Errorf("WireKube relay credential configuration is incomplete")
+		return time.Time{}, fmt.Errorf("the WireKube relay credential configuration is incomplete")
 	}
 	if duration <= 0 || duration > time.Hour {
 		duration = time.Hour
@@ -421,7 +421,7 @@ func WriteRelayToken(ctx context.Context, client kubernetes.Interface, state Sta
 		return time.Time{}, fmt.Errorf("create WireKube relay token: %w", err)
 	}
 	if request.Status.Token == "" || request.Status.ExpirationTimestamp.IsZero() {
-		return time.Time{}, fmt.Errorf("WireKube relay TokenRequest returned an incomplete credential")
+		return time.Time{}, fmt.Errorf("the WireKube relay TokenRequest returned an incomplete credential")
 	}
 	if err := writePrivate(RelayTokenPath(directory), []byte(request.Status.Token+"\n")); err != nil {
 		return time.Time{}, err
@@ -526,7 +526,7 @@ func revokeWireKubePeer(ctx context.Context, config RevokeConfig, state State) e
 		}
 		uid := peer.GetUID()
 		if uid == "" {
-			return fmt.Errorf("WireKubePeer/%s has no UID", state.PeerName)
+			return fmt.Errorf("the WireKubePeer/%s has no UID", state.PeerName)
 		}
 		if err := config.Dynamic.Resource(PeersGVR).Delete(ctx, state.PeerName, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("delete WireKubePeer/%s: %w", state.PeerName, err)

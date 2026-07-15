@@ -138,11 +138,11 @@ func RunnerSource() ([]byte, error) {
 
 func validateDigest(value string) error {
 	if len(value) != sha256.Size*2 {
-		return fmt.Errorf("SHA-256 must contain 64 lowercase hex characters")
+		return fmt.Errorf("the SHA-256 must contain 64 lowercase hex characters")
 	}
 	decoded, err := hex.DecodeString(value)
 	if err != nil || hex.EncodeToString(decoded) != value {
-		return fmt.Errorf("SHA-256 must contain 64 lowercase hex characters")
+		return fmt.Errorf("the SHA-256 must contain 64 lowercase hex characters")
 	}
 	return nil
 }

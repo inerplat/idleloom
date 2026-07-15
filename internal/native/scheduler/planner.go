@@ -2,6 +2,8 @@ package scheduler
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -48,7 +50,7 @@ func (p Planner) SelectHost(workload *nativev1alpha1.IdleloomWorkload, model *na
 			return nil, fmt.Errorf("workload requested model %q but controller resolved %q", workload.Spec.Model.CatalogRef, model.Name)
 		}
 	} else if model != nil {
-		return nil, fmt.Errorf("shell workload must not resolve a model")
+		return nil, fmt.Errorf("non-model workload must not resolve a model")
 	}
 	now := time.Now()
 	if p.Now != nil {
@@ -56,7 +58,7 @@ func (p Planner) SelectHost(workload *nativev1alpha1.IdleloomWorkload, model *na
 	}
 	heartbeatTimeout := p.HeartbeatTimeout
 	if heartbeatTimeout <= 0 {
-		heartbeatTimeout = 45 * time.Second
+		heartbeatTimeout = nativev1alpha1.DefaultAgentHeartbeatTimeout
 	}
 	request := workload.Spec.Resources.UnifiedMemoryRequest.DeepCopy()
 	if model != nil {
@@ -153,6 +155,11 @@ func (p Planner) PlanAssignment(workload *nativev1alpha1.IdleloomWorkload, model
 			LeaseDurationSeconds: int32(leaseDuration / time.Second),
 		},
 	}
+	if workload.Spec.Run != nil {
+		run := *workload.Spec.Run
+		run.Parameters = cloneMap(workload.Spec.Run.Parameters)
+		assignment.Spec.Run = &run
+	}
 	if model != nil {
 		assignment.Spec.Model = &nativev1alpha1.ResolvedModel{
 			CatalogRef:            nativev1alpha1.ObjectReference{Name: model.Name, UID: model.UID},
@@ -175,6 +182,24 @@ func (p Planner) PlanAssignment(workload *nativev1alpha1.IdleloomWorkload, model
 				ServiceName: workload.Spec.Server.ServiceName, ModelAlias: workload.Spec.Server.ModelAlias,
 				AuthSecretName: nativev1alpha1.ServingAuthSecretName, Port: nativev1alpha1.NativeServingPort,
 			}
+		}
+	} else if workload.Spec.Train != nil {
+		network := workload.Spec.Train.Network
+		if network == "" {
+			network = nativev1alpha1.ShellNetworkNone
+		}
+		timeout := workload.Spec.Train.TimeoutSeconds
+		if timeout == 0 {
+			timeout = 3600
+		}
+		sourceDigest := sha256.Sum256([]byte(workload.Spec.Train.Source.Inline))
+		assignment.Spec.Training = &nativev1alpha1.ResolvedTraining{
+			RuntimeProfile:       workload.Spec.Train.RuntimeProfile,
+			Source:               workload.Spec.Train.Source.Inline,
+			SourceDigest:         "sha256:" + hex.EncodeToString(sourceDigest[:]),
+			Network:              network,
+			TimeoutSeconds:       timeout,
+			UnifiedMemoryRequest: memoryRequest,
 		}
 	} else {
 		isolation := workload.Spec.Shell.Isolation
@@ -252,11 +277,21 @@ func hostIneligible(host nativev1alpha1.IdleloomHost, workload *nativev1alpha1.I
 		if !contains(host.Status.ModelFamilies, model.Spec.Family) {
 			return fmt.Sprintf("model family %s is not supported", model.Spec.Family)
 		}
+		if (model.Spec.RuntimeProfile == nativev1alpha1.RuntimeProfileOllamaGGUFV1 || model.Spec.RuntimeProfile == nativev1alpha1.RuntimeProfileLlamaCppMetalV1) && !containsPinnedLocalModel(host.Status.AvailableModels, model.Spec) {
+			return fmt.Sprintf("pinned local model %s is not installed", localArtifactName(model.Spec.Artifact))
+		}
 		if workload.Spec.Mode == nativev1alpha1.WorkloadModeBatch && !contains(host.Status.Capabilities, nativev1alpha1.CapabilityBatchInferenceV1) {
 			return "agent does not support Native batch inference"
 		}
 		if workload.Spec.Server != nil && !contains(host.Status.Capabilities, nativev1alpha1.CapabilityNativeServiceV1) {
 			return "agent does not support connected Native serving"
+		}
+	} else if workload.Spec.Train != nil {
+		if !contains(host.Status.RuntimeProfiles, workload.Spec.Train.RuntimeProfile) {
+			return fmt.Sprintf("runtime %s is not supported", workload.Spec.Train.RuntimeProfile)
+		}
+		if !contains(host.Status.Capabilities, nativev1alpha1.CapabilityNativeTrainingV1) {
+			return "agent does not support Native MLX training"
 		}
 	} else if workload.Spec.Shell != nil {
 		access := host.Spec.ShellAccess
@@ -283,6 +318,17 @@ func hostIneligible(host nativev1alpha1.IdleloomHost, workload *nativev1alpha1.I
 	return ""
 }
 
+func cloneMap(values map[string]nativev1alpha1.WorkloadRunParameter) map[string]nativev1alpha1.WorkloadRunParameter {
+	if values == nil {
+		return nil
+	}
+	result := make(map[string]nativev1alpha1.WorkloadRunParameter, len(values))
+	for key, value := range values {
+		result[key] = value
+	}
+	return result
+}
+
 func contains(values []string, expected string) bool {
 	for _, value := range values {
 		if value == expected {
@@ -290,6 +336,25 @@ func contains(values []string, expected string) bool {
 		}
 	}
 	return false
+}
+
+func containsPinnedLocalModel(models []nativev1alpha1.HostModelStatus, spec nativev1alpha1.IdleloomModelSpec) bool {
+	name := localArtifactName(spec.Artifact)
+	for _, model := range models {
+		if model.RuntimeProfile == spec.RuntimeProfile && model.Name == name &&
+			model.ManifestDigest == spec.Artifact.ManifestDigest && model.Family == spec.Family &&
+			model.Format == spec.Artifact.Format && model.SizeBytes == spec.Artifact.SizeBytes {
+			return true
+		}
+	}
+	return false
+}
+
+func localArtifactName(artifact nativev1alpha1.ModelArtifact) string {
+	if artifact.OllamaModel != "" {
+		return artifact.OllamaModel
+	}
+	return artifact.GGUFFile
 }
 
 func randomUUID() (string, error) {

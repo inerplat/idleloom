@@ -67,6 +67,18 @@ func TestProcessStopWaitsForEntireProcessGroup(t *testing.T) {
 	}
 }
 
+func TestBoundedBufferRetainsLatestDiagnostics(t *testing.T) {
+	buffer := &boundedBuffer{limit: 8}
+	for _, value := range []string{"early", "-middle-", "failure"} {
+		if _, err := buffer.Write([]byte(value)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := buffer.String(); got != "-failure" {
+		t.Fatalf("buffer = %q, want latest diagnostics", got)
+	}
+}
+
 func TestSandboxProfileProtectsCredentials(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS sandbox profile")

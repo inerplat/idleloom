@@ -1,6 +1,7 @@
 package wirekube
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,23 @@ func TestParseTunnelSnapshotAggregatesSynchronizedPeers(t *testing.T) {
 	}
 	if snapshot.LastHandshake != time.Unix(1700000010, 456) || snapshot.BytesReceived != 400 || snapshot.BytesSent != 600 {
 		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+func TestStalePeerPublicKeysHandlesKeyRotationAndSharedKeys(t *testing.T) {
+	previous := map[string]string{
+		"rotated": "old-key",
+		"deleted": "deleted-key",
+		"renamed": "shared-key",
+	}
+	next := map[string]string{
+		"rotated":     "new-key",
+		"renamed-new": "shared-key",
+	}
+	stale := stalePeerPublicKeys(previous, next)
+	slices.Sort(stale)
+	if !slices.Equal(stale, []string{"deleted-key", "old-key"}) {
+		t.Fatalf("stale peer keys = %v", stale)
 	}
 }
 

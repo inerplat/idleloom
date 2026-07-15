@@ -2,22 +2,53 @@ apiVersion: v1
 kind: Pod
 metadata:
   name: apple-vulkan-smoke
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/example: vulkan-dra-smoke
 spec:
   restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/os: linux
+    idleloom-worker: "true"
+    idleloom-accelerator: apple-vulkan
   tolerations:
     - key: idleloom-dedicated
-      operator: Equal
-      value: compute
+      operator: Exists
       effect: NoSchedule
+  securityContext:
+    fsGroup: 65532
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
   resourceClaims:
     - name: gpu
       resourceClaimName: apple-vulkan-smoke
   containers:
     - name: smoke
-      image: debian:bookworm-slim
+      image: quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4
       command: ["/bin/sh", "-c"]
-      args: ["test -r /dev/dri/renderD128 && test -w /dev/dri/renderD128 && ls -l /dev/dri/renderD128"]
+      args: ["test -r /dev/dri/renderD128 && test -w /dev/dri/renderD128 && /usr/bin/llama-cli --list-devices"]
+      env:
+        - name: HOME
+          value: /tmp
+        - name: XDG_CACHE_HOME
+          value: /tmp/xdg-cache
+        - name: VK_ICD_FILENAMES
+          value: /usr/share/vulkan/icd.d/virtio_icd.aarch64.json
       resources:
         claims:
           - name: gpu
             request: accelerator
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: runtime-cache
+          mountPath: /tmp
+  volumes:
+    - name: runtime-cache
+      emptyDir: {}

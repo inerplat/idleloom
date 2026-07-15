@@ -108,7 +108,7 @@ func TestStorePersistsTerminalExecutionBeforeStatusPublication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	current := reopened.Current()
 	if current == nil || !current.Completed || current.ExitError != exitErr.Error() {
 		t.Fatalf("terminal record = %#v", current)
@@ -144,7 +144,7 @@ func TestBeginRequiresExactPlannedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	first := testRecord()
 	if err := store.Begin(first); err != nil {
 		t.Fatalf("Begin: %v", err)

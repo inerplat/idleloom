@@ -1,0 +1,5 @@
+namespace: default
+model: local-gguf
+modelAlias: local-gguf
+servicePort: 8000
+unifiedMemory: 8Gi

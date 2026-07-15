@@ -30,10 +30,12 @@ spec:
         oldObject.metadata.labels['native.idleloom.io/projection'] == 'true'
     - name: currentReserved
       expression: >-
-        object != null && object.metadata.name.startsWith('idleloom-')
+        object != null &&
+        object.metadata.name.matches('^idleloom-[0-9a-f]{20}$')
     - name: previousReserved
       expression: >-
-        oldObject != null && oldObject.metadata.name.startsWith('idleloom-')
+        oldObject != null &&
+        oldObject.metadata.name.matches('^idleloom-[0-9a-f]{20}$')
   validations:
     - expression: >-
         variables.projectionController || variables.privilegedOperator ||
@@ -83,7 +85,7 @@ spec:
   validations:
     - expression: >-
         !has(object.spec.nodeName) ||
-        !object.spec.nodeName.startsWith('idleloom-') ||
+        !object.spec.nodeName.matches('^idleloom-[0-9a-f]{20}$') ||
         ((variables.projectionController || variables.privilegedOperator) &&
         variables.currentManaged)
       message: only managed projection Pods may bind to Idleloom ephemeral Nodes
@@ -110,7 +112,7 @@ spec:
         resources: ["pods/binding"]
   validations:
     - expression: >-
-        !object.target.name.startsWith('idleloom-')
+        !object.target.name.matches('^idleloom-[0-9a-f]{20}$')
       message: binding subresource requests cannot target Idleloom ephemeral Nodes
 ---
 apiVersion: admissionregistration.k8s.io/v1

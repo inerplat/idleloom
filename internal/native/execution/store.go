@@ -56,15 +56,14 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open native execution lock: %w", err)
 	}
 	if err := lock.Chmod(0o600); err != nil {
-		lock.Close()
-		return nil, fmt.Errorf("set native execution lock permissions: %w", err)
+		return nil, errors.Join(fmt.Errorf("set native execution lock permissions: %w", err), lock.Close())
 	}
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		lock.Close()
+		closeErr := lock.Close()
 		if err == unix.EWOULDBLOCK || err == unix.EAGAIN {
-			return nil, ErrStoreLocked
+			return nil, errors.Join(ErrStoreLocked, closeErr)
 		}
-		return nil, fmt.Errorf("lock native execution store: %w", err)
+		return nil, errors.Join(fmt.Errorf("lock native execution store: %w", err), closeErr)
 	}
 	store := &Store{path: path, lock: lock}
 	file, err := os.Open(path)
@@ -72,38 +71,31 @@ func Open(path string) (*Store, error) {
 		if os.IsNotExist(err) {
 			return store, nil
 		}
-		store.Close()
-		return nil, fmt.Errorf("read native execution state: %w", err)
+		return nil, errors.Join(fmt.Errorf("read native execution state: %w", err), store.Close())
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		store.Close()
-		return nil, fmt.Errorf("stat native execution state: %w", err)
+		return nil, errors.Join(fmt.Errorf("stat native execution state: %w", err), store.Close())
 	}
 	if info.Size() > maxStateBytes {
-		store.Close()
-		return nil, fmt.Errorf("native execution state is %d bytes; maximum is %d", info.Size(), maxStateBytes)
+		return nil, errors.Join(fmt.Errorf("native execution state is %d bytes; maximum is %d", info.Size(), maxStateBytes), store.Close())
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxStateBytes+1))
 	if err != nil {
-		store.Close()
-		return nil, fmt.Errorf("read native execution state: %w", err)
+		return nil, errors.Join(fmt.Errorf("read native execution state: %w", err), store.Close())
 	}
 	var record Record
 	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&record); err != nil {
-		store.Close()
-		return nil, fmt.Errorf("decode native execution state: %w", err)
+		return nil, errors.Join(fmt.Errorf("decode native execution state: %w", err), store.Close())
 	}
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		store.Close()
-		return nil, fmt.Errorf("decode native execution state: trailing data")
+		return nil, errors.Join(fmt.Errorf("decode native execution state: trailing data"), store.Close())
 	}
 	if err := validateRecord(record); err != nil {
-		store.Close()
-		return nil, fmt.Errorf("validate native execution state: %w", err)
+		return nil, errors.Join(fmt.Errorf("validate native execution state: %w", err), store.Close())
 	}
 	store.record = &record
 	return store, nil
@@ -147,7 +139,7 @@ func (s *Store) Begin(record Record) error {
 		return fmt.Errorf("%w: assignment=%s execution=%s epoch=%d", ErrExecutionBusy, s.record.AssignmentUID, s.record.ExecutionID, s.record.FencingEpoch)
 	}
 	if record.PID != 0 || record.ProcessStartToken != "" {
-		return fmt.Errorf("Begin requires a planned process identity without PID or start token")
+		return fmt.Errorf("begin requires a planned process identity without PID or start token")
 	}
 	if err := persist(s.path, record); err != nil {
 		return err
@@ -279,7 +271,7 @@ func validateRecord(record Record) error {
 		return fmt.Errorf("planned executable, runtime version, and nonce are required")
 	}
 	if (record.PID == 0) != (record.ProcessStartToken == "") {
-		return fmt.Errorf("PID and process start token must be recorded together")
+		return fmt.Errorf("the PID and process start token must be recorded together")
 	}
 	if record.Completed && !processIdentityComplete(record) {
 		return fmt.Errorf("completed execution requires a complete process identity")
@@ -331,18 +323,15 @@ func persist(path string, record Record) error {
 		return fmt.Errorf("create temporary native execution state: %w", err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return fmt.Errorf("set native execution state permissions: %w", err)
+		return errors.Join(fmt.Errorf("set native execution state permissions: %w", err), temporary.Close())
 	}
 	if _, err := temporary.Write(append(data, '\n')); err != nil {
-		temporary.Close()
-		return fmt.Errorf("write native execution state: %w", err)
+		return errors.Join(fmt.Errorf("write native execution state: %w", err), temporary.Close())
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return fmt.Errorf("sync native execution state: %w", err)
+		return errors.Join(fmt.Errorf("sync native execution state: %w", err), temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close native execution state: %w", err)
@@ -359,8 +348,7 @@ func syncDirectory(path string) error {
 		return fmt.Errorf("open native execution state directory: %w", err)
 	}
 	if err := directory.Sync(); err != nil {
-		directory.Close()
-		return fmt.Errorf("sync native execution state directory: %w", err)
+		return errors.Join(fmt.Errorf("sync native execution state directory: %w", err), directory.Close())
 	}
 	if err := directory.Close(); err != nil {
 		return fmt.Errorf("close native execution state directory: %w", err)

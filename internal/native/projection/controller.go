@@ -110,7 +110,7 @@ func (c *Controller) ReconcileOnce(ctx context.Context) error {
 }
 
 func (c *Controller) project(ctx context.Context, workload *nativev1alpha1.IdleloomWorkload, host *nativev1alpha1.IdleloomHost, assignment *nativev1alpha1.IdleloomWorkloadAssignment, ref projectionRef) error {
-	address, candidate := connectedKubeletAddress(host)
+	address, candidate := connectedKubeletAddress(host, c.now())
 	pod, err := c.ensurePod(ctx, workload, assignment, ref, candidate)
 	if err != nil {
 		return err
@@ -227,6 +227,8 @@ func managedPod(workload *nativev1alpha1.IdleloomWorkload, assignment *nativev1a
 	image := "native.idleloom.invalid/metal-projection:alpha"
 	if assignment.Spec.Shell != nil {
 		image = "native.idleloom.invalid/shell-projection:alpha"
+	} else if assignment.Spec.Training != nil {
+		image = "native.idleloom.invalid/training-projection:alpha"
 	}
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -274,15 +276,15 @@ func managedPod(workload *nativev1alpha1.IdleloomWorkload, assignment *nativev1a
 
 func (c *Controller) ensureNode(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment, name string, logsReady bool) (*corev1.Node, error) {
 	nodes := c.Kubernetes.CoreV1().Nodes()
+	desired := managedNode(assignment, name, logsReady)
 	existing, err := nodes.Get(ctx, name, metav1.GetOptions{})
 	if err == nil {
-		if existing.Labels[LabelProjection] != ProjectionValue || existing.Labels[LabelAssignmentUID] != string(assignment.UID) || !existing.Spec.Unschedulable {
-			return nil, fmt.Errorf("Node %s exists and is not the expected projection", name)
+		if err := validateManagedNode(existing, desired, assignment, logsReady); err != nil {
+			return nil, err
 		}
-		desiredAnnotations := projectionAnnotations(assignment, logsReady)
-		if !apiequality.Semantic.DeepEqual(existing.Annotations, desiredAnnotations) {
+		if !apiequality.Semantic.DeepEqual(existing.Annotations, desired.Annotations) {
 			copy := existing.DeepCopy()
-			copy.Annotations = desiredAnnotations
+			copy.Annotations = desired.Annotations
 			return nodes.Update(ctx, copy, metav1.UpdateOptions{})
 		}
 		return existing, nil
@@ -290,6 +292,20 @@ func (c *Controller) ensureNode(ctx context.Context, assignment *nativev1alpha1.
 	if !apierrors.IsNotFound(err) {
 		return nil, err
 	}
+	created, err := nodes.Create(ctx, desired, metav1.CreateOptions{})
+	if apierrors.IsAlreadyExists(err) {
+		created, err = nodes.Get(ctx, name, metav1.GetOptions{})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("create ephemeral projection Node: %w", err)
+	}
+	if err := validateManagedNode(created, desired, assignment, logsReady); err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func managedNode(assignment *nativev1alpha1.IdleloomWorkloadAssignment, name string, logsReady bool) *corev1.Node {
 	node := &corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Labels: projectionLabels(assignment), Annotations: projectionAnnotations(assignment, logsReady)},
 		Spec: corev1.NodeSpec{
@@ -302,14 +318,7 @@ func (c *Controller) ensureNode(ctx context.Context, assignment *nativev1alpha1.
 	}
 	node.Labels[corev1.LabelOSStable] = "darwin"
 	node.Labels[corev1.LabelArchStable] = "arm64"
-	created, err := nodes.Create(ctx, node, metav1.CreateOptions{})
-	if apierrors.IsAlreadyExists(err) {
-		created, err = nodes.Get(ctx, name, metav1.GetOptions{})
-	}
-	if err != nil {
-		return nil, fmt.Errorf("create ephemeral projection Node: %w", err)
-	}
-	return created, nil
+	return node
 }
 
 func (c *Controller) updateNodeStatus(ctx context.Context, node *corev1.Node, assignment *nativev1alpha1.IdleloomWorkloadAssignment, state projectionState, address string, logsReady bool) error {
@@ -361,6 +370,9 @@ func (c *Controller) updatePodStatus(ctx context.Context, pod *corev1.Pod, assig
 		if err != nil {
 			return err
 		}
+		if terminalPodPhase(current.Status.Phase) {
+			return nil
+		}
 		copy := current.DeepCopy()
 		now := metav1.NewTime(c.now())
 		phase := state.podPhase
@@ -376,7 +388,9 @@ func (c *Controller) updatePodStatus(ctx context.Context, pod *corev1.Pod, assig
 		}
 		imageID := "idleloom://shell/" + assignment.Spec.ExecutionID
 		if assignment.Spec.Model != nil {
-			imageID = assignment.Spec.Model.Artifact.OCIReference
+			imageID = modelArtifactIdentity(assignment.Spec.Model.Artifact)
+		} else if assignment.Spec.Training != nil {
+			imageID = "idleloom://training/" + assignment.Spec.Training.SourceDigest
 		}
 		containerStatus := corev1.ContainerStatus{
 			Name: containerName, Image: copy.Spec.Containers[0].Image,
@@ -410,6 +424,10 @@ func (c *Controller) updatePodStatus(ctx context.Context, pod *corev1.Pod, assig
 		_, err = c.Kubernetes.CoreV1().Pods(copy.Namespace).Patch(ctx, copy.Name, types.StrategicMergePatchType, payload, metav1.PatchOptions{}, "status")
 		return err
 	})
+}
+
+func terminalPodPhase(phase corev1.PodPhase) bool {
+	return phase == corev1.PodSucceeded || phase == corev1.PodFailed
 }
 
 func (c *Controller) garbageCollect(ctx context.Context, active map[string]projectionRef) error {
@@ -532,6 +550,9 @@ func stateFor(assignment *nativev1alpha1.IdleloomWorkloadAssignment, now time.Ti
 		return projectionState{podPhase: corev1.PodSucceeded, nodeStatus: corev1.ConditionFalse, reason: "IdleloomExecutionSucceeded", message: "the native execution completed successfully"}
 	}
 	if assignment.Status.Phase == nativev1alpha1.PhaseFailed {
+		if assignment.Spec.Model != nil && assignment.Spec.Model.Server != nil {
+			return projectionState{podPhase: corev1.PodPending, nodeStatus: corev1.ConditionFalse, reason: "IdleloomServerRestarting", message: "the native serving process failed and is waiting for an agent restart"}
+		}
 		return projectionState{podPhase: corev1.PodFailed, nodeStatus: corev1.ConditionFalse, reason: "IdleloomExecutionFailed", message: "the native execution failed", exitCode: 1}
 	}
 	if heartbeatStale(assignment, now) {
@@ -596,8 +617,14 @@ func projectionAnnotations(assignment *nativev1alpha1.IdleloomWorkloadAssignment
 		AnnotationContract: ContractValue, AnnotationKubeletAPI: "none", AnnotationLogs: "unsupported",
 		AnnotationExec: "unsupported", AnnotationPortForward: "unsupported", AnnotationConnectivity: "outbound-only",
 	}
+	if assignment.Spec.Run != nil {
+		annotations["native.idleloom.io/run-task"] = assignment.Spec.Run.Task
+		annotations["native.idleloom.io/experiment"] = assignment.Spec.Run.Experiment
+	}
 	if assignment.Spec.Model != nil {
-		annotations[AnnotationModelArtifact] = assignment.Spec.Model.Artifact.OCIReference
+		annotations[AnnotationModelArtifact] = modelArtifactIdentity(assignment.Spec.Model.Artifact)
+	} else if assignment.Spec.Training != nil {
+		annotations["native.idleloom.io/source-digest"] = assignment.Spec.Training.SourceDigest
 	}
 	if logsReady {
 		annotations[AnnotationKubeletAPI] = "logs-only"
@@ -607,12 +634,26 @@ func projectionAnnotations(assignment *nativev1alpha1.IdleloomWorkloadAssignment
 	return annotations
 }
 
-func connectedKubeletAddress(host *nativev1alpha1.IdleloomHost) (string, bool) {
+func modelArtifactIdentity(artifact nativev1alpha1.ModelArtifact) string {
+	if artifact.OCIReference != "" {
+		return artifact.OCIReference
+	}
+	if artifact.OllamaModel != "" && artifact.ManifestDigest != "" {
+		return "ollama://local/" + artifact.OllamaModel + "@" + artifact.ManifestDigest
+	}
+	if artifact.GGUFFile != "" && artifact.ManifestDigest != "" {
+		return "gguf://managed/" + artifact.GGUFFile + "@" + artifact.ManifestDigest
+	}
+	return ""
+}
+
+func connectedKubeletAddress(host *nativev1alpha1.IdleloomHost, now time.Time) (string, bool) {
 	if host == nil || host.Status.Connectivity == nil || host.Status.Connectivity.Mode != nativev1alpha1.ConnectivityModeWireKubeLeaf {
 		return "", false
 	}
 	condition := apiMeta.FindStatusCondition(host.Status.Conditions, nativev1alpha1.HostConditionConnected)
-	if condition == nil || condition.Status != metav1.ConditionTrue {
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.ObservedGeneration != host.Generation ||
+		host.Status.ObservedGeneration != host.Generation || !freshHostHeartbeat(host.Status.LastHeartbeatTime, now) {
 		return "", false
 	}
 	ip, network, err := net.ParseCIDR(host.Status.Connectivity.Address)
@@ -626,14 +667,54 @@ func connectedKubeletAddress(host *nativev1alpha1.IdleloomHost) (string, bool) {
 	return ip.String(), true
 }
 
+func freshHostHeartbeat(heartbeat *metav1.MicroTime, now time.Time) bool {
+	if heartbeat == nil || heartbeat.After(now.Add(nativev1alpha1.HeartbeatClockSkewAllowance)) {
+		return false
+	}
+	return now.Sub(heartbeat.Time) <= nativev1alpha1.DefaultAgentHeartbeatTimeout+nativev1alpha1.HeartbeatClockSkewAllowance
+}
+
+func validateManagedNode(node, desired *corev1.Node, assignment *nativev1alpha1.IdleloomWorkloadAssignment, logsReady bool) error {
+	if node.Name != desired.Name || node.Labels[LabelProjection] != ProjectionValue ||
+		node.Labels[LabelAssignmentUID] != string(assignment.UID) ||
+		!apiequality.Semantic.DeepEqual(node.Labels, desired.Labels) ||
+		!node.Spec.Unschedulable || !apiequality.Semantic.DeepEqual(normalizedProjectionNodeTaints(node.Spec.Taints), desired.Spec.Taints) {
+		return fmt.Errorf("node %s exists and is not the expected projection", node.Name)
+	}
+	previousAnnotations := projectionAnnotations(assignment, !logsReady)
+	if !apiequality.Semantic.DeepEqual(node.Annotations, desired.Annotations) &&
+		!apiequality.Semantic.DeepEqual(node.Annotations, previousAnnotations) {
+		return fmt.Errorf("node %s was mutated outside the projection contract", node.Name)
+	}
+	return nil
+}
+
+func normalizedProjectionNodeTaints(taints []corev1.Taint) []corev1.Taint {
+	filtered := make([]corev1.Taint, 0, len(taints))
+	for _, taint := range taints {
+		if isNodeLifecycleTaint(taint) {
+			continue
+		}
+		filtered = append(filtered, taint)
+	}
+	return filtered
+}
+
+func isNodeLifecycleTaint(taint corev1.Taint) bool {
+	if taint.Value != "" || (taint.Effect != corev1.TaintEffectNoSchedule && taint.Effect != corev1.TaintEffectNoExecute) {
+		return false
+	}
+	return taint.Key == corev1.TaintNodeNotReady || taint.Key == corev1.TaintNodeUnreachable
+}
+
 func validateManagedPod(pod, desired *corev1.Pod, assignment *nativev1alpha1.IdleloomWorkloadAssignment) error {
 	if pod.Name != desired.Name || pod.Namespace != desired.Namespace || pod.Labels[LabelProjection] != ProjectionValue || pod.Labels[LabelAssignmentUID] != string(assignment.UID) {
-		return fmt.Errorf("Pod %s/%s exists and is not the expected projection", pod.Namespace, pod.Name)
+		return fmt.Errorf("pod %s/%s exists and is not the expected projection", pod.Namespace, pod.Name)
 	}
 	actualSpec := normalizedProjectionSpec(pod.Spec)
 	desiredSpec := normalizedProjectionSpec(desired.Spec)
 	if pod.Annotations[AnnotationContract] != ContractValue || !apiequality.Semantic.DeepEqual(pod.OwnerReferences, desired.OwnerReferences) || !apiequality.Semantic.DeepEqual(actualSpec, desiredSpec) {
-		return fmt.Errorf("Pod %s/%s was mutated outside the projection contract", pod.Namespace, pod.Name)
+		return fmt.Errorf("pod %s/%s was mutated outside the projection contract", pod.Namespace, pod.Name)
 	}
 	return nil
 }

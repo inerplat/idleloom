@@ -107,7 +107,10 @@ func TestRecipeCommandsExposeBothBackendsAndRenderYAML(t *testing.T) {
 			t.Fatalf("recipe list does not contain %q: %s", expected, output.String())
 		}
 	}
-	for _, expected := range []string{"infer/mlx-batch@v1", "infer/llama-vulkan@v1"} {
+	for _, expected := range []string{
+		"infer/mlx-batch@v1", "infer/ollama-gguf@v1", "infer/llama-cpp-metal@v1", "infer/llama-vulkan@v1",
+		"serve/ollama-gguf@v1", "serve/llama-cpp-metal@v1",
+	} {
 		if !strings.Contains(output.String(), expected) {
 			t.Fatalf("recipe list does not contain %q: %s", expected, output.String())
 		}
@@ -199,6 +202,38 @@ func TestHostCommandsRejectNamespacedFlagsBeforeClusterAccess(t *testing.T) {
 	}
 }
 
+func TestLiveHostConditionStatusRejectsStaleTrueConditions(t *testing.T) {
+	now := time.Date(2026, time.July, 14, 12, 0, 0, 0, time.UTC)
+	fresh := metav1.NewMicroTime(now)
+	host := nativev1alpha1.IdleloomHost{
+		Status: nativev1alpha1.IdleloomHostStatus{
+			LastHeartbeatTime: &fresh,
+			Conditions: []metav1.Condition{{
+				Type: nativev1alpha1.HostConditionReady, Status: metav1.ConditionTrue,
+			}},
+		},
+	}
+	if got := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now); got != "True" {
+		t.Fatalf("fresh Ready status = %q", got)
+	}
+
+	stale := metav1.NewMicroTime(now.Add(-nativev1alpha1.DefaultAgentHeartbeatTimeout - nativev1alpha1.HeartbeatClockSkewAllowance - time.Second))
+	host.Status.LastHeartbeatTime = &stale
+	if got := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now); got != "Stale" {
+		t.Fatalf("stale Ready status = %q", got)
+	}
+
+	host.Status.LastHeartbeatTime = nil
+	if got := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now); got != "Unknown" {
+		t.Fatalf("missing-heartbeat Ready status = %q", got)
+	}
+
+	host.Status.Conditions[0].Status = metav1.ConditionFalse
+	if got := liveHostConditionStatus(host, nativev1alpha1.HostConditionReady, now); got != "False" {
+		t.Fatalf("explicit false Ready status = %q", got)
+	}
+}
+
 func TestLegacyCommandsAreNotPubliclyDispatched(t *testing.T) {
 	for _, command := range []string{"admin", "serve", "debug", "enroll", "prepare", "install", "controller", "agent", "projection", "connectivity", "connectivity-run"} {
 		handled, err := runPublicCommand(context.Background(), command, nil)
@@ -253,7 +288,7 @@ func TestWaitForProjectedLogEndpointUsesReadyProjection(t *testing.T) {
 			DaemonEndpoints: corev1.NodeDaemonEndpoints{KubeletEndpoint: corev1.DaemonEndpoint{Port: 10250}},
 		},
 	}
-	client := kubernetesfake.NewSimpleClientset(pod, node)
+	client := kubernetesfake.NewClientset(pod, node)
 	name, err := waitForProjectedLogEndpoint(context.Background(), client, "default", "job", uid, time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -273,7 +308,7 @@ func TestWaitForProjectedLogEndpointReportsConvergenceTimeout(t *testing.T) {
 		},
 		Spec: corev1.PodSpec{NodeName: "projected-node"},
 	}
-	client := kubernetesfake.NewSimpleClientset(pod)
+	client := kubernetesfake.NewClientset(pod)
 	_, err := waitForProjectedLogEndpoint(context.Background(), client, "default", "job", uid, 50*time.Millisecond)
 	if err == nil || !strings.Contains(err.Error(), "projection log probe has not succeeded") {
 		t.Fatalf("wait error = %v", err)
@@ -295,6 +330,13 @@ func TestJoinRejectsEmptyNormalizedHostBeforeClusterAccess(t *testing.T) {
 	err := runJoin(context.Background(), []string{"___"})
 	if err == nil || !strings.Contains(err.Error(), "letter or digit") {
 		t.Fatalf("runJoin invalid host error = %v", err)
+	}
+}
+
+func TestRunRejectsNameThatCannotBeUsedAsRunLabel(t *testing.T) {
+	err := runWorkload(context.Background(), []string{"run.with.dots", "--shell", "true"})
+	if err == nil || !strings.Contains(err.Error(), "invalid workload name") {
+		t.Fatalf("runWorkload error = %v", err)
 	}
 }
 
@@ -516,6 +558,18 @@ func TestCompanionBinaryNamesDispatchInternally(t *testing.T) {
 		if !handled || !errors.Is(err, flag.ErrHelp) {
 			t.Fatalf("%s handled=%t err=%v", binary, handled, err)
 		}
+	}
+}
+
+func TestCanonicalBinaryDispatchesInternalRoles(t *testing.T) {
+	for _, role := range []string{"controller", "agent", "link", "projection"} {
+		handled, err := runInternalCommand(context.Background(), []string{"internal", role, "--help"})
+		if !handled || !errors.Is(err, flag.ErrHelp) {
+			t.Fatalf("%s handled=%t err=%v", role, handled, err)
+		}
+	}
+	if handled, err := runInternalCommand(context.Background(), []string{"help"}); handled || err != nil {
+		t.Fatalf("public command was handled internally: handled=%t err=%v", handled, err)
 	}
 }
 

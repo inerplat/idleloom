@@ -12,7 +12,7 @@ import (
 
 func TestAllocateIncrementsHostScopedEpoch(t *testing.T) {
 	hostUID := types.UID("host-uid")
-	client := fake.NewSimpleClientset(&coordinationv1.Lease{
+	client := fake.NewClientset(&coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:   "idleloom-host-studio",
 			Name:        LeaseName,
@@ -38,7 +38,7 @@ func TestAllocateIncrementsHostScopedEpoch(t *testing.T) {
 }
 
 func TestAllocateRejectsWrongHostOwnership(t *testing.T) {
-	client := fake.NewSimpleClientset(&coordinationv1.Lease{
+	client := fake.NewClientset(&coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:   "idleloom-host-studio",
 			Name:        LeaseName,

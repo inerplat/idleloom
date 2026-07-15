@@ -26,8 +26,7 @@ func (a *DevAgent) startHTTP() error {
 	}
 	host, _, err := net.SplitHostPort(listener.Addr().String())
 	if err != nil || (host != "127.0.0.1" && host != "::1") {
-		listener.Close()
-		return errors.New("native development endpoint must bind to loopback")
+		return errors.Join(errors.New("native development endpoint must bind to loopback"), listener.Close())
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.authorize(a.handleHealth))
@@ -42,12 +41,10 @@ func (a *DevAgent) startHTTP() error {
 	a.serverErrors = make(chan error, 1)
 	receipt, err := json.MarshalIndent(endpointReceipt{Address: "http://" + listener.Addr().String(), Token: a.endpointToken}, "", "  ")
 	if err != nil {
-		listener.Close()
-		return err
+		return errors.Join(err, listener.Close())
 	}
 	if err := writePrivate(filepath.Join(a.config.StateDirectory, "endpoint.json"), append(receipt, '\n')); err != nil {
-		listener.Close()
-		return err
+		return errors.Join(err, listener.Close())
 	}
 	go func() {
 		if err := a.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -128,18 +125,15 @@ func writePrivate(name string, data []byte) error {
 		return err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
+		return errors.Join(err, tmp.Close())
 	}
 	if err := tmp.Close(); err != nil {
 		return err

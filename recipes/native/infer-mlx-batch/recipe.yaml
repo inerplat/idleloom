@@ -9,4 +9,5 @@ parametersSchema: parameters.schema.json
 example: example.yaml
 prerequisites:
 - A joined Native Metal host; the locked runtime and model are prepared on first use.
+- macOS 26 or later and Python 3.12 for first-use runtime preparation.
 - The built-in qwen3-5-0-8b-mlx model catalog installed by idlectl join.

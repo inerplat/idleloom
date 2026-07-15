@@ -38,17 +38,17 @@ func StartTunnel(ctx context.Context, state State, config TunnelConfig, logf fun
 		return nil, err
 	}
 	if state.RelayTransport == "wss" && config.RelayTokenFile == "" {
-		return nil, fmt.Errorf("WireKube WSS relay token file is required")
+		return nil, fmt.Errorf("the WireKube WSS relay token file is required")
 	}
 	return startPlatformTunnel(ctx, state, config, logf)
 }
 
 func validateTunnelState(state State) error {
 	if state.Version != stateVersion || state.PeerMode != peerModeWireKube || state.PeerUID == "" || state.MeshIPClaimName == "" || state.MeshIPClaimUID == "" || state.MeshCIDR == "" {
-		return fmt.Errorf("WireKube leaf enrollment is incomplete")
+		return fmt.Errorf("the WireKube leaf enrollment is incomplete")
 	}
 	if state.PeerNamespace == "" || state.PeerServiceAccount != peerServiceAccountName(state.PeerName) || state.LinkKubeconfig == "" {
-		return fmt.Errorf("WireKube peer identity is incomplete")
+		return fmt.Errorf("the WireKube peer identity is incomplete")
 	}
 	if err := validateKeyPair(state.PrivateKey, state.PublicKey); err != nil {
 		return err
@@ -69,7 +69,7 @@ func validateTunnelState(state State) error {
 			return fmt.Errorf("invalid WireKube WSS relay endpoint %q", state.RelayEndpoint)
 		}
 		if state.RelayTokenAudience != peerRelayAudience {
-			return fmt.Errorf("WireKube WSS relay audience is invalid")
+			return fmt.Errorf("the WireKube WSS relay audience is invalid")
 		}
 	case "tcp":
 		if _, _, err := net.SplitHostPort(state.RelayEndpoint); err != nil {
@@ -82,7 +82,7 @@ func validateTunnelState(state State) error {
 		return fmt.Errorf("connected leaf routes must contain only the WireKube mesh CIDR")
 	}
 	if state.MTU < 576 || state.MTU > 1420 {
-		return fmt.Errorf("WireKube leaf MTU must be between 576 and 1420")
+		return fmt.Errorf("the WireKube leaf MTU must be between 576 and 1420")
 	}
 	return nil
 }
@@ -104,7 +104,7 @@ func resolveAPIEndpoint(ctx context.Context, endpoint string) ([]net.IP, error) 
 		addresses = append(addresses, address.IP)
 	}
 	if len(addresses) == 0 {
-		return nil, fmt.Errorf("Kubernetes API endpoint resolved to no addresses")
+		return nil, fmt.Errorf("kubernetes API endpoint resolved to no addresses")
 	}
 	return addresses, nil
 }
@@ -145,7 +145,7 @@ func parseTunnelSnapshotForPeers(output, interfaceName string, peerPublicKeys ma
 		switch key {
 		case "public_key":
 			currentPeer = value
-			handshakeSeconds, handshakeNanos = 0, 0
+			handshakeSeconds = 0
 		case "last_handshake_time_sec":
 			if _, ok := targets[currentPeer]; ok {
 				handshakeSeconds, _ = strconv.ParseInt(value, 10, 64)
@@ -173,4 +173,22 @@ func parseTunnelSnapshotForPeers(output, interfaceName string, peerPublicKeys ma
 		}
 	}
 	return snapshot, nil
+}
+
+func stalePeerPublicKeys(previous, next map[string]string) []string {
+	active := make(map[string]struct{}, len(next))
+	for _, publicKey := range next {
+		active[publicKey] = struct{}{}
+	}
+	stale := make(map[string]struct{})
+	for _, publicKey := range previous {
+		if _, ok := active[publicKey]; !ok {
+			stale[publicKey] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(stale))
+	for publicKey := range stale {
+		result = append(result, publicKey)
+	}
+	return result
 }

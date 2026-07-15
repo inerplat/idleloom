@@ -43,7 +43,7 @@ func TestReleaseRuntimeNetworkChecksHolder(t *testing.T) {
 	uid := types.UID("lease-uid")
 	lease := newRuntimeNetworkLease("idleloom-network-00001", holder, reservationID)
 	lease.UID = uid
-	client := fake.NewSimpleClientset(lease)
+	client := fake.NewClientset(lease)
 	if err := ReleaseRuntimeNetwork(context.Background(), client, lease.Name, string(uid), "worker-b", reservationID); err == nil {
 		t.Fatal("network lease accepted a different holder")
 	}
@@ -78,7 +78,7 @@ func TestValidateRuntimeNetworkReservation(t *testing.T) {
 		NodeName: nodeName, Subnet: network.Subnet, GatewayIP: network.GatewayIP,
 		GuestIP: network.GuestIP, HostIP: network.HostIP, MACAddress: network.MAC,
 	}
-	client := fake.NewSimpleClientset(lease)
+	client := fake.NewClientset(lease)
 	if err := ValidateRuntimeNetworkReservation(context.Background(), client, leaseName, string(uid), nodeName, reservationID, runtime); err != nil {
 		t.Fatalf("ValidateRuntimeNetworkReservation: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestFindRuntimeNetworkReservationAdoptsMatchingIntent(t *testing.T) {
 	index := runtimeNetworkIndex(nodeName, 0)
 	lease := newRuntimeNetworkLease(networkLeasePrefix+formatNetworkIndex(index), nodeName, reservationID)
 	lease.UID = types.UID("lease-uid")
-	client := fake.NewSimpleClientset(lease)
+	client := fake.NewClientset(lease)
 	network, name, uid, found, err := FindRuntimeNetworkReservation(context.Background(), client, nodeName, reservationID)
 	if err != nil {
 		t.Fatal(err)
@@ -109,7 +109,7 @@ func TestFindRuntimeNetworkReservationAdoptsMatchingIntent(t *testing.T) {
 }
 
 func TestValidateRuntimeNetworkReservationReportsMissingLease(t *testing.T) {
-	err := ValidateRuntimeNetworkReservation(context.Background(), fake.NewSimpleClientset(), "idleloom-network-00001", "lease-uid", "worker-a", "reservation-a", RuntimeState{})
+	err := ValidateRuntimeNetworkReservation(context.Background(), fake.NewClientset(), "idleloom-network-00001", "lease-uid", "worker-a", "reservation-a", RuntimeState{})
 	if !errors.Is(err, ErrRuntimeNetworkReservationNotFound) {
 		t.Fatalf("missing Lease error = %v", err)
 	}

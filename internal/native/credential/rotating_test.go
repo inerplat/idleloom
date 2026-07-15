@@ -69,7 +69,9 @@ func TestConfigureRefreshesRequestAndPersistsToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response.Body.Close()
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if refreshes.Load() != 1 {
 		t.Fatalf("refresh requests = %d, want 1", refreshes.Load())
 	}

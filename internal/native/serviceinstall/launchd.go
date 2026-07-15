@@ -36,7 +36,6 @@ type Config struct {
 	AgentKubeconfig            string
 	LinkKubeconfig             string
 	ProjectionKubeconfig       string
-	BinaryDirectory            string
 	PublicBinary               []byte
 	KubeletClientCommonNames   string
 	KubeletClientOrganizations string
@@ -55,6 +54,7 @@ type service struct {
 	program     string
 	arguments   []string
 	environment []string
+	processType string
 	stdout      string
 	stderr      string
 }
@@ -73,12 +73,8 @@ func Install(ctx context.Context, config Config) (Receipt, error) {
 	if config.HostID == "" || config.StateDirectory == "" || config.Namespace == "" || config.AgentID == "" || config.ControllerKubeconfig == "" || config.AgentKubeconfig == "" {
 		return Receipt{}, fmt.Errorf("host, state, namespace, agent, and kubeconfig fields are required")
 	}
-	if config.BinaryDirectory == "" {
-		executable, err := os.Executable()
-		if err != nil {
-			return Receipt{}, err
-		}
-		config.BinaryDirectory = filepath.Dir(executable)
+	if len(config.PublicBinary) == 0 {
+		return Receipt{}, fmt.Errorf("captured public native binary is required")
 	}
 	if config.RuntimeRoot == "" {
 		config.RuntimeRoot = filepath.Join(string(filepath.Separator), "var", "tmp", "idleloom")
@@ -96,21 +92,9 @@ func Install(ctx context.Context, config Config) (Receipt, error) {
 		}
 	}
 
-	copyBinary := func(name string) (string, error) {
-		source := filepath.Join(config.BinaryDirectory, name)
-		destination := filepath.Join(binDirectory, name)
-		if err := copyFile(source, destination, 0o700); err != nil {
-			return "", fmt.Errorf("install %s: %w", name, err)
-		}
-		return destination, nil
-	}
-	controller, err := copyBinary("idleloom-controller")
-	if err != nil {
-		return Receipt{}, err
-	}
-	agent, err := copyBinary("idleloom-agent")
-	if err != nil {
-		return Receipt{}, err
+	serviceBinary := filepath.Join(binDirectory, "idlectl")
+	if err := writeBinary(serviceBinary, config.PublicBinary, 0o700); err != nil {
+		return Receipt{}, fmt.Errorf("install idlectl service binary: %w", err)
 	}
 	hostSuffix := labelSuffix(config.HostID)
 	home, err := os.UserHomeDir()
@@ -126,33 +110,29 @@ func Install(ctx context.Context, config Config) (Receipt, error) {
 	}
 	services := []service{
 		{
-			label: "io.idleloom.controller." + hostSuffix, program: controller,
-			arguments:   []string{"--kubeconfig", config.ControllerKubeconfig, "--interval", "2s"},
+			label: "io.idleloom.controller." + hostSuffix, program: serviceBinary,
+			arguments:   []string{"internal", "controller", "--kubeconfig", config.ControllerKubeconfig, "--interval", "2s"},
 			environment: userEnvironment,
 			stdout:      filepath.Join(logsDirectory, "controller.log"), stderr: filepath.Join(logsDirectory, "controller.log"),
 		},
 		{
-			label: "io.idleloom.agent." + hostSuffix, program: agent,
+			label: "io.idleloom.agent." + hostSuffix, program: serviceBinary,
 			arguments: []string{
-				"--kubeconfig", config.AgentKubeconfig, "--namespace", config.Namespace,
+				"internal", "agent", "--kubeconfig", config.AgentKubeconfig, "--namespace", config.Namespace,
 				"--agent-id", config.AgentID, "--root", config.RuntimeRoot,
 				"--state-dir", config.StateDirectory, "--link", config.LinkMode,
 				"--kubelet-client-cn", config.KubeletClientCommonNames,
 				"--kubelet-client-organization", config.KubeletClientOrganizations,
 			},
-			environment: userEnvironment,
-			stdout:      filepath.Join(logsDirectory, "agent.log"), stderr: filepath.Join(logsDirectory, "agent.log"),
+			environment: userEnvironment, processType: "Standard",
+			stdout: filepath.Join(logsDirectory, "agent.log"), stderr: filepath.Join(logsDirectory, "agent.log"),
 		},
 	}
 	if config.ProjectionKubeconfig != "" {
-		projection, copyErr := copyBinary("idleloom-projection")
-		if copyErr != nil {
-			return Receipt{}, copyErr
-		}
 		services = append(services, service{
-			label: "io.idleloom.projection." + hostSuffix, program: projection,
+			label: "io.idleloom.projection." + hostSuffix, program: serviceBinary,
 			arguments: []string{
-				"--kubeconfig", config.ProjectionKubeconfig, "--state-dir", config.StateDirectory,
+				"internal", "projection", "--kubeconfig", config.ProjectionKubeconfig, "--state-dir", config.StateDirectory,
 				"--enable-kubernetes-projection", "--interval", "2s",
 			},
 			environment: userEnvironment,
@@ -170,20 +150,6 @@ func Install(ctx context.Context, config Config) (Receipt, error) {
 		state, err := nativewirekube.ReadState(config.StateDirectory)
 		if err != nil {
 			return Receipt{}, fmt.Errorf("validate connected-leaf state: %w", err)
-		}
-		if len(config.PublicBinary) == 0 {
-			return Receipt{}, fmt.Errorf("captured public native binary is required for the privileged link")
-		}
-		publicBinaryData, err := readRegularFile(filepath.Join(config.BinaryDirectory, "idlectl"), 256<<20)
-		if err != nil {
-			return Receipt{}, fmt.Errorf("read public native binary: %w", err)
-		}
-		companionData, err := readRegularFile(filepath.Join(config.BinaryDirectory, "idleloom-link"), 256<<20)
-		if err != nil {
-			return Receipt{}, fmt.Errorf("read link companion: %w", err)
-		}
-		if !sameBinary(config.PublicBinary, publicBinaryData) || !sameBinary(config.PublicBinary, companionData) {
-			return Receipt{}, fmt.Errorf("native bundle binaries do not match the running public binary")
 		}
 		rootState := state
 		rootState.LinkKubeconfig = nativewirekube.LinkKubeconfigPath(rootStateDirectory)
@@ -319,6 +285,9 @@ func Remove(ctx context.Context, stateDirectory string) error {
 	if err := validateReceipt(receipt); err != nil {
 		return err
 	}
+	if err := preflightRootRemoval(ctx, stateDirectory, receipt, verifyRootReceipt); err != nil {
+		return err
+	}
 	uid := strconv.Itoa(os.Getuid())
 	launchAgents, err := userLaunchAgentsDirectory()
 	if err != nil {
@@ -340,6 +309,20 @@ func Remove(ctx context.Context, stateDirectory string) error {
 	return os.Remove(filepath.Join(stateDirectory, receiptFileName))
 }
 
+func preflightRootRemoval(ctx context.Context, stateDirectory string, receipt Receipt, verify func(context.Context, string, Receipt, string) error) error {
+	if receipt.RootLabel == "" || receipt.RootPhase == "planned" {
+		return nil
+	}
+	_, _, rootStateDirectory, err := rootArtifacts(receipt.RootLabel)
+	if err != nil {
+		return err
+	}
+	if err := verify(ctx, stateDirectory, receipt, rootStateDirectory); err != nil {
+		return fmt.Errorf("verify privileged service ownership before stopping user services: %w", err)
+	}
+	return nil
+}
+
 func launchdPlist(item service) []byte {
 	var output strings.Builder
 	output.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
@@ -357,7 +340,12 @@ func launchdPlist(item service) []byte {
 		writeString(&output, argument)
 	}
 	output.WriteString("</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n")
-	output.WriteString("<key>ProcessType</key><string>Background</string>\n<key>ThrottleInterval</key><integer>5</integer>\n")
+	processType := item.processType
+	if processType == "" {
+		processType = "Background"
+	}
+	writeKeyString(&output, "ProcessType", processType)
+	output.WriteString("<key>ThrottleInterval</key><integer>5</integer>\n")
 	writeKeyString(&output, "StandardOutPath", item.stdout)
 	writeKeyString(&output, "StandardErrorPath", item.stderr)
 	output.WriteString("</dict></plist>\n")
@@ -398,18 +386,15 @@ func writeReceipt(directory string, receipt Receipt) error {
 		return err
 	}
 	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
+	defer func() { _ = os.Remove(temporaryName) }()
 	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if _, err := temporary.Write(append(data, '\n')); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return err
@@ -613,7 +598,7 @@ func readRegularFile(path string, maximumBytes int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	opened, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -677,21 +662,21 @@ func machoCodeHash(data []byte) ([]byte, error) {
 	var signature []byte
 	for index := 0; index < numberOfCommands; index++ {
 		if offset+8 > len(data) {
-			return nil, fmt.Errorf("Mach-O load commands are truncated")
+			return nil, fmt.Errorf("the Mach-O load commands are truncated")
 		}
 		command := binary.LittleEndian.Uint32(data[offset : offset+4])
 		commandSize := int(binary.LittleEndian.Uint32(data[offset+4 : offset+8]))
 		if commandSize < 8 || offset+commandSize > len(data) {
-			return nil, fmt.Errorf("Mach-O load command is invalid")
+			return nil, fmt.Errorf("the Mach-O load command is invalid")
 		}
 		if command == loadCodeSignature {
 			if commandSize < 16 {
-				return nil, fmt.Errorf("Mach-O code signature command is truncated")
+				return nil, fmt.Errorf("the Mach-O code signature command is truncated")
 			}
 			dataOffset := int(binary.LittleEndian.Uint32(data[offset+8 : offset+12]))
 			dataSize := int(binary.LittleEndian.Uint32(data[offset+12 : offset+16]))
 			if dataOffset < 0 || dataSize <= 0 || dataOffset+dataSize > len(data) {
-				return nil, fmt.Errorf("Mach-O code signature range is invalid")
+				return nil, fmt.Errorf("the Mach-O code signature range is invalid")
 			}
 			signature = data[dataOffset : dataOffset+dataSize]
 			break
@@ -699,12 +684,12 @@ func machoCodeHash(data []byte) ([]byte, error) {
 		offset += commandSize
 	}
 	if len(signature) < 12 || binary.BigEndian.Uint32(signature[:4]) != superBlobMagic {
-		return nil, fmt.Errorf("Mach-O embedded signature is missing")
+		return nil, fmt.Errorf("the Mach-O embedded signature is missing")
 	}
 	signatureLength := int(binary.BigEndian.Uint32(signature[4:8]))
 	count := int(binary.BigEndian.Uint32(signature[8:12]))
 	if signatureLength > len(signature) || count < 1 || 12+count*8 > signatureLength {
-		return nil, fmt.Errorf("Mach-O embedded signature is invalid")
+		return nil, fmt.Errorf("the Mach-O embedded signature is invalid")
 	}
 	for index := 0; index < count; index++ {
 		entry := 12 + index*8
@@ -713,20 +698,20 @@ func machoCodeHash(data []byte) ([]byte, error) {
 		}
 		blobOffset := int(binary.BigEndian.Uint32(signature[entry+4 : entry+8]))
 		if blobOffset < 0 || blobOffset+8 > signatureLength {
-			return nil, fmt.Errorf("Mach-O code directory offset is invalid")
+			return nil, fmt.Errorf("the Mach-O code directory offset is invalid")
 		}
 		codeDirectory := signature[blobOffset:signatureLength]
 		if binary.BigEndian.Uint32(codeDirectory[:4]) != codeDirectoryMagic {
-			return nil, fmt.Errorf("Mach-O code directory is invalid")
+			return nil, fmt.Errorf("the Mach-O code directory is invalid")
 		}
 		length := int(binary.BigEndian.Uint32(codeDirectory[4:8]))
 		if length < 8 || length > len(codeDirectory) {
-			return nil, fmt.Errorf("Mach-O code directory length is invalid")
+			return nil, fmt.Errorf("the Mach-O code directory length is invalid")
 		}
 		digest := sha256.Sum256(codeDirectory[:length])
 		return append([]byte(nil), digest[:20]...), nil
 	}
-	return nil, fmt.Errorf("Mach-O primary code directory is missing")
+	return nil, fmt.Errorf("the Mach-O primary code directory is missing")
 }
 
 func sudoWriteFile(ctx context.Context, destination string, data []byte, mode os.FileMode) error {
@@ -862,12 +847,10 @@ func resolveSudoArguments(arguments []string) ([]string, error) {
 	return append([]string{path}, arguments[1:]...), nil
 }
 
-func copyFile(source, destination string, mode os.FileMode) error {
-	input, err := os.Open(source)
-	if err != nil {
-		return err
+func writeBinary(destination string, data []byte, mode os.FileMode) error {
+	if len(data) == 0 {
+		return fmt.Errorf("binary data is empty")
 	}
-	defer input.Close()
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return err
 	}
@@ -876,14 +859,15 @@ func copyFile(source, destination string, mode os.FileMode) error {
 		return err
 	}
 	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
+	defer func() { _ = os.Remove(temporaryName) }()
 	if err := temporary.Chmod(mode); err != nil {
-		temporary.Close()
-		return err
+		return errors.Join(err, temporary.Close())
 	}
-	if _, err := io.Copy(temporary, input); err != nil {
-		temporary.Close()
-		return err
+	if _, err := temporary.Write(data); err != nil {
+		return errors.Join(err, temporary.Close())
+	}
+	if err := temporary.Sync(); err != nil {
+		return errors.Join(err, temporary.Close())
 	}
 	if err := temporary.Close(); err != nil {
 		return err

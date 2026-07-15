@@ -9,5 +9,7 @@ parametersSchema: parameters.schema.json
 example: example.yaml
 prerequisites:
 - A Native Metal host joined in the default WireKube connected mode.
+- A real schedulable Linux kubelet node on the WireKube mesh for in-cluster clients.
+- macOS 26 or later and Python 3.12 for first-use runtime preparation.
 - The built-in qwen3-5-0-8b-mlx model catalog installed by idlectl join.
 - Cluster access to read the controller-generated SERVICE-auth Secret.

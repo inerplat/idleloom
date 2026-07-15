@@ -1,0 +1,60 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: idleloom-longhorn-smoke
+  namespace: default
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/example: worker-longhorn
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: longhorn
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: idleloom-longhorn-smoke
+  namespace: default
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/example: worker-longhorn
+spec:
+  restartPolicy: Never
+  nodeSelector:
+    kubernetes.io/os: linux
+    idleloom-worker: "true"
+  tolerations:
+    - key: idleloom-dedicated
+      operator: Exists
+      effect: NoSchedule
+  securityContext:
+    fsGroup: 65532
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: smoke
+      image: docker.io/library/python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          printf 'longhorn volume mounted\n' > /data/result.txt
+          cat /data/result.txt
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities:
+          drop: ["ALL"]
+        readOnlyRootFilesystem: true
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  volumes:
+    - name: data
+      persistentVolumeClaim:
+        claimName: idleloom-longhorn-smoke

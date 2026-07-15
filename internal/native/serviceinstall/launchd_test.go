@@ -2,6 +2,7 @@ package serviceinstall
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -23,10 +24,20 @@ func TestLaunchdPlistEscapesArgumentsAndIsValid(t *testing.T) {
 	if !bytes.Contains(data, []byte("/usr/bin/env")) || !bytes.Contains(data, []byte("<string>-i</string>")) {
 		t.Fatalf("plist does not clear inherited launchd environment: %s", data)
 	}
+	if !bytes.Contains(data, []byte("<key>ProcessType</key><string>Background</string>")) {
+		t.Fatalf("default service process type is not Background: %s", data)
+	}
 	command := exec.Command("plutil", "-lint", "-")
 	command.Stdin = bytes.NewReader(data)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("plutil rejected generated plist: %v: %s", err, output)
+	}
+}
+
+func TestLaunchdPlistAllowsStandardComputeAgent(t *testing.T) {
+	data := launchdPlist(service{label: "io.idleloom.agent.test", program: "/tmp/idlectl", processType: "Standard"})
+	if !bytes.Contains(data, []byte("<key>ProcessType</key><string>Standard</string>")) {
+		t.Fatalf("compute agent process type is not Standard: %s", data)
 	}
 }
 
@@ -119,7 +130,7 @@ func TestCanonicalPathResolvesStateDirectoryAliases(t *testing.T) {
 	if err := os.Symlink(directory, alias); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Remove(alias)
+	defer func() { _ = os.Remove(alias) }()
 	got, err := canonicalPath(alias)
 	if err != nil {
 		t.Fatal(err)
@@ -152,12 +163,34 @@ func TestRootOwnershipBindsLabelAndStateDirectory(t *testing.T) {
 	}
 }
 
-func TestPrivilegedHelperMustMatchPublicBinary(t *testing.T) {
+func TestBinaryIdentityComparison(t *testing.T) {
 	if !sameBinary([]byte("same"), []byte("same")) {
 		t.Fatal("identical binaries did not match")
 	}
 	if sameBinary([]byte("public"), []byte("replaced")) {
 		t.Fatal("replaced link companion matched public binary")
+	}
+}
+
+func TestWriteBinaryInstallsOnlyProvidedCanonicalBytes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bin", "idlectl")
+	want := []byte("canonical-idlectl")
+	if err := writeBinary(path, want, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("installed bytes = %q, want %q", got, want)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("installed mode = %o, want 700", info.Mode().Perm())
 	}
 }
 
@@ -189,6 +222,36 @@ func TestCapturedBinaryMatchesRunningCodeIdentity(t *testing.T) {
 	}
 	if len(data) == 0 {
 		t.Fatal("captured binary is empty")
+	}
+}
+
+func TestRootRemovalPreflightAuthenticatesBeforeMutation(t *testing.T) {
+	receipt := Receipt{
+		Version: 1, HostID: "studio", RootLabel: "io.idleloom.link.studio", RootPhase: "owned",
+	}
+	called := false
+	wantErr := errors.New("authorization denied")
+	err := preflightRootRemoval(context.Background(), "/tmp/state", receipt, func(_ context.Context, stateDirectory string, got Receipt, rootStateDirectory string) error {
+		called = true
+		if stateDirectory != "/tmp/state" || got.HostID != receipt.HostID || got.RootLabel != receipt.RootLabel || got.RootPhase != receipt.RootPhase || rootStateDirectory != "/Library/Application Support/Idleloom/Native/io.idleloom.link.studio" {
+			t.Fatalf("preflight arguments: state=%q receipt=%#v root=%q", stateDirectory, got, rootStateDirectory)
+		}
+		return wantErr
+	})
+	if !called || !errors.Is(err, wantErr) {
+		t.Fatalf("preflight called=%t err=%v", called, err)
+	}
+}
+
+func TestPlannedRootRemovalSkipsOwnershipPreflight(t *testing.T) {
+	receipt := Receipt{
+		Version: 1, HostID: "studio", RootLabel: "io.idleloom.link.studio", RootPhase: "planned",
+	}
+	if err := preflightRootRemoval(context.Background(), "/tmp/state", receipt, func(context.Context, string, Receipt, string) error {
+		t.Fatal("planned cleanup attempted to verify an ownership record that may not exist")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

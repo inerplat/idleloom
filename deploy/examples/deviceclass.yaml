@@ -2,6 +2,9 @@ apiVersion: resource.k8s.io/v1
 kind: DeviceClass
 metadata:
   name: apple-vulkan
+  labels:
+    app.kubernetes.io/managed-by: idleloom
+    ai.idleloom.io/example: vulkan-dra-smoke
 spec:
   selectors:
     - cel:

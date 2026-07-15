@@ -62,27 +62,22 @@ func AcquireRuntimeLock(directory string) (*RuntimeLock, error) {
 	}
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		file.Close()
-		return nil, fmt.Errorf("runtime lock path must be a regular file")
+		return nil, errors.Join(fmt.Errorf("runtime lock path must be a regular file"), file.Close())
 	}
 	var fileStat unix.Stat_t
 	if err := unix.Fstat(fd, &fileStat); err != nil || fileStat.Uid != uint32(os.Geteuid()) {
-		file.Close()
-		return nil, fmt.Errorf("runtime lock must be owned by the connectivity service user")
+		return nil, errors.Join(fmt.Errorf("runtime lock must be owned by the connectivity service user"), file.Close())
 	}
 	if err := file.Chmod(0o644); err != nil {
-		file.Close()
-		return nil, err
+		return nil, errors.Join(err, file.Close())
 	}
 	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("another connectivity service instance is active: %w", err)
+		return nil, errors.Join(fmt.Errorf("another connectivity service instance is active: %w", err), file.Close())
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		_ = unix.Flock(int(file.Fd()), unix.LOCK_UN)
-		file.Close()
-		return nil, err
+		return nil, errors.Join(err, file.Close())
 	}
 	return &RuntimeLock{file: file, InstanceID: hex.EncodeToString(nonce[:])}, nil
 }
@@ -96,7 +91,7 @@ func RuntimeLockIsHeld(directory string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	err = unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
 	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 		return true, nil

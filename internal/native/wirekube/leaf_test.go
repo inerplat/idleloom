@@ -124,7 +124,7 @@ func TestEnrollCreatesStableOwnedWireKubePeerAndRestrictedIdentity(t *testing.T)
 }
 
 func TestRelayTokenUsesWireKubeAudience(t *testing.T) {
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 	var audiences []string
 	client.PrependReactor("create", "serviceaccounts", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "token" {
@@ -305,7 +305,7 @@ func testEnrollConfig(directory string, dynamicClient *dynamicfake.FakeDynamicCl
 }
 
 func newKubernetesTestClient() *fake.Clientset {
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 	client.PrependReactor("create", "serviceaccounts", func(action clienttesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "token" {
 			return false, nil, nil

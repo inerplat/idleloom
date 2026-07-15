@@ -102,7 +102,7 @@ func validatePropertySchema(name string, property propertySchema) error {
 			return fmt.Errorf("parameter %q has invalid pattern: %w", name, err)
 		}
 	}
-	if property.Format != "" && property.Format != "namespace" && property.Format != "dnsSubdomain" && property.Format != "positiveQuantity" && property.Format != "httpsURL" && property.Format != "sha256Hex" {
+	if property.Format != "" && property.Format != "namespace" && property.Format != "dnsLabel" && property.Format != "dnsSubdomain" && property.Format != "positiveQuantity" && property.Format != "httpsURL" && property.Format != "sha256Hex" {
 		return fmt.Errorf("parameter %q has unsupported format %q", name, property.Format)
 	}
 	if property.Format != "" && property.Type != "string" {
@@ -207,6 +207,10 @@ func validateParameter(name string, value any, property propertySchema) error {
 			if problems := validation.IsDNS1123Label(text); len(problems) > 0 {
 				return fmt.Errorf("parameter %q must be a Kubernetes namespace: %s", name, strings.Join(problems, "; "))
 			}
+		case "dnsLabel":
+			if problems := validation.IsDNS1123Label(text); len(problems) > 0 {
+				return fmt.Errorf("parameter %q must be a Kubernetes DNS label: %s", name, strings.Join(problems, "; "))
+			}
 		case "dnsSubdomain":
 			if problems := validation.IsDNS1123Subdomain(text); len(problems) > 0 {
 				return fmt.Errorf("parameter %q must be a Kubernetes DNS subdomain: %s", name, strings.Join(problems, "; "))
@@ -218,8 +222,8 @@ func validateParameter(name string, value any, property propertySchema) error {
 			}
 		case "httpsURL":
 			parsed, err := url.Parse(text)
-			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
-				return fmt.Errorf("parameter %q must be a credential-free HTTPS URL without a fragment", name)
+			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+				return fmt.Errorf("parameter %q must be a credential-free HTTPS URL without a query or fragment", name)
 			}
 		case "sha256Hex":
 			if matched, _ := regexp.MatchString(`^[a-f0-9]{64}$`, text); !matched {

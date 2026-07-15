@@ -20,6 +20,10 @@ spec:
       serviceAccountName: apple-vulkan-dra-node
       nodeSelector:
         idleloom-accelerator: apple-vulkan
+      tolerations:
+        - key: idleloom-dedicated
+          operator: Exists
+          effect: NoSchedule
       containers:
         - name: dra-node
           image: idleloom-vulkan-dra:dev

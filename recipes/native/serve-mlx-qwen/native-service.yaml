@@ -15,6 +15,10 @@ metadata:
     ai.idleloom.io/input-digest: {{ quote .InputDigest }}
 spec:
   mode: Server
+  run:
+    task: serve
+    experiment: {{ quote .Name }}
+    attempt: 1
   model:
     catalogRef: {{ quote (index .Values "model") }}
   server:

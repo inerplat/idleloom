@@ -102,18 +102,15 @@ func (s *Store) persistLocked() error {
 		return fmt.Errorf("create temporary state: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return fmt.Errorf("chmod temporary state: %w", err)
+		return errors.Join(fmt.Errorf("chmod temporary state: %w", err), tmp.Close())
 	}
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temporary state: %w", err)
+		return errors.Join(fmt.Errorf("write temporary state: %w", err), tmp.Close())
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return fmt.Errorf("sync temporary state: %w", err)
+		return errors.Join(fmt.Errorf("sync temporary state: %w", err), tmp.Close())
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary state: %w", err)
@@ -125,9 +122,8 @@ func (s *Store) persistLocked() error {
 	if err != nil {
 		return fmt.Errorf("open state directory: %w", err)
 	}
-	defer dir.Close()
 	if err := dir.Sync(); err != nil {
-		return fmt.Errorf("sync state directory: %w", err)
+		return errors.Join(fmt.Errorf("sync state directory: %w", err), dir.Close())
 	}
-	return nil
+	return dir.Close()
 }
