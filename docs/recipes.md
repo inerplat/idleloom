@@ -14,9 +14,11 @@ rendered YAML is the durable interface: it can be reviewed, stored, changed
 under source control, and applied with `kubectl` without a separate Idleloom
 run service.
 
-For a zero-context installation and copyable verification path across both
-backends, start with [`getting-started.md`](getting-started.md). This document
-is the deeper recipe reference.
+For a zero-context installation, start with the
+[documentation entry point](getting-started/index.md) and select either the
+[Native Metal](getting-started/native-metal.md) or
+[Linux Worker](getting-started/linux-worker.md) path. This document is the
+deeper recipe reference.
 
 Commands that reference `examples/...` assume the current directory is the
 repository root. Recipe discovery and rendering themselves remain embedded in
@@ -185,9 +187,10 @@ volumes, `exec`, and port forwarding when a workload shape needs them. Those
 are Worker capabilities; the Native backend does not emulate them.
 
 The runnable toolbox, hostPath, and Longhorn manifests under
-[`examples/worker`](../examples/worker) exercise these standard Pod semantics.
-The exact `logs`, `exec`, and port-forward commands are in
-[`getting-started.md`](getting-started.md).
+[`examples/worker`](https://github.com/inerplat/idleloom/tree/main/examples/worker)
+exercise these standard Pod semantics. The exact `logs`, `exec`, and
+port-forward path starts in the
+[Linux Worker quick start](getting-started/linux-worker.md).
 
 ## Native Metal batch inference
 

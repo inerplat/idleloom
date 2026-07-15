@@ -1,6 +1,7 @@
 package idleloom
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -14,6 +15,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
 
@@ -217,6 +219,168 @@ func TestResumeEnrollmentReinstallsFreshBootstrapBundle(t *testing.T) {
 	}
 }
 
+func TestRegisterWorkerWithoutWaitingCleansBootstrapAndCordonsNode(t *testing.T) {
+	secretUID := types.UID("bootstrap-token-uid")
+	client := kubernetesfake.NewClientset(
+		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "worker-a"}},
+		&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "bootstrap-token-test", Namespace: "kube-system", UID: secretUID}},
+	)
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state := &State{
+		NodeName: "worker-a", Phase: PhaseEnrolling,
+		Runtime: RuntimeState{NodeName: "worker-a"},
+	}
+	runtime := &resumeRuntime{}
+	var output bytes.Buffer
+	maintainerCalls := 0
+	app := &App{
+		Out: &output, Err: io.Discard, Now: time.Now, Runtime: runtime,
+		StartMaintainer: func(context.Context, string, io.Writer) error {
+			maintainerCalls++
+			return nil
+		},
+	}
+	token := &BootstrapToken{SecretName: "bootstrap-token-test", UID: secretUID, client: client}
+	cluster := &Cluster{Client: client}
+
+	if err := app.registerWorkerWithoutWaiting(context.Background(), statePath, state, cluster, token); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Phase != PhaseRegistered {
+		t.Fatalf("phase = %q, want %q", stored.Phase, PhaseRegistered)
+	}
+	node, err := client.CoreV1().Nodes().Get(context.Background(), "worker-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !node.Spec.Unschedulable {
+		t.Fatal("registered node was not cordoned")
+	}
+	if _, err := client.CoreV1().Secrets("kube-system").Get(context.Background(), token.SecretName, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("bootstrap token still exists: %v", err)
+	}
+	if token.client != nil {
+		t.Fatal("deleted bootstrap token retained its client")
+	}
+	if runtime.removeBootstrapCalls != 1 || runtime.waitReadyCalls != 0 {
+		t.Fatalf("runtime cleanup calls = %d, wait calls = %d", runtime.removeBootstrapCalls, runtime.waitReadyCalls)
+	}
+	if maintainerCalls != 1 {
+		t.Fatalf("maintainer calls = %d, want 1", maintainerCalls)
+	}
+	if !strings.Contains(output.String(), "readiness is pending") || !strings.Contains(output.String(), "remains cordoned") {
+		t.Fatalf("unexpected output: %s", output.String())
+	}
+}
+
+func TestCompleteRegisteredEnrollmentWaitsAndUncordons(t *testing.T) {
+	now := time.Now().UTC()
+	client := kubernetesfake.NewClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-a"},
+		Spec:       corev1.NodeSpec{Unschedulable: true},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionTrue, LastHeartbeatTime: metav1.NewTime(now),
+		}}},
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state := &State{
+		NodeName: "worker-a", Phase: PhaseRegistered, CreatedAt: now.Add(-time.Minute),
+		Runtime: RuntimeState{NodeName: "worker-a", GuestIP: "192.0.2.20"},
+	}
+	if err := SaveState(statePath, *state); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &resumeRuntime{status: WorkerStatus{VM: "running", Network: "running"}}
+	maintainerCalls := 0
+	servingChecks := 0
+	app := &App{
+		Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: runtime,
+		ApproveKubeletServingCSR: func(context.Context, *Cluster, string, string, time.Time, bool, time.Duration) error {
+			servingChecks++
+			return nil
+		},
+		StartMaintainer: func(context.Context, string, io.Writer) error {
+			maintainerCalls++
+			return nil
+		},
+	}
+	cluster := &Cluster{Client: client}
+
+	if err := app.completeRegisteredEnrollment(context.Background(), statePath, state, cluster, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := LoadState(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Phase != PhaseReady {
+		t.Fatalf("phase = %q, want %q", stored.Phase, PhaseReady)
+	}
+	node, err := client.CoreV1().Nodes().Get(context.Background(), "worker-a", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.Spec.Unschedulable {
+		t.Fatal("ready node remained cordoned")
+	}
+	if runtime.startCalls != 1 || runtime.waitReadyCalls != 1 {
+		t.Fatalf("runtime start=%d wait=%d, want 1/1", runtime.startCalls, runtime.waitReadyCalls)
+	}
+	if servingChecks != 1 || maintainerCalls != 1 {
+		t.Fatalf("serving checks=%d maintainer calls=%d", servingChecks, maintainerCalls)
+	}
+}
+
+func TestCompleteRegisteredEnrollmentFailureStaysRegisteredAndCordoned(t *testing.T) {
+	client := kubernetesfake.NewClientset(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-a"},
+		Spec:       corev1.NodeSpec{Unschedulable: true},
+		Status: corev1.NodeStatus{Conditions: []corev1.NodeCondition{{
+			Type: corev1.NodeReady, Status: corev1.ConditionFalse,
+		}}},
+	})
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	state := &State{
+		NodeName: "worker-a", Phase: PhaseRegistered, CreatedAt: time.Now().Add(-time.Minute),
+		Runtime: RuntimeState{NodeName: "worker-a", GuestIP: "192.0.2.20"},
+	}
+	if err := SaveState(statePath, *state); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{
+		Out: io.Discard, Err: io.Discard, Now: time.Now,
+		Runtime: &resumeRuntime{status: WorkerStatus{VM: "running", Network: "running"}},
+		ApproveKubeletServingCSR: func(context.Context, *Cluster, string, string, time.Time, bool, time.Duration) error {
+			return nil
+		},
+		StartMaintainer: func(context.Context, string, io.Writer) error { return nil },
+	}
+	cluster := &Cluster{Client: client}
+
+	err := app.completeRegisteredEnrollment(context.Background(), statePath, state, cluster, 5*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "node readiness") {
+		t.Fatalf("completion error = %v", err)
+	}
+	stored, loadErr := LoadState(statePath)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if stored.Phase != PhaseRegistered {
+		t.Fatalf("phase = %q, want %q", stored.Phase, PhaseRegistered)
+	}
+	node, getErr := client.CoreV1().Nodes().Get(context.Background(), "worker-a", metav1.GetOptions{})
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if !node.Spec.Unschedulable {
+		t.Fatal("failed registered completion uncordoned the node")
+	}
+}
+
 type rejectingRuntime struct {
 	err error
 }
@@ -227,11 +391,13 @@ type deletingRuntime struct {
 }
 
 type resumeRuntime struct {
-	startCalls         int
-	waitReadyCalls     int
-	installCalls       int
-	bundle             []byte
-	removeBootstrapErr error
+	startCalls           int
+	waitReadyCalls       int
+	installCalls         int
+	removeBootstrapCalls int
+	bundle               []byte
+	removeBootstrapErr   error
+	status               WorkerStatus
 }
 
 func (r *resumeRuntime) Preflight(context.Context) error { return nil }
@@ -260,10 +426,11 @@ func (r *resumeRuntime) InstallBundle(_ context.Context, _ RuntimeState, path st
 	return nil
 }
 func (r *resumeRuntime) RemoveBootstrapIdentity(context.Context, RuntimeState) error {
+	r.removeBootstrapCalls++
 	return r.removeBootstrapErr
 }
 func (r *resumeRuntime) Status(context.Context, *RuntimeState) (WorkerStatus, error) {
-	return WorkerStatus{}, nil
+	return r.status, nil
 }
 
 func (r deletingRuntime) Validate(context.Context, RuntimeState) error { return nil }

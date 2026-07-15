@@ -19,6 +19,14 @@ type WireKubeStatus struct {
 }
 
 func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeStatus, error) {
+	return checkWireKube(ctx, client, true)
+}
+
+func checkWireKubeForRegistration(ctx context.Context, client kubernetes.Interface) (WireKubeStatus, error) {
+	return checkWireKube(ctx, client, false)
+}
+
+func checkWireKube(ctx context.Context, client kubernetes.Interface, requireReadyPeer bool) (WireKubeStatus, error) {
 	var status WireKubeStatus
 	raw, err := client.Discovery().RESTClient().Get().AbsPath("/apis/wirekube.io/v1alpha1/wirekubemeshes/default").Do(ctx).Raw()
 	if err != nil {
@@ -52,16 +60,23 @@ func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeSt
 			break
 		}
 	}
-	if status.AgentName == "" {
-		return status, fmt.Errorf("the WireKubeMesh exists but no WireKube agent DaemonSet was found")
-	}
-	if !status.IncludeNodeInternalIP {
-		return status, fmt.Errorf("the WireKubeMesh default must set spec.autoAllowedIPs.includeNodeInternalIP=true")
-	}
-	if status.ReadyPeers == 0 {
-		return status, fmt.Errorf("the WireKube installation has no ready ingress peers")
+	if err := validateWireKubeStatus(status, requireReadyPeer); err != nil {
+		return status, err
 	}
 	return status, nil
+}
+
+func validateWireKubeStatus(status WireKubeStatus, requireReadyPeer bool) error {
+	if status.AgentName == "" {
+		return fmt.Errorf("the WireKubeMesh exists but no WireKube agent DaemonSet was found")
+	}
+	if !status.IncludeNodeInternalIP {
+		return fmt.Errorf("the WireKubeMesh default must set spec.autoAllowedIPs.includeNodeInternalIP=true")
+	}
+	if requireReadyPeer && status.ReadyPeers == 0 {
+		return fmt.Errorf("the WireKube installation has no ready ingress peers")
+	}
+	return nil
 }
 
 func WireKubePeerConnected(ctx context.Context, client kubernetes.Interface, nodeName string) (bool, error) {

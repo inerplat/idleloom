@@ -3,9 +3,9 @@
 Idleloom enrolls a remote worker with Kubernetes TLS bootstrap. It does not
 copy an administrator certificate or the source kubeconfig into the worker VM.
 
-For repository acquisition, CLI build, WireKube installation choices, Worker
-join, Pod and storage examples, Vulkan DRA, and cleanup, start with
-[`getting-started.md`](getting-started.md).
+For repository acquisition, CLI build, WireKube installation, and Worker join,
+start with the [Linux Worker quick start](getting-started/linux-worker.md).
+Storage and Vulkan are separate use-case guides.
 
 ## Enrollment sequence
 
@@ -82,6 +82,17 @@ The first join uses the bootstrap token. Later starts use the kubelet client
 certificate stored under `/var/lib/kubelet`; no new bootstrap token is needed.
 The bootstrap kubeconfig is removed from the guest after successful enrollment.
 
+`idleloom init --wait=false` is an explicit deferred-readiness path for managed
+clusters that need operator-side CNI image or WireKube gateway work after Node
+registration. Idleloom still approves the serving certificate, deletes the
+bootstrap token, removes the guest bootstrap identity, records phase
+`registered`, and cordons the Node. It does not wait for the WireKube peer or
+Node `Ready` condition. Run `idleloom start` after fixing the cluster-side
+dependency; successful completion records phase `ready` and uncordons the
+Node. The WireKube mesh, agent DaemonSet, and Node InternalIP advertisement
+remain mandatory; only the zero-ready-peer check is relaxed during deferred
+registration.
+
 If `init` is interrupted after the kubelet has obtained its client certificate,
 the state remains in phase `enrolling`. Fix the external cause, then run
 `idleloom start` to resume Node labeling, serving certificate approval,
@@ -91,7 +102,7 @@ pass that same path to `status`, `start`, `stop`, and `delete`. Use
 `idleloom delete` with the matching state path when the partial worker should
 be discarded instead. Runtime logs are under
 `~/.idleloom/runtimes/<node-name>` by default; exact filenames are listed in
-[`getting-started.md`](getting-started.md).
+[Lifecycle](operations/lifecycle.md).
 
 ## Why WireKube is part of onboarding
 
@@ -122,19 +133,11 @@ The Linux worker command does not install cluster dependencies. Install the
 WireKube release required by this checkout before running `idleloom init`.
 Native Metal `idlectl join` has a separate integrated dependency path.
 
-On Apple Silicon macOS, download and verify WireKube v0.0.15:
+Install the released WireKube CLI from the public Homebrew tap:
 
 ```sh
-version=v0.0.15
-curl -fLO "https://github.com/inerplat/wirekube/releases/download/${version}/wirekubectl-darwin-arm64"
-curl -fLO "https://github.com/inerplat/wirekube/releases/download/${version}/wirekubectl-checksums.txt"
-
-expected="$(awk '$2 == "wirekubectl-darwin-arm64" { print $1 }' wirekubectl-checksums.txt)"
-actual="$(shasum -a 256 wirekubectl-darwin-arm64 | awk '{ print $1 }')"
-test -n "${expected}" && test "${actual}" = "${expected}"
-
-chmod +x wirekubectl-darwin-arm64
-sudo install wirekubectl-darwin-arm64 /usr/local/bin/wirekubectl
+brew install inerplat/tap/wirekube
+wirekubectl version
 ```
 
 Run the ownership-aware easy installer. `internal-ip` advertising is required
@@ -157,7 +160,7 @@ The interactive plan must show a non-overlapping mesh CIDR, a reachable relay,
 the privileged agent DaemonSet, and
 `spec.autoAllowedIPs.includeNodeInternalIP=true`. A public TCP
 `LoadBalancer` is the simplest ingress path. For a cluster without one, the
-same v0.0.15 easy installer can create a TCP NodePort without a source
+same easy installer can create a TCP NodePort without a source
 checkout. Replace the example address with a stable, publicly reachable node:
 
 ```sh
@@ -174,8 +177,8 @@ nc -vz 203.0.113.10 30478
 ```
 
 WSS requires an operator-managed public hostname, certificate, and HTTPS
-Gateway or Ingress. Follow the version-matched
-[WireKube v0.0.15 relay guide](https://github.com/inerplat/wirekube/blob/v0.0.15/docs/guides/relay-entrypoints.md).
+Gateway or Ingress. Follow the
+[WireKube relay guide](https://inerplat.github.io/wirekube/guides/relay-entrypoints/).
 
 WireKube is a cluster-wide shared dependency. `idleloom delete` removes the
 worker Node and its Idleloom Lease, but never uninstalls WireKube. Use

@@ -107,6 +107,7 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 	network := flags.String("network", idleloom.NetworkWireKube, "node network (currently wirekube)")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait per enrollment stage")
 	tokenTTL := flags.Duration("token-ttl", 30*time.Minute, "bootstrap token lifetime")
+	waitForReady := flags.Bool("wait", true, "wait for WireKube and Kubernetes Node readiness")
 	statePath := flags.String("state", "", "Idleloom state file")
 	runtimeDir := flags.String("runtime-dir", "", "worker runtime directory (advanced)")
 	yes := flags.Bool("yes", false, "accept defaults without prompting")
@@ -154,6 +155,7 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 		Network:        *network,
 		Timeout:        *timeout,
 		TokenTTL:       *tokenTTL,
+		SkipWait:       !*waitForReady,
 		StatePath:      *statePath,
 		RuntimeDir:     *runtimeDir,
 		DryRun:         *dryRun,
