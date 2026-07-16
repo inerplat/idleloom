@@ -86,8 +86,8 @@ An intentional `init --wait=false` leaves the Node cordoned in phase
 `registered`. Complete the cluster-side CNI or WireKube work, then run:
 
 ```sh
-idleloom start --timeout 10m
-idleloom status
+idlectl worker start --timeout 10m
+idlectl worker status
 kube get node -l idleloom-worker=true -o wide
 ```
 

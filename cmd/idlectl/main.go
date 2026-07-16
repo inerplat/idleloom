@@ -59,6 +59,7 @@ Usage:
   idlectl get (hosts|workloads) [NAME] [flags]
   idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]
   idlectl delete ((host|workload) NAME | (host|workload)/NAME) [flags]
+  idlectl worker (init|status|start|stop|delete|maintain) [flags]
   idlectl version
 `
 
@@ -137,6 +138,8 @@ func runPublicCommand(ctx context.Context, command string, args []string) (bool,
 		return true, runLogs(ctx, args)
 	case "delete":
 		return true, runDelete(ctx, args)
+	case "worker":
+		return true, runWorker(ctx, args)
 	case "version":
 		fmt.Println(versionText())
 		return true, nil

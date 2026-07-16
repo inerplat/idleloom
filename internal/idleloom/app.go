@@ -110,7 +110,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		_, _ = fmt.Fprintf(a.Out, "  Agent:   %s/%s\n", wireKube.AgentNamespace, wireKube.AgentName)
 		_, _ = fmt.Fprintf(a.Out, "  Peers:   %d ready\n", wireKube.ReadyPeers)
 		if opts.SkipWait && wireKube.ReadyPeers == 0 {
-			_, _ = fmt.Fprintln(a.Err, "warning: WireKube has no ready ingress peers; the registered worker will remain cordoned until idleloom start succeeds")
+			_, _ = fmt.Fprintln(a.Err, "warning: WireKube has no ready ingress peers; the registered worker will remain cordoned until idlectl worker start succeeds")
 		}
 	}
 	a.step("Checking external worker compatibility")
@@ -472,7 +472,7 @@ func (a *App) registerWorkerWithoutWaiting(ctx context.Context, statePath string
 		return err
 	}
 	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is registered; readiness is pending.\n", state.NodeName)
-	_, _ = fmt.Fprintln(a.Out, "The Kubernetes Node remains cordoned. Run idleloom status, then idleloom start to complete readiness.")
+	_, _ = fmt.Fprintln(a.Out, "The Kubernetes Node remains cordoned. Run idlectl worker status, then idlectl worker start to complete readiness.")
 	return nil
 }
 
@@ -574,7 +574,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 		return fmt.Errorf("an enrolling worker state is required")
 	}
 	if state.Runtime.Planned {
-		return fmt.Errorf("worker enrollment stopped before the VM was created; delete the local state with idleloom delete --local-only --force --state %s, then run idleloom init again", statePath)
+		return fmt.Errorf("worker enrollment stopped before the VM was created; delete the local state with idlectl worker delete --local-only --force --state %s, then run idlectl worker init again", statePath)
 	}
 	_, nodeErr := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
 	if nodeErr != nil && !apierrors.IsNotFound(nodeErr) {
@@ -582,7 +582,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 	}
 	nodeMissing := apierrors.IsNotFound(nodeErr)
 	if nodeMissing && !state.TaintConfigured {
-		return fmt.Errorf("interrupted enrollment state predates resumable taint metadata and Kubernetes Node %q is absent; delete the local state with idleloom delete --local-only --force --state %s, then run idleloom init again", state.NodeName, statePath)
+		return fmt.Errorf("interrupted enrollment state predates resumable taint metadata and Kubernetes Node %q is absent; delete the local state with idlectl worker delete --local-only --force --state %s, then run idlectl worker init again", state.NodeName, statePath)
 	}
 	if state.TaintConfigured {
 		if err := validateTaint(state.Taint); err != nil {

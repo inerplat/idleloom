@@ -77,14 +77,21 @@ Continue with the [Native Metal guide](docs/getting-started/native-metal.md).
 
 ## Linux Worker quick start
 
-The Worker CLI and development Vulkan driver currently build from source:
+The worker commands ship with the brew-installed `idlectl`:
 
 ```sh
-brew install go kubectl
+brew install kubectl
 brew tap libkrun/krun
 brew install krunkit
 brew install inerplat/tap/wirekube
+brew install inerplat/tap/idleloom
+```
 
+The development Vulkan driver (`bin/idleloom-vulkan-dra`) still builds from
+source with `make build`, which also produces a from-source `bin/idlectl`:
+
+```sh
+brew install go
 git clone https://github.com/inerplat/idleloom.git
 cd idleloom
 make build
@@ -102,20 +109,21 @@ wirekubectl install \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 
-idleloom init --dry-run \
+idlectl worker init --dry-run \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   --name evening-worker
 
-idleloom init \
+idlectl worker init \
   --kubeconfig ~/.kube/config \
   --context my-cluster \
   --name evening-worker
 ```
 
 Managed clusters that need operator-side CNI or WireKube work after secure
-registration can use `idleloom init --wait=false`. The Node remains cordoned in
-phase `registered`; run `idleloom start` only after the network path is ready.
+registration can use `idlectl worker init --wait=false`. The Node remains
+cordoned in phase `registered`; run `idlectl worker start` only after the
+network path is ready.
 
 Continue with the [Linux Worker guide](docs/getting-started/linux-worker.md).
 

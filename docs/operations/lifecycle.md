@@ -60,10 +60,10 @@ The default state file is `~/.idleloom/state.json` and the default runtime root
 is `~/.idleloom/runtimes/<node-name>`:
 
 ```sh
-idleloom status
-idleloom stop
-idleloom start
-idleloom status
+idlectl worker status
+idlectl worker stop
+idlectl worker start
+idlectl worker status
 ```
 
 Worker stop and delete refuse active non-DaemonSet Pods unless explicitly
@@ -73,21 +73,21 @@ forced. Remove user workloads before stopping a production Worker.
 
 ```sh
 test -f "${HOME}/.idleloom/state.json"
-idleloom status
-idleloom start --timeout 10m
+idlectl worker status
+idlectl worker start --timeout 10m
 ```
 
 An intentional `init --wait=false` records phase `registered`, not
 `enrolling`. It completes TLS bootstrap and leaves the Node cordoned. After the
-cluster-side CNI and WireKube path are ready, `idleloom start` performs strict
-readiness checks, records phase `ready`, and uncordons the Node.
+cluster-side CNI and WireKube path are ready, `idlectl worker start` performs
+strict readiness checks, records phase `ready`, and uncordons the Node.
 
 Pass a custom state path to every lifecycle command:
 
 ```sh
-idleloom status --state /absolute/path/state.json
-idleloom start --state /absolute/path/state.json --timeout 10m
-idleloom delete --state /absolute/path/state.json
+idlectl worker status --state /absolute/path/state.json
+idlectl worker start --state /absolute/path/state.json --timeout 10m
+idlectl worker delete --state /absolute/path/state.json
 ```
 
 ## Worker logs
@@ -100,6 +100,6 @@ idleloom delete --state /absolute/path/state.json
 ~/.idleloom/state.json.maintainer.log
 ```
 
-Use `idleloom delete` when enrollment cannot be resumed. `--local-only` is an
-emergency path for an unavailable cluster; retained state allows a later normal
-delete to remove stale Node and network Lease objects.
+Use `idlectl worker delete` when enrollment cannot be resumed. `--local-only`
+is an emergency path for an unavailable cluster; retained state allows a later
+normal delete to remove stale Node and network Lease objects.

@@ -7,29 +7,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
-	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/inerplat/idleloom/internal/idleloom"
 	"golang.org/x/term"
 )
 
-var version = "dev"
-
-func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-	if err := run(ctx, os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "idleloom: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-func run(ctx context.Context, args []string) error {
+func runWorker(ctx context.Context, args []string) error {
 	if len(args) == 0 {
 		printUsage()
 		return nil
@@ -82,14 +68,11 @@ func run(ctx context.Context, args []string) error {
 			return flagParseError(err)
 		}
 		return app.Maintain(ctx, *statePath)
-	case "version", "--version", "-v":
-		fmt.Printf("idleloom %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
-		return nil
 	case "help", "--help", "-h":
 		printUsage()
 		return nil
 	default:
-		return fmt.Errorf("unknown command %q", args[0])
+		return fmt.Errorf("unknown idlectl worker command %q", args[0])
 	}
 }
 
@@ -244,14 +227,14 @@ func printUsage() {
 	fmt.Print(`Idleloom - weave idle Macs into Kubernetes compute
 
 Usage:
-  idleloom init [flags]
-  idleloom status [flags]
-  idleloom start [flags]
-  idleloom stop [flags]
-  idleloom delete [flags]
-  idleloom version
+  idlectl worker init [flags]
+  idlectl worker status [flags]
+  idlectl worker start [flags]
+  idlectl worker stop [flags]
+  idlectl worker delete [flags]
+  idlectl worker maintain [flags]
 
 Start with:
-  idleloom init --kubeconfig ~/.kube/config
+  idlectl worker init --kubeconfig ~/.kube/config
 `)
 }

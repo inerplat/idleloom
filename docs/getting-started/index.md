@@ -16,9 +16,9 @@ macOS 14 or later, krunkit, and Kubernetes bootstrap-token support.
 
 ## Prepare the CLI and repository
 
-The Homebrew formula provides the Native `idlectl` bundle. A repository checkout
-provides reviewed examples and is currently required to build the Linux Worker
-CLI and development Vulkan driver.
+The Homebrew formula provides `idlectl`, including the Native bundle and the
+`idlectl worker` commands. A repository checkout provides reviewed examples
+and is required only to build the development Vulkan driver.
 
 ```sh
 brew install git kubectl

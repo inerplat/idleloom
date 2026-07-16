@@ -6,21 +6,19 @@ Complete [Start Here](index.md) first.
 ## Install host dependencies
 
 ```sh
-brew install go
 brew tap libkrun/krun
 brew install krunkit
 brew install inerplat/tap/wirekube
+brew install inerplat/tap/idleloom
 
-cd "${IDLELOOM_REPO}"
-make build
-export PATH="${IDLELOOM_REPO}/bin:${PATH}"
-
-idleloom version
+idlectl version
 wirekubectl version
 ```
 
-The Worker currently builds from source because the Idleloom Homebrew formula
-ships the Native bundle only.
+The worker commands ship with the brew-installed `idlectl`. Only the
+development Vulkan driver (`bin/idleloom-vulkan-dra`) still builds from source
+with `make build` in `${IDLELOOM_REPO}`; that build also produces a
+from-source `bin/idlectl`.
 
 ## Install or verify WireKube
 
@@ -59,7 +57,7 @@ The result must be `true`.
 ## Preview and join the Worker
 
 ```sh
-idleloom init \
+idlectl worker init \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
   --name evening-worker \
@@ -68,7 +66,7 @@ idleloom init \
   --disk 40g \
   --dry-run
 
-idleloom init \
+idlectl worker init \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
   --name evening-worker \
@@ -76,7 +74,7 @@ idleloom init \
   --memory 8g \
   --disk 40g
 
-idleloom status
+idlectl worker status
 kube get node evening-worker -o wide
 ```
 
@@ -90,13 +88,13 @@ WireKube gateway after kubelet registration. Defer only the final readiness
 waits in that case:
 
 ```sh
-idleloom init \
+idlectl worker init \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
   --name evening-worker \
   --wait=false
 
-idleloom status
+idlectl worker status
 kube get node evening-worker -o wide
 ```
 
@@ -106,8 +104,8 @@ bootstrap identity removal, and Node registration. It records phase
 ready, finish the strict readiness checks and uncordon the Node:
 
 ```sh
-idleloom start --timeout 10m
-idleloom status
+idlectl worker start --timeout 10m
+idlectl worker status
 ```
 
 Do not schedule workloads until the Node reports `Ready`.

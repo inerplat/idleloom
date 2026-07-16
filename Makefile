@@ -8,7 +8,6 @@ IDLECTL_LDFLAGS = -s -w -X main.version=$(IDLECTL_VERSION) -X main.commit=$(IDLE
 
 build: build-idlectl
 	mkdir -p bin
-	go build -trimpath -o bin/idleloom ./cmd/idleloom
 	go build -trimpath -o bin/idleloom-vulkan-dra ./cmd/dra-node
 
 build-idlectl:

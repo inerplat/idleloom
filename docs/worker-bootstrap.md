@@ -3,8 +3,8 @@
 Idleloom enrolls a remote worker with Kubernetes TLS bootstrap. It does not
 copy an administrator certificate or the source kubeconfig into the worker VM.
 
-For repository acquisition, CLI build, WireKube installation, and Worker join,
-start with the [Linux Worker quick start](getting-started/linux-worker.md).
+For CLI installation, WireKube installation, and Worker join, start with the
+[Linux Worker quick start](getting-started/linux-worker.md).
 Storage and Vulkan are separate use-case guides.
 
 ## Enrollment sequence
@@ -47,7 +47,7 @@ Client authentication or other extra usages are rejected.
 
 ## External-node compatibility preflight
 
-`idleloom init --dry-run` checks the same cluster prerequisites as a real
+`idlectl worker init --dry-run` checks the same cluster prerequisites as a real
 enrollment without creating a VM or token. It does not require `--yes`.
 
 The preflight discovers `kube-dns`, `coredns`, or a Service labeled
@@ -82,25 +82,26 @@ The first join uses the bootstrap token. Later starts use the kubelet client
 certificate stored under `/var/lib/kubelet`; no new bootstrap token is needed.
 The bootstrap kubeconfig is removed from the guest after successful enrollment.
 
-`idleloom init --wait=false` is an explicit deferred-readiness path for managed
-clusters that need operator-side CNI image or WireKube gateway work after Node
-registration. Idleloom still approves the serving certificate, deletes the
-bootstrap token, removes the guest bootstrap identity, records phase
+`idlectl worker init --wait=false` is an explicit deferred-readiness path for
+managed clusters that need operator-side CNI image or WireKube gateway work
+after Node registration. Idleloom still approves the serving certificate,
+deletes the bootstrap token, removes the guest bootstrap identity, records phase
 `registered`, and cordons the Node. It does not wait for the WireKube peer or
-Node `Ready` condition. Run `idleloom start` after fixing the cluster-side
-dependency; successful completion records phase `ready` and uncordons the
-Node. The WireKube mesh, agent DaemonSet, and Node InternalIP advertisement
+Node `Ready` condition. Run `idlectl worker start` after fixing the
+cluster-side dependency; successful completion records phase `ready` and
+uncordons the Node. The WireKube mesh, agent DaemonSet, and Node InternalIP
+advertisement
 remain mandatory; only the zero-ready-peer check is relaxed during deferred
 registration.
 
 If `init` is interrupted after the kubelet has obtained its client certificate,
 the state remains in phase `enrolling`. Fix the external cause, then run
-`idleloom start` to resume Node labeling, serving certificate approval,
+`idlectl worker start` to resume Node labeling, serving certificate approval,
 WireKube checks, and bootstrap identity removal. The default state file is
 `~/.idleloom/state.json`. If `init` used `--state /absolute/path/state.json`,
 pass that same path to `status`, `start`, `stop`, and `delete`. Use
-`idleloom delete` with the matching state path when the partial worker should
-be discarded instead. Runtime logs are under
+`idlectl worker delete` with the matching state path when the partial worker
+should be discarded instead. Runtime logs are under
 `~/.idleloom/runtimes/<node-name>` by default; exact filenames are listed in
 [Lifecycle](operations/lifecycle.md).
 
@@ -130,7 +131,7 @@ avoids vendoring WireKube manifests and lets both projects upgrade independently
 ## Install WireKube before the worker
 
 The Linux worker command does not install cluster dependencies. Install the
-WireKube release required by this checkout before running `idleloom init`.
+required WireKube release before running `idlectl worker init`.
 Native Metal `idlectl join` has a separate integrated dependency path.
 
 Install the released WireKube CLI from the public Homebrew tap:
@@ -180,7 +181,7 @@ WSS requires an operator-managed public hostname, certificate, and HTTPS
 Gateway or Ingress. Follow the
 [WireKube relay guide](https://inerplat.github.io/wirekube/guides/relay-entrypoints/).
 
-WireKube is a cluster-wide shared dependency. `idleloom delete` removes the
-worker Node and its Idleloom Lease, but never uninstalls WireKube. Use
+WireKube is a cluster-wide shared dependency. `idlectl worker delete` removes
+the worker Node and its Idleloom Lease, but never uninstalls WireKube. Use
 `wirekubectl uninstall` only after confirming that no other node or Idleloom
 host depends on the installation.
