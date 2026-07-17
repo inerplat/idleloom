@@ -154,7 +154,7 @@ func startMaintainer(ctx context.Context, statePath string, stderr io.Writer) er
 	if err != nil {
 		return fmt.Errorf("open certificate maintainer log: %w", err)
 	}
-	command := detachedCommand(executable, "maintain", "--state", canonicalState)
+	command := detachedCommand(executable, maintainerCommandArguments(canonicalState)...)
 	command.Stdout = logFile
 	command.Stderr = logFile
 	if err := command.Start(); err != nil {
@@ -300,11 +300,19 @@ func readAndValidateMaintainer(statePath string) (maintainerProcessData, bool, e
 	if err != nil {
 		return metadata, false, nil
 	}
-	expected := " maintain --state " + statePath
-	if !strings.HasSuffix(strings.TrimSpace(string(args)), expected) {
+	if !maintainerCommandMatches(string(args), statePath) {
 		return metadata, false, nil
 	}
 	return metadata, true, nil
+}
+
+func maintainerCommandArguments(statePath string) []string {
+	return []string{"worker", "maintain", "--state", statePath}
+}
+
+func maintainerCommandMatches(commandLine, statePath string) bool {
+	expected := " " + strings.Join(maintainerCommandArguments(statePath), " ")
+	return strings.HasSuffix(strings.TrimSpace(commandLine), expected)
 }
 
 func processStartIdentity(pid int) (string, error) {

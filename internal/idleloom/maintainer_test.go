@@ -5,9 +5,24 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestMaintainerCommandUsesWorkerSubcommand(t *testing.T) {
+	statePath := "/tmp/idleloom state.json"
+	arguments := maintainerCommandArguments(statePath)
+	if got, want := strings.Join(arguments, " "), "worker maintain --state "+statePath; got != want {
+		t.Fatalf("maintainer arguments = %q, want %q", got, want)
+	}
+	if !maintainerCommandMatches("/opt/homebrew/bin/idlectl "+strings.Join(arguments, " "), statePath) {
+		t.Fatal("worker maintainer command was not recognized")
+	}
+	if maintainerCommandMatches("/opt/homebrew/bin/idlectl maintain --state "+statePath, statePath) {
+		t.Fatal("legacy maintainer command was accepted")
+	}
+}
 
 func TestMaintainRemovesMetadataOnShutdown(t *testing.T) {
 	statePath := maintainerTestState(t, PhaseLocalGone)

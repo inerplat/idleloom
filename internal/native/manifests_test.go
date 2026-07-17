@@ -134,6 +134,9 @@ func TestBuildUsesOneCanonicalIdlectlBinary(t *testing.T) {
 	if !strings.Contains(build, "bin/idlectl") {
 		t.Fatal("Makefile does not build bin/idlectl")
 	}
+	if !strings.Contains(build, "rm -f bin/idleloom ") {
+		t.Fatal("Makefile does not remove the retired bin/idleloom binary")
+	}
 	for _, copyCommand := range []string{"cp bin/idlectl bin/idleloom-controller", "cp bin/idlectl bin/idleloom-agent", "cp bin/idlectl bin/idleloom-link", "cp bin/idlectl bin/idleloom-projection"} {
 		if strings.Contains(build, copyCommand) {
 			t.Fatalf("Makefile still creates role-specific binary copy with %q", copyCommand)
