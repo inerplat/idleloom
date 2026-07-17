@@ -1,9 +1,17 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
+
+func TestWorkerMaintainIsPubliclyDispatched(t *testing.T) {
+	handled, err := runPublicCommand(context.Background(), "worker", []string{"maintain", "--help"})
+	if !handled || err != nil {
+		t.Fatalf("worker maintain handled=%t err=%v", handled, err)
+	}
+}
 
 func TestParseSizeMiB(t *testing.T) {
 	tests := []struct {
