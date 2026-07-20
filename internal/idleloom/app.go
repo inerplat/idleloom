@@ -104,6 +104,9 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		} else {
 			wireKube, err = CheckWireKube(ctx, cluster.Client)
 		}
+		if errors.Is(err, errNoReadyIngressPeers) {
+			return fmt.Errorf("%w; a single-node mesh has no remote peers until this worker joins — register with idlectl worker init --wait=false, then run idlectl worker start", err)
+		}
 		if err != nil {
 			return err
 		}

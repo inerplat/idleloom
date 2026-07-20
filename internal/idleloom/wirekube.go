@@ -3,12 +3,15 @@ package idleloom
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
+
+var errNoReadyIngressPeers = errors.New("the WireKube installation has no ready ingress peers")
 
 type WireKubeStatus struct {
 	Installed             bool
@@ -74,7 +77,7 @@ func validateWireKubeStatus(status WireKubeStatus, requireReadyPeer bool) error 
 		return fmt.Errorf("the WireKubeMesh default must set spec.autoAllowedIPs.includeNodeInternalIP=true")
 	}
 	if requireReadyPeer && status.ReadyPeers == 0 {
-		return fmt.Errorf("the WireKube installation has no ready ingress peers")
+		return errNoReadyIngressPeers
 	}
 	return nil
 }
