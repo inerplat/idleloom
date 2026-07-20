@@ -109,23 +109,38 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 		explicit := explicitFlags(flags)
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Println("Idleloom turns this Mac into an after-hours Kubernetes worker.")
+		var err error
 		if !explicit["name"] {
-			*nodeName = prompt(reader, "Node name", *nodeName)
+			if *nodeName, err = prompt(ctx, reader, "Node name", *nodeName); err != nil {
+				return err
+			}
 		}
 		if !explicit["cpus"] {
-			*cpus = promptInt(reader, "CPU cores", *cpus)
+			if *cpus, err = promptInt(ctx, reader, "CPU cores", *cpus); err != nil {
+				return err
+			}
 		}
 		if !explicit["memory"] {
-			*memory = prompt(reader, "Memory", *memory)
+			if *memory, err = prompt(ctx, reader, "Memory", *memory); err != nil {
+				return err
+			}
 		}
 		if !explicit["disk"] {
-			*disk = prompt(reader, "Disk", *disk)
+			if *disk, err = prompt(ctx, reader, "Disk", *disk); err != nil {
+				return err
+			}
 		}
 		if !explicit["network"] {
-			*network = prompt(reader, "Network", *network)
+			if *network, err = prompt(ctx, reader, "Network", *network); err != nil {
+				return err
+			}
 		}
 		fmt.Printf("Worker: %s (%d CPUs, %s memory, %s disk, %s network)\n", *nodeName, *cpus, *memory, *disk, *network)
-		answer := strings.ToLower(prompt(reader, "Create this worker?", "yes"))
+		answer, err := prompt(ctx, reader, "Create this worker?", "yes")
+		if err != nil {
+			return err
+		}
+		answer = strings.ToLower(answer)
 		if answer != "yes" && answer != "y" {
 			return fmt.Errorf("cancelled")
 		}
@@ -224,23 +239,48 @@ func parseSizeMiB(value string) (int, error) {
 	return number * multiplier, nil
 }
 
-func prompt(reader *bufio.Reader, label, defaultValue string) string {
-	fmt.Printf("%s [%s]: ", label, defaultValue)
-	line, _ := reader.ReadString('\n')
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return defaultValue
-	}
-	return line
+type promptAnswer struct {
+	line string
+	err  error
 }
 
-func promptInt(reader *bufio.Reader, label string, defaultValue int) int {
-	value := prompt(reader, label, strconv.Itoa(defaultValue))
+// prompt reads one wizard answer. Ctrl-C (context cancellation) aborts the
+// blocked read, and end of input (Ctrl-D) without an answer cancels the
+// wizard instead of silently accepting the default.
+func prompt(ctx context.Context, reader *bufio.Reader, label, defaultValue string) (string, error) {
+	fmt.Printf("%s [%s]: ", label, defaultValue)
+	answers := make(chan promptAnswer, 1)
+	go func() {
+		line, err := reader.ReadString('\n')
+		answers <- promptAnswer{line: line, err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		fmt.Println()
+		return "", ctx.Err()
+	case answer := <-answers:
+		line := strings.TrimSpace(answer.line)
+		if line != "" {
+			return line, nil
+		}
+		if answer.err != nil {
+			fmt.Println()
+			return "", fmt.Errorf("cancelled")
+		}
+		return defaultValue, nil
+	}
+}
+
+func promptInt(ctx context.Context, reader *bufio.Reader, label string, defaultValue int) (int, error) {
+	value, err := prompt(ctx, reader, label, strconv.Itoa(defaultValue))
+	if err != nil {
+		return 0, err
+	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil {
-		return defaultValue
+		return defaultValue, nil
 	}
-	return parsed
+	return parsed, nil
 }
 
 func printUsage() {

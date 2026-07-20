@@ -1,11 +1,41 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"flag"
 	"io"
 	"strings"
 	"testing"
 )
+
+func TestPromptCancelsWhenContextIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	blocked, _ := io.Pipe()
+	if _, err := prompt(ctx, bufio.NewReader(blocked), "Node name", "mac"); err == nil {
+		t.Fatal("a cancelled context must abort the prompt")
+	}
+}
+
+func TestPromptCancelsOnEndOfInputWithoutAnswer(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader(""))
+	if _, err := prompt(context.Background(), reader, "Create this worker?", "yes"); err == nil {
+		t.Fatal("EOF without an answer must cancel instead of accepting the default")
+	}
+}
+
+func TestPromptKeepsDefaultAndTypedAnswers(t *testing.T) {
+	reader := bufio.NewReader(strings.NewReader("\ncustom\n"))
+	value, err := prompt(context.Background(), reader, "Memory", "8g")
+	if err != nil || value != "8g" {
+		t.Fatalf("empty line must keep the default, got %q err %v", value, err)
+	}
+	value, err = prompt(context.Background(), reader, "Disk", "40g")
+	if err != nil || value != "custom" {
+		t.Fatalf("typed answer must win, got %q err %v", value, err)
+	}
+}
 
 func TestExplicitFlagsTracksOnlyCommandLineValues(t *testing.T) {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
