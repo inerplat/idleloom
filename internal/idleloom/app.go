@@ -43,6 +43,13 @@ type InitOptions struct {
 	SkipWait       bool
 	StatePath      string
 	DryRun         bool
+	// RegistryMirrors are raw HOST=URL specifications parsed and validated at
+	// Init time. CredentialProvider* are host paths validated before any
+	// side effect (including under --dry-run).
+	RegistryMirrors          []string
+	CredentialProviderBins   []string
+	CredentialProviderConfig string
+	CredentialProviderEnv    string
 }
 
 type App struct {
@@ -76,6 +83,17 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	}
 	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
 		return fmt.Errorf("the krunkit worker backend currently requires macOS on Apple Silicon")
+	}
+
+	mirrors, mirrorWarnings, err := parseRegistryMirrors(opts.RegistryMirrors)
+	if err != nil {
+		return err
+	}
+	for _, warning := range mirrorWarnings {
+		_, _ = fmt.Fprintf(a.Err, "warning: %s\n", warning)
+	}
+	if err := validateCredentialProviders(opts.CredentialProviderBins, opts.CredentialProviderConfig, opts.CredentialProviderEnv); err != nil {
+		return err
 	}
 
 	a.step("Checking the Apple Silicon host")
@@ -161,6 +179,11 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		Phase:           PhaseEnrolling,
 		CreatedAt:       a.Now().UTC(),
 		Runtime:         RuntimeState{NodeName: opts.NodeName},
+
+		RegistryMirrors:          mirrors,
+		CredentialProviderBins:   opts.CredentialProviderBins,
+		CredentialProviderConfig: opts.CredentialProviderConfig,
+		CredentialProviderEnv:    opts.CredentialProviderEnv,
 	}
 	reservationID, err := NewNetworkReservationID()
 	if err != nil {
@@ -247,6 +270,11 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		ClusterDNS:    cluster.ClusterDNS,
 		ClusterDomain: cluster.ClusterDomain,
 		KubeletPath:   kubeletPath,
+
+		RegistryMirrors:          mirrors,
+		CredentialProviderBins:   opts.CredentialProviderBins,
+		CredentialProviderConfig: opts.CredentialProviderConfig,
+		CredentialProviderEnv:    opts.CredentialProviderEnv,
 	})
 	if err != nil {
 		return err
@@ -581,10 +609,17 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 				_, _ = fmt.Fprintf(a.Err, "warning: %v\n", err)
 			}
 		}()
+		if err := validateCredentialProviders(state.CredentialProviderBins, state.CredentialProviderConfig, state.CredentialProviderEnv); err != nil {
+			return fmt.Errorf("cannot rebuild the interrupted worker bundle: %w", err)
+		}
 		bundlePath, cleanupBundle, err := CreateWorkerBundle(BundleConfig{
 			NodeName: state.NodeName, Taint: state.Taint, Server: cluster.Server,
 			TLSServerName: cluster.TLSServerName, CAData: cluster.CAData, Token: token.Value,
 			ClusterDNS: cluster.ClusterDNS, ClusterDomain: cluster.ClusterDomain, KubeletPath: kubeletPath,
+			RegistryMirrors:          state.RegistryMirrors,
+			CredentialProviderBins:   state.CredentialProviderBins,
+			CredentialProviderConfig: state.CredentialProviderConfig,
+			CredentialProviderEnv:    state.CredentialProviderEnv,
 		})
 		if err != nil {
 			return err

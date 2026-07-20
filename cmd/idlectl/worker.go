@@ -67,6 +67,10 @@ func runCreateWorker(ctx context.Context, args []string) error {
 	waitForReady := flags.Bool("wait", true, "wait for WireKube and Kubernetes Node readiness")
 	statePath := flags.String("state", "", workerStateHelp)
 	runtimeDir := flags.String("runtime-dir", "", "worker runtime directory (advanced)")
+	registryMirrors := flags.StringArray("registry-mirror", nil, "redirect image pulls for a registry to a mirror, as HOST=URL (advanced, repeatable)")
+	credentialProviderBins := flags.StringArray("credential-provider-bin", nil, "host path to a linux/arm64 kubelet image credential provider binary (advanced, repeatable)")
+	credentialProviderConfig := flags.String("credential-provider-config", "", "host path to a kubelet CredentialProviderConfig YAML (advanced)")
+	credentialProviderEnvFile := flags.String("credential-provider-env-file", "", "host path to a KEY=VALUE env file for the credential providers (advanced, optional)")
 	yes := flags.Bool("yes", false, "accept defaults without prompting")
 	dryRun := flags.Bool("dry-run", false, "run preflight checks without changing the host or cluster")
 	if err := flags.Parse(args); err != nil {
@@ -131,6 +135,14 @@ func runCreateWorker(ctx context.Context, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --disk: %w", err)
 	}
+	if len(*credentialProviderBins) > 0 || *credentialProviderConfig != "" || *credentialProviderEnvFile != "" {
+		if *credentialProviderConfig == "" {
+			return usagef("--credential-provider-config is required when configuring credential providers; usage: %s", createWorkerUsage)
+		}
+		if len(*credentialProviderBins) == 0 {
+			return usagef("at least one --credential-provider-bin is required when configuring credential providers; usage: %s", createWorkerUsage)
+		}
+	}
 	app := idleloom.NewApp(os.Stdout, os.Stderr)
 	return app.Init(ctx, idleloom.InitOptions{
 		KubeconfigPath: *kubeconfig,
@@ -147,6 +159,11 @@ func runCreateWorker(ctx context.Context, args []string) error {
 		StatePath:      *statePath,
 		RuntimeDir:     *runtimeDir,
 		DryRun:         *dryRun,
+
+		RegistryMirrors:          *registryMirrors,
+		CredentialProviderBins:   *credentialProviderBins,
+		CredentialProviderConfig: *credentialProviderConfig,
+		CredentialProviderEnv:    *credentialProviderEnvFile,
 	})
 }
 

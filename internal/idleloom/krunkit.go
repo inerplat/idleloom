@@ -416,9 +416,13 @@ func (k KrunkitRuntime) InstallBundle(ctx context.Context, state RuntimeState, b
 	if err := k.Runner.Run(ctx, k.Out, k.Err, "scp", args...); err != nil {
 		return fmt.Errorf("copy worker bundle into VM: %w", err)
 	}
-	command := "sudo rm -rf /var/lib/idleloom/config && sudo install -d -m 0700 /var/lib/idleloom/config && " +
+	// The bundle tarball may carry credential-provider secrets, so pin it to
+	// user-only immediately and remove it unconditionally even if the install
+	// chain fails partway (a bare `&& rm` would leak the tarball on failure).
+	command := "chmod 600 " + destination + "; " +
+		"sudo rm -rf /var/lib/idleloom/config && sudo install -d -m 0700 /var/lib/idleloom/config && " +
 		"sudo tar -xf " + destination + " -C /var/lib/idleloom/config && " +
-		"sudo /var/lib/idleloom/config/install.sh && rm -f " + destination
+		"sudo /var/lib/idleloom/config/install.sh; status=$?; rm -f " + destination + "; exit $status"
 	if err := k.ssh(ctx, state, command); err != nil {
 		return fmt.Errorf("install worker configuration: %w", err)
 	}
