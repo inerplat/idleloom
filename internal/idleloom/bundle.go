@@ -22,6 +22,16 @@ type BundleConfig struct {
 	ClusterDNS    string
 	ClusterDomain string
 	KubeletPath   string
+	// RegistryMirrors are resolved containerd certs.d mirror entries.
+	RegistryMirrors []RegistryMirror
+	// CredentialProviderBins are host paths to linux/arm64 provider binaries.
+	CredentialProviderBins []string
+	// CredentialProviderConfig is the host path to a kubelet
+	// CredentialProviderConfig YAML, or "" when none is configured.
+	CredentialProviderConfig string
+	// CredentialProviderEnv is the host path to an optional KEY=VALUE env file
+	// for the credential providers, or "" when none is configured.
+	CredentialProviderEnv string
 }
 
 func CreateWorkerBundle(cfg BundleConfig) (string, func(), error) {
@@ -57,7 +67,7 @@ func CreateWorkerBundle(cfg BundleConfig) (string, func(), error) {
 		{Name: "ca.crt", Mode: 0o644, Data: cfg.CAData},
 		{Name: "config.yaml", Mode: 0o644, Data: []byte(renderKubeletConfig(cfg))},
 		{Name: "kubelet.service", Mode: 0o644, Data: []byte(kubeletService)},
-		{Name: "install.sh", Mode: 0o755, Data: []byte(renderInstallScript(cfg.NodeName, cfg.Taint))},
+		{Name: "install.sh", Mode: 0o755, Data: []byte(renderInstallScript(cfg))},
 		{Name: "k8s-sysctl.conf", Mode: 0o644, Data: []byte(kubernetesSysctls)},
 	}
 	for _, entry := range entries {
@@ -67,6 +77,28 @@ func CreateWorkerBundle(cfg BundleConfig) (string, func(), error) {
 	}
 	if err := writeTarFile(tw, "bin/kubelet", 0o755, cfg.KubeletPath); err != nil {
 		return fail(err)
+	}
+	for _, mirror := range cfg.RegistryMirrors {
+		name := "certs.d/" + mirror.Host + "/hosts.toml"
+		if err := writeTarBytes(tw, name, 0o644, []byte(renderHostsTOML(mirror))); err != nil {
+			return fail(err)
+		}
+	}
+	for _, bin := range cfg.CredentialProviderBins {
+		name := "credential-providers/" + filepath.Base(bin)
+		if err := writeTarFile(tw, name, 0o755, bin); err != nil {
+			return fail(err)
+		}
+	}
+	if cfg.CredentialProviderConfig != "" {
+		if err := writeTarFile(tw, "credential-providers.yaml", 0o644, cfg.CredentialProviderConfig); err != nil {
+			return fail(err)
+		}
+	}
+	if cfg.CredentialProviderEnv != "" {
+		if err := writeTarFile(tw, "credential-providers.env", 0o600, cfg.CredentialProviderEnv); err != nil {
+			return fail(err)
+		}
 	}
 	if err := tw.Close(); err != nil {
 		closeErr := file.Close()
@@ -134,6 +166,7 @@ Requires=containerd.service
 
 [Service]
 EnvironmentFile=-/etc/default/idleloom-kubelet
+EnvironmentFile=-/etc/default/idleloom-credential-providers
 ExecStart=/var/lib/idleloom/bin/kubelet \
   --bootstrap-kubeconfig=/var/lib/idleloom/config/bootstrap-kubelet.conf \
   --kubeconfig=/var/lib/kubelet/kubeconfig \
@@ -147,10 +180,14 @@ StartLimitInterval=0
 WantedBy=multi-user.target
 `
 
-func renderInstallScript(nodeName, taint string) string {
-	extraArgs := "--node-ip=${node_ip} --hostname-override=" + nodeName
-	if taint != "" {
-		extraArgs += " --register-with-taints=" + taint
+func renderInstallScript(cfg BundleConfig) string {
+	extraArgs := "--node-ip=${node_ip} --hostname-override=" + cfg.NodeName
+	if cfg.Taint != "" {
+		extraArgs += " --register-with-taints=" + cfg.Taint
+	}
+	if cfg.CredentialProviderConfig != "" {
+		extraArgs += " --image-credential-provider-config=/var/lib/idleloom/config/credential-providers.yaml" +
+			" --image-credential-provider-bin-dir=/var/lib/idleloom/credential-providers"
 	}
 	return fmt.Sprintf(`#!/bin/sh
 set -eu
@@ -173,6 +210,37 @@ if [ ! -s /etc/containerd/config.toml ]; then
 fi
 if /usr/bin/grep -q 'SystemdCgroup = false' /etc/containerd/config.toml; then
     /usr/bin/sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+fi
+
+if [ -d "$base/certs.d" ]; then
+    /usr/bin/install -d -m 0755 /etc/containerd/certs.d
+    for host_dir in "$base"/certs.d/*/; do
+        [ -d "$host_dir" ] || continue
+        host=$(/usr/bin/basename "$host_dir")
+        /usr/bin/install -d -m 0755 "/etc/containerd/certs.d/$host"
+        /usr/bin/install -m 0644 "$host_dir/hosts.toml" "/etc/containerd/certs.d/$host/hosts.toml"
+    done
+    /usr/bin/sed -i "s#config_path = ''#config_path = '/etc/containerd/certs.d'#" /etc/containerd/config.toml
+    /usr/bin/sed -i "s#config_path = \"\"#config_path = '/etc/containerd/certs.d'#" /etc/containerd/config.toml
+    if ! /usr/bin/grep -q "config_path = '/etc/containerd/certs.d'" /etc/containerd/config.toml; then
+        echo "idleloom: could not set containerd registry config_path; the requested registry mirror would be silently ignored" >&2
+        exit 1
+    fi
+fi
+
+if [ -d "$base/credential-providers" ]; then
+    /usr/bin/install -d -m 0755 /var/lib/idleloom/credential-providers
+    for provider_bin in "$base"/credential-providers/*; do
+        [ -f "$provider_bin" ] || continue
+        /usr/bin/install -m 0755 "$provider_bin" "/var/lib/idleloom/credential-providers/$(/usr/bin/basename "$provider_bin")"
+    done
+fi
+if [ -f "$base/credential-providers.yaml" ]; then
+    /usr/bin/chmod 0644 "$base/credential-providers.yaml"
+fi
+if [ -f "$base/credential-providers.env" ]; then
+    /usr/bin/install -m 0600 "$base/credential-providers.env" /etc/default/idleloom-credential-providers
+    /usr/bin/rm -f "$base/credential-providers.env"
 fi
 
 node_ip=$(/usr/sbin/ip -4 route get 1.1.1.1 | /usr/bin/awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')

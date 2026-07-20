@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +30,12 @@ func TestStateRoundTrip(t *testing.T) {
 			SSHPort:    22022,
 		},
 		CreatedAt: time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC),
+		RegistryMirrors: []RegistryMirror{
+			{Host: "nks.kr.private-ncr.ntruss.com", URL: "https://nks.kr.ncr.ntruss.com"},
+		},
+		CredentialProviderBins:   []string{"/opt/providers/ecr-credential-provider"},
+		CredentialProviderConfig: "/opt/providers/config.yaml",
+		CredentialProviderEnv:    "/opt/providers/aws.env",
 	}
 	if err := SaveState(path, want); err != nil {
 		t.Fatalf("SaveState: %v", err)
@@ -37,7 +44,7 @@ func TestStateRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadState: %v", err)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("state = %#v, want %#v", got, want)
 	}
 }

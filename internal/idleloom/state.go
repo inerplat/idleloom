@@ -27,6 +27,13 @@ type State struct {
 	Runtime              RuntimeState `json:"runtime"`
 	Phase                string       `json:"phase"`
 	CreatedAt            time.Time    `json:"createdAt"`
+	// RegistryMirrors and the credential provider host paths are persisted so
+	// an interrupted enrollment can rebuild the worker bundle on resume. Only
+	// paths are stored, never secret file contents.
+	RegistryMirrors          []RegistryMirror `json:"registryMirrors,omitempty"`
+	CredentialProviderBins   []string         `json:"credentialProviderBins,omitempty"`
+	CredentialProviderConfig string           `json:"credentialProviderConfig,omitempty"`
+	CredentialProviderEnv    string           `json:"credentialProviderEnv,omitempty"`
 }
 
 type stateLock struct {
