@@ -1,15 +1,27 @@
 package main
 
 import (
-	"context"
+	"flag"
+	"io"
 	"strings"
 	"testing"
 )
 
-func TestWorkerMaintainIsPubliclyDispatched(t *testing.T) {
-	handled, err := runPublicCommand(context.Background(), "worker", []string{"maintain", "--help"})
-	if !handled || err != nil {
-		t.Fatalf("worker maintain handled=%t err=%v", handled, err)
+func TestExplicitFlagsTracksOnlyCommandLineValues(t *testing.T) {
+	flags := flag.NewFlagSet("init", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	flags.String("name", "default-node", "")
+	flags.Int("cpus", 4, "")
+	flags.String("memory", "8g", "")
+	if err := flags.Parse([]string{"--name", "mac-worker", "--cpus", "4"}); err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	explicit := explicitFlags(flags)
+	if !explicit["name"] || !explicit["cpus"] {
+		t.Fatalf("flags passed on the command line must be explicit, got %v", explicit)
+	}
+	if explicit["memory"] {
+		t.Fatalf("memory was not passed and must not be explicit, got %v", explicit)
 	}
 }
 

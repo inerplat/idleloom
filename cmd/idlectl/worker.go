@@ -106,13 +106,25 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			return fmt.Errorf("interactive input is unavailable; pass --yes to accept defaults")
 		}
+		explicit := explicitFlags(flags)
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Println("Idleloom turns this Mac into an after-hours Kubernetes worker.")
-		*nodeName = prompt(reader, "Node name", *nodeName)
-		*cpus = promptInt(reader, "CPU cores", *cpus)
-		*memory = prompt(reader, "Memory", *memory)
-		*disk = prompt(reader, "Disk", *disk)
-		*network = prompt(reader, "Network", *network)
+		if !explicit["name"] {
+			*nodeName = prompt(reader, "Node name", *nodeName)
+		}
+		if !explicit["cpus"] {
+			*cpus = promptInt(reader, "CPU cores", *cpus)
+		}
+		if !explicit["memory"] {
+			*memory = prompt(reader, "Memory", *memory)
+		}
+		if !explicit["disk"] {
+			*disk = prompt(reader, "Disk", *disk)
+		}
+		if !explicit["network"] {
+			*network = prompt(reader, "Network", *network)
+		}
+		fmt.Printf("Worker: %s (%d CPUs, %s memory, %s disk, %s network)\n", *nodeName, *cpus, *memory, *disk, *network)
 		answer := strings.ToLower(prompt(reader, "Create this worker?", "yes"))
 		if answer != "yes" && answer != "y" {
 			return fmt.Errorf("cancelled")
@@ -143,6 +155,14 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 		RuntimeDir:     *runtimeDir,
 		DryRun:         *dryRun,
 	})
+}
+
+// explicitFlags reports which flags were set on the command line, so the
+// interactive wizard only prompts for values the user did not provide.
+func explicitFlags(flags *flag.FlagSet) map[string]bool {
+	set := map[string]bool{}
+	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	return set
 }
 
 func flagParseError(err error) error {
