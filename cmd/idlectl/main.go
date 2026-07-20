@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"os/signal"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
+	"github.com/inerplat/idleloom/internal/idleloom"
 	nativeagent "github.com/inerplat/idleloom/internal/native/agent"
 	nativecontroller "github.com/inerplat/idleloom/internal/native/controller"
 	"github.com/inerplat/idleloom/internal/native/credential"
@@ -50,18 +52,46 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const usageText = `idlectl manages Native Metal hosts and workloads.
+const usageText = `idlectl manages Idleloom compute on this Mac.
 
-Usage:
+Native Metal — run macOS workloads on this Mac and project observability-only Nodes:
   idlectl join HOST [flags]
   idlectl run NAME --shell '<script>' [flags]
-  idlectl recipe (list | show NAME | render NAME --name RUN) [flags]
-  idlectl get (hosts|workloads) [NAME] [flags]
+  idlectl recipe (list | show NAME@VERSION | render NAME@VERSION --name RUN) [flags]
   idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]
-  idlectl delete ((host|workload) NAME | (host|workload)/NAME) [flags]
-  idlectl worker (init|status|start|stop|delete|maintain) [flags]
+
+Worker — run a schedulable Kubernetes Node in a Linux VM on this Mac:
+  idlectl create worker NAME [flags]
+  idlectl start worker [NAME] [flags]
+  idlectl stop worker [NAME] [flags]
+
+Shared:
+  idlectl get (hosts|workers|workloads) [NAME] [flags]
+  idlectl delete ((host|worker|workload) NAME | (host|worker|workload)/NAME) [flags]
+  idlectl status
   idlectl version
+
+Use "idlectl help COMMAND" for command flags.
 `
+
+// usageError marks command-line misuse (unknown or incomplete commands) so
+// main can exit with status 2 instead of the generic failure status 1.
+type usageError struct {
+	message string
+}
+
+func (e usageError) Error() string {
+	return e.message
+}
+
+func usagef(format string, args ...any) error {
+	return usageError{message: fmt.Sprintf(format, args...)}
+}
+
+func isUsageError(err error) bool {
+	var usage usageError
+	return errors.As(err, &usage)
+}
 
 var (
 	version   = "development"
@@ -106,7 +136,7 @@ func main() {
 		return
 	}
 	if filepath.Base(os.Args[0]) != "idlectl" {
-		_, _ = fmt.Fprintf(os.Stderr, "unsupported executable name %q\n", filepath.Base(os.Args[0]))
+		_, _ = fmt.Fprintf(os.Stderr, "unsupported executable name %q: this binary must be invoked as idlectl; the internal service names are reserved for installed launchd services\n", filepath.Base(os.Args[0]))
 		os.Exit(2)
 	}
 	if len(os.Args) < 2 {
@@ -120,6 +150,9 @@ func main() {
 	}
 	if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, flag.ErrHelp) && !errors.Is(err, pflag.ErrHelp) {
 		_, _ = fmt.Fprintln(os.Stderr, "error:", err)
+		if isUsageError(err) {
+			os.Exit(2)
+		}
 		os.Exit(1)
 	}
 }
@@ -138,17 +171,43 @@ func runPublicCommand(ctx context.Context, command string, args []string) (bool,
 		return true, runLogs(ctx, args)
 	case "delete":
 		return true, runDelete(ctx, args)
+	case "create":
+		return true, runCreateWorker(ctx, args)
+	case "start":
+		return true, runStartWorker(ctx, args)
+	case "stop":
+		return true, runStopWorker(ctx, args)
+	case "status":
+		return true, runStatus(ctx, args, os.Stdout)
 	case "worker":
-		return true, runWorker(ctx, args)
+		return true, usagef(`worker subcommands moved: use "idlectl create worker NAME", "idlectl start|stop worker", "idlectl delete worker NAME", "idlectl status" (see idlectl help)`)
 	case "version":
 		fmt.Println(versionText())
 		return true, nil
 	case "help", "-h", "--help":
-		fmt.Print(usageText)
-		return true, nil
+		return true, runHelp(ctx, args)
 	default:
 		return false, nil
 	}
+}
+
+// runHelp prints the general usage, or routes "idlectl help COMMAND" to that
+// command's --help output.
+func runHelp(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		fmt.Print(usageText)
+		return nil
+	}
+	switch args[0] {
+	case "help", "-h", "--help":
+		fmt.Print(usageText)
+		return nil
+	}
+	handled, err := runPublicCommand(ctx, args[0], []string{"--help"})
+	if !handled {
+		return usagef("unknown help topic %q\n%s", args[0], strings.TrimSuffix(usageText, "\n"))
+	}
+	return err
 }
 
 func versionText() string {
@@ -189,9 +248,23 @@ func runInternalCommand(ctx context.Context, args []string) (bool, error) {
 		return true, runLink(ctx, args[2:])
 	case "projection":
 		return true, runProjection(ctx, args[2:])
+	case "maintain":
+		return true, runMaintain(ctx, args[2:])
 	default:
 		return true, fmt.Errorf("unknown internal service role %q", args[1])
 	}
+}
+
+// runMaintain runs the detached worker certificate maintainer. It is spawned
+// by the CLI itself (see maintainerCommandArgs) and hidden from public help.
+func runMaintain(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("maintain", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	statePath := flags.String("state", "", "Idleloom state file")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	return idleloom.NewApp(os.Stdout, os.Stderr).Maintain(ctx, *statePath)
 }
 
 func runJoin(ctx context.Context, args []string) error {
@@ -213,7 +286,7 @@ func runJoin(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(flags.Args()) != 1 {
-		return fmt.Errorf("usage: idlectl join HOST [flags]")
+		return usagef("usage: idlectl join HOST [flags]")
 	}
 	hostID := enroll.NormalizeHostID(flags.Args()[0])
 	if hostID == "" {
@@ -222,7 +295,11 @@ func runJoin(ctx context.Context, args []string) error {
 	if installed, err := serviceinstall.HasReceipt(*stateDirectory); err != nil {
 		return err
 	} else if installed {
-		return fmt.Errorf("host is already joined locally; delete host/%s before joining again", hostID)
+		enrolledHostID := hostID
+		if identity, identityErr := enroll.IdentityFromState(*stateDirectory); identityErr == nil {
+			enrolledHostID = identity.HostID
+		}
+		return fmt.Errorf("this Mac is already joined as host %q; run \"idlectl delete host %s\" before joining again", enrolledHostID, enrolledHostID)
 	}
 	publicBinary, err := serviceinstall.CaptureCurrentBinary()
 	if err != nil {
@@ -935,7 +1012,7 @@ func runWorkload(ctx context.Context, args []string) error {
 		return err
 	}
 	if len(flags.Args()) != 1 {
-		return fmt.Errorf("usage: idlectl run NAME --shell '<script>' [flags]")
+		return usagef("usage: idlectl run NAME --shell '<script>' [flags]")
 	}
 	name := flags.Args()[0]
 	if problems := validation.IsDNS1123Label(name); len(problems) > 0 {
@@ -1022,13 +1099,14 @@ func runGet(ctx context.Context, args []string) error {
 	namespace := flags.StringP("namespace", "n", "", "resource namespace; defaults to the current context")
 	allNamespaces := flags.BoolP("all-namespaces", "A", false, "list resources across all namespaces")
 	output := flags.StringP("output", "o", "table", "output format: table, json, or yaml")
+	statePath := flags.String("state", "", workerStateHelp)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	positional := flags.Args()
 	resourceName, name, err := parseResourceReference(positional, false)
 	if err != nil {
-		return fmt.Errorf("usage: idlectl get (hosts|workloads) [NAME] [flags]: %w", err)
+		return usagef("usage: idlectl get (hosts|workers|workloads) [NAME] [flags]: %v", err)
 	}
 	if err := validateOutputFormat(*output); err != nil {
 		return err
@@ -1038,6 +1116,15 @@ func runGet(ctx context.Context, args []string) error {
 	}
 	if resourceName == resourceHosts && (*namespace != "" || *allNamespaces) {
 		return fmt.Errorf("hosts are logical cluster-wide resources; do not use --namespace or --all-namespaces")
+	}
+	if flags.Changed("state") && resourceName != resourceWorkers {
+		return usagef("--state only applies to workers")
+	}
+	if resourceName == resourceWorkers {
+		if *namespace != "" || *allNamespaces {
+			return fmt.Errorf("workers are local to this Mac; do not use --namespace or --all-namespaces")
+		}
+		return getWorkers(ctx, os.Stdout, *kubeconfig, *kubeContext, *statePath, name, *output)
 	}
 	resolvedNamespace, err := resolveNamespace(*kubeconfig, *kubeContext, *namespace)
 	if err != nil {
@@ -1112,6 +1199,9 @@ func getHosts(ctx context.Context, client dynamic.Interface, namespace string, a
 			return err
 		}
 		if len(objects.Items) == 0 {
+			if workerName := localWorkerNodeName(); workerName != "" && (workerName == name || workerName == hostID) {
+				return fmt.Errorf("%q is an Idleloom worker, not a Native Metal host; try \"idlectl get workers\"", name)
+			}
 			return apierrors.NewNotFound(nativekube.HostsGVR.GroupResource(), hostID)
 		}
 		if len(objects.Items) != 1 {
@@ -1162,7 +1252,7 @@ func runLogs(ctx context.Context, args []string) error {
 	}
 	resourceName, name, err := parseResourceReference(flags.Args(), true)
 	if err != nil {
-		return fmt.Errorf("usage: idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]: %w", err)
+		return usagef("usage: idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]: %v", err)
 	}
 	if resourceName != resourceWorkloads {
 		return fmt.Errorf("logs supports workloads only")
@@ -1314,12 +1404,31 @@ func runDelete(ctx context.Context, args []string) error {
 	resetTrust := flags.Bool("reset-trust", false, "replace the persisted API certificate identity after manual verification")
 	waitForDeletion := flags.Bool("wait", true, "wait for the workload and its assignment to be removed")
 	timeout := flags.Duration("timeout", time.Minute, "time to wait for deletion")
+	statePath := flags.String("state", "", workerStateHelp)
+	force := flags.Bool("force", false, "delete the worker even when workload Pods are active")
+	localOnly := flags.Bool("local-only", false, "delete local worker VM state without contacting Kubernetes")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	resourceName, name, err := parseResourceReference(flags.Args(), false)
-	if err != nil || name == "" {
-		return fmt.Errorf("usage: idlectl delete ((host|workload) NAME | (host|workload)/NAME) [flags]")
+	if err != nil {
+		return usagef("usage: idlectl delete ((host|worker|workload) NAME | (host|worker|workload)/NAME) [flags]: %v", err)
+	}
+	if resourceName == resourceWorkers {
+		for _, flagName := range []string{"namespace", "state-dir", "allow-tofu", "reset-trust", "wait", "timeout", "kubeconfig", "context"} {
+			if flags.Changed(flagName) {
+				return usagef("--%s does not apply to workers", flagName)
+			}
+		}
+		return deleteWorker(ctx, *statePath, name, *force, *localOnly)
+	}
+	for _, flagName := range []string{"state", "force", "local-only"} {
+		if flags.Changed(flagName) {
+			return usagef("--%s only applies to workers", flagName)
+		}
+	}
+	if name == "" {
+		return usagef("usage: idlectl delete ((host|worker|workload) NAME | (host|worker|workload)/NAME) [flags]")
 	}
 	if *timeout <= 0 {
 		return fmt.Errorf("--timeout must be positive")
@@ -1370,11 +1479,17 @@ func runDelete(ctx context.Context, args []string) error {
 func deleteHost(ctx context.Context, kubeconfig, kubeContext, stateDirectory, requestedHostID string, allowTOFU, resetTrust bool, timeout time.Duration) error {
 	identity, err := enroll.IdentityFromState(stateDirectory)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if workerName := localWorkerNodeName(); workerName != "" && (workerName == requestedHostID || workerName == enroll.NormalizeHostID(requestedHostID)) {
+				return fmt.Errorf("no Native Metal host is enrolled on this Mac; %q is an Idleloom worker — use \"idlectl delete worker %s\"", requestedHostID, workerName)
+			}
+			return fmt.Errorf("no Native Metal host is enrolled on this Mac, so there is nothing to delete. Workers are removed with \"idlectl delete worker NAME\".")
+		}
 		return fmt.Errorf("read enrolled host identity: %w", err)
 	}
 	stateHostID := identity.HostID
 	if enroll.NormalizeHostID(requestedHostID) != stateHostID {
-		return fmt.Errorf("state belongs to host %q, not %q", stateHostID, requestedHostID)
+		return fmt.Errorf("this Mac is joined as host %q, not %q; run \"idlectl delete host %s\"", stateHostID, requestedHostID, stateHostID)
 	}
 	dynamicClient, clientset, err := loadClusterClients(ctx, kubeconfig, kubeContext, stateDirectory, allowTOFU, resetTrust)
 	if err != nil {
@@ -1496,6 +1611,7 @@ func workloadUsesHost(workload *nativev1alpha1.IdleloomWorkload, hostNamespace s
 const (
 	resourceWorkloads = "workloads"
 	resourceHosts     = "hosts"
+	resourceWorkers   = "workers"
 )
 
 func parseResourceReference(args []string, allowBareWorkload bool) (string, string, error) {
@@ -1535,8 +1651,10 @@ func canonicalResource(value string) (string, error) {
 	case "host", "hosts", "ilh", "idleloomhost", "idleloomhosts",
 		"idleloomhost.ai.idleloom.io", "idleloomhosts.ai.idleloom.io":
 		return resourceHosts, nil
+	case "worker", "workers":
+		return resourceWorkers, nil
 	default:
-		return "", fmt.Errorf("unknown resource %q; expected workloads or hosts", value)
+		return "", fmt.Errorf("unknown resource %q; expected workloads, workers, or hosts", value)
 	}
 }
 
@@ -1697,9 +1815,9 @@ func clusterPFlags(name string) (*pflag.FlagSet, *string, *string) {
 	commandUsage := map[string]string{
 		"join":   "idlectl join HOST [flags]",
 		"run":    "idlectl run NAME --shell '<script>' [flags]",
-		"get":    "idlectl get (hosts|workloads) [NAME] [flags]",
+		"get":    "idlectl get (hosts|workers|workloads) [NAME] [flags]",
 		"logs":   "idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]",
-		"delete": "idlectl delete ((host|workload) NAME | (host|workload)/NAME) [flags]",
+		"delete": "idlectl delete ((host|worker|workload) NAME | (host|worker|workload)/NAME) [flags]",
 	}[name]
 	flags.Usage = func() {
 		if commandUsage != "" {
@@ -1739,7 +1857,7 @@ func loadConfig(kubeconfig, kubeContext string) (*rest.Config, error) {
 	overrides := &clientcmd.ConfigOverrides{CurrentContext: kubeContext}
 	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, overrides).ClientConfig()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w; pass --kubeconfig or set KUBECONFIG to select a cluster", err)
 	}
 	config.UserAgent = "idlectl"
 	return config, nil

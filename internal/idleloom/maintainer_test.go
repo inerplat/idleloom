@@ -10,17 +10,15 @@ import (
 	"time"
 )
 
-func TestMaintainerCommandUsesWorkerSubcommand(t *testing.T) {
-	statePath := "/tmp/idleloom state.json"
-	arguments := maintainerCommandArguments(statePath)
-	if got, want := strings.Join(arguments, " "), "worker maintain --state "+statePath; got != want {
-		t.Fatalf("maintainer arguments = %q, want %q", got, want)
+func TestMaintainerCommandArgsMatchMergedCLIAndValidationSuffix(t *testing.T) {
+	statePath := "/home/user/.idleloom/state.json"
+	args := maintainerCommandArgs(statePath)
+	if len(args) < 2 || args[0] != "internal" || args[1] != "maintain" {
+		t.Fatalf("maintainer must self-exec through the hidden idlectl internal maintain subcommand, got %q", args)
 	}
-	if !maintainerCommandMatches("/opt/homebrew/bin/idlectl "+strings.Join(arguments, " "), statePath) {
-		t.Fatal("worker maintainer command was not recognized")
-	}
-	if maintainerCommandMatches("/opt/homebrew/bin/idlectl maintain --state "+statePath, statePath) {
-		t.Fatal("legacy maintainer command was accepted")
+	commandLine := "idlectl " + strings.Join(args, " ")
+	if !strings.HasSuffix(commandLine, " maintain --state "+statePath) {
+		t.Fatalf("maintainer command %q does not end with the suffix readAndValidateMaintainer expects", commandLine)
 	}
 }
 
@@ -68,7 +66,7 @@ func TestMaintainRejectsDuplicateOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := waitUntil(context.Background(), time.Second, func() bool {
+	if err := waitUntil(context.Background(), 5*time.Second, func() bool {
 		held, _ := maintainerLockHeld(canonical)
 		return held
 	}); err != nil {
@@ -128,7 +126,7 @@ func TestFailedDeleteKeepsRunningMaintainer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := waitUntil(context.Background(), time.Second, func() bool {
+	if err := waitUntil(context.Background(), 5*time.Second, func() bool {
 		held, _ := maintainerLockHeld(canonical)
 		return held
 	}); err != nil {

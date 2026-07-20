@@ -60,6 +60,12 @@ func LoadCluster(ctx context.Context, kubeconfigPath, contextName string) (*Clus
 	if contextName == "" {
 		contextName = raw.CurrentContext
 	}
+	if contextName == "" {
+		if len(raw.Contexts) == 0 {
+			return nil, fmt.Errorf("no usable kubeconfig found (looked at %s); pass --kubeconfig or set KUBECONFIG", strings.Join(rules.GetLoadingPrecedence(), ", "))
+		}
+		return nil, fmt.Errorf("the kubeconfig has no current-context; pass --context")
+	}
 	selectedContext := raw.Contexts[contextName]
 	if selectedContext == nil {
 		return nil, fmt.Errorf("kubeconfig context %q does not exist", contextName)

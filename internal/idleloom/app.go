@@ -89,7 +89,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		return err
 	}
 	if _, err := cluster.Client.CoreV1().Nodes().Get(ctx, opts.NodeName, metav1.GetOptions{}); err == nil {
-		return fmt.Errorf("kubernetes node %q already exists", opts.NodeName)
+		return fmt.Errorf("kubernetes node %q already exists in this cluster; pick a different name, or remove a previous Idleloom worker with \"idlectl delete worker %s\"", opts.NodeName, opts.NodeName)
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("check existing Kubernetes node: %w", err)
 	}
@@ -105,7 +105,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 			wireKube, err = CheckWireKube(ctx, cluster.Client)
 		}
 		if errors.Is(err, errNoReadyIngressPeers) {
-			return fmt.Errorf("%w; a single-node mesh has no remote peers until this worker joins — register with idlectl worker init --wait=false, then run idlectl worker start", err)
+			return fmt.Errorf("%w; a single-node mesh has no remote peers until this worker joins — register with \"idlectl create worker NAME --wait=false\", then run \"idlectl start worker\"", err)
 		}
 		if err != nil {
 			return err
@@ -113,7 +113,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		_, _ = fmt.Fprintf(a.Out, "  Agent:   %s/%s\n", wireKube.AgentNamespace, wireKube.AgentName)
 		_, _ = fmt.Fprintf(a.Out, "  Peers:   %d ready\n", wireKube.ReadyPeers)
 		if opts.SkipWait && wireKube.ReadyPeers == 0 {
-			_, _ = fmt.Fprintln(a.Err, "warning: WireKube has no ready ingress peers; the registered worker will remain cordoned until idlectl worker start succeeds")
+			_, _ = fmt.Fprintln(a.Err, "warning: WireKube has no ready ingress peers; the registered worker will remain cordoned until \"idlectl start worker\" succeeds")
 		}
 	}
 	a.step("Checking external worker compatibility")
@@ -301,63 +301,6 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	return nil
 }
 
-func (a *App) Status(ctx context.Context, statePath string) error {
-	resolvedPath, err := resolveStatePath(statePath)
-	if err != nil {
-		return err
-	}
-	stateLock, err := AcquireStateLock(ctx, resolvedPath)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = stateLock.Close() }()
-	state, err := LoadState(resolvedPath)
-	if err != nil {
-		return err
-	}
-	previousSSHPort := state.Runtime.SSHPort
-	runtimeStatus, runtimeErr := a.Runtime.Status(ctx, &state.Runtime)
-	if runtimeErr != nil {
-		return runtimeErr
-	}
-	if state.Runtime.SSHPort != previousSSHPort {
-		if err := SaveState(resolvedPath, state); err != nil {
-			return err
-		}
-	}
-	cluster, err := LoadCluster(ctx, state.KubeconfigPath, state.Context)
-	if err != nil {
-		return err
-	}
-	node, err := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return fmt.Errorf("get node %s: %w", state.NodeName, err)
-	}
-	_, _ = fmt.Fprintf(a.Out, "Node:       %s\n", state.NodeName)
-	_, _ = fmt.Fprintf(a.Out, "Phase:      %s\n", state.Phase)
-	if node == nil {
-		_, _ = fmt.Fprintf(a.Out, "Kubernetes: absent\n")
-	} else {
-		_, _ = fmt.Fprintf(a.Out, "Kubernetes: %s\n", readyWord(nodeReady(node)))
-	}
-	_, _ = fmt.Fprintf(a.Out, "VM:         %s\n", runtimeStatus.VM)
-	_, _ = fmt.Fprintf(a.Out, "Network:    %s (%s)\n", runtimeStatus.Network, state.Runtime.GuestIP)
-	if state.Network == NetworkWireKube {
-		connected, peerErr := WireKubePeerConnected(ctx, cluster.Client, state.NodeName)
-		if peerErr != nil {
-			_, _ = fmt.Fprintf(a.Out, "WireKube:   unavailable\n")
-		} else {
-			_, _ = fmt.Fprintf(a.Out, "WireKube:   %s\n", readyWord(connected))
-		}
-	}
-	if (state.Phase == PhaseRegistered || state.Phase == PhaseReady) && runtimeStatus.VM == "running" && runtimeStatus.Network == "running" {
-		if err := a.startMaintainer(ctx, resolvedPath); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration) error {
 	resolvedPath, err := resolveStatePath(statePath)
 	if err != nil {
@@ -386,7 +329,10 @@ func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration
 		return a.completeRegisteredEnrollment(ctx, resolvedPath, &state, cluster, timeout)
 	}
 	if state.Phase != PhaseReady {
-		return fmt.Errorf("worker state phase %q cannot be started", state.Phase)
+		if state.Phase == PhaseLocalDeleting {
+			return fmt.Errorf("this worker is partially deleted; finish removal with \"idlectl delete worker %s --local-only\", then recreate it with \"idlectl create worker\"", state.NodeName)
+		}
+		return fmt.Errorf("worker state phase %q cannot be started; run \"idlectl status\" to inspect", state.Phase)
 	}
 	previousNode, err := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
 	if err != nil {
@@ -475,7 +421,7 @@ func (a *App) registerWorkerWithoutWaiting(ctx context.Context, statePath string
 		return err
 	}
 	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s is registered; readiness is pending.\n", state.NodeName)
-	_, _ = fmt.Fprintln(a.Out, "The Kubernetes Node remains cordoned. Run idlectl worker status, then idlectl worker start to complete readiness.")
+	_, _ = fmt.Fprintln(a.Out, "The Kubernetes Node remains cordoned. Run \"idlectl status\", then \"idlectl start worker\" to complete readiness.")
 	return nil
 }
 
@@ -577,7 +523,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 		return fmt.Errorf("an enrolling worker state is required")
 	}
 	if state.Runtime.Planned {
-		return fmt.Errorf("worker enrollment stopped before the VM was created; delete the local state with idlectl worker delete --local-only --force --state %s, then run idlectl worker init again", statePath)
+		return fmt.Errorf("worker enrollment stopped before the VM was created; delete the local state with \"idlectl delete worker %s --local-only --force --state %s\", then run \"idlectl create worker\" again", state.NodeName, statePath)
 	}
 	_, nodeErr := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
 	if nodeErr != nil && !apierrors.IsNotFound(nodeErr) {
@@ -585,7 +531,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 	}
 	nodeMissing := apierrors.IsNotFound(nodeErr)
 	if nodeMissing && !state.TaintConfigured {
-		return fmt.Errorf("interrupted enrollment state predates resumable taint metadata and Kubernetes Node %q is absent; delete the local state with idlectl worker delete --local-only --force --state %s, then run idlectl worker init again", state.NodeName, statePath)
+		return fmt.Errorf("interrupted enrollment state predates resumable taint metadata and Kubernetes Node %q is absent; delete the local state with \"idlectl delete worker %s --local-only --force --state %s\", then run \"idlectl create worker\" again", state.NodeName, state.NodeName, statePath)
 	}
 	if state.TaintConfigured {
 		if err := validateTaint(state.Taint); err != nil {
@@ -1159,9 +1105,3 @@ func (a *App) step(message string) {
 	_, _ = fmt.Fprintf(a.Out, "\n[%d] %s...\n", a.StepIndex, message)
 }
 
-func readyWord(ready bool) string {
-	if ready {
-		return "ready"
-	}
-	return "not ready"
-}

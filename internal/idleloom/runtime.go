@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -29,7 +30,7 @@ func (ExecRunner) Output(ctx context.Context, name string, args ...string) ([]by
 	command.Stderr = &stderr
 	output, err := command.Output()
 	if err != nil {
-		return output, fmt.Errorf("%s %v: %w: %s", name, args, err, stderr.String())
+		return output, fmt.Errorf("%s: %w: %s", strings.Join(append([]string{name}, args...), " "), err, stderr.String())
 	}
 	return output, nil
 }

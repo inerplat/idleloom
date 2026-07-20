@@ -64,6 +64,9 @@ func ReadLogSnapshot(path, assignment string, maximumBytes int, since time.Time,
 	buffer := NewLogBuffer(maximumBytes)
 	file, err := os.Open(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("no local workload logs exist on this Mac; --local only works on the joined host after a workload has run — drop --local to read logs through the cluster")
+		}
 		return nil, fmt.Errorf("open native container log: %w", err)
 	}
 	defer func() { _ = file.Close() }()

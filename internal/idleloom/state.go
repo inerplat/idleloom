@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -149,7 +150,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 
 func EnsureStatePathAvailable(path string) error {
 	if _, err := os.Stat(path); err == nil {
-		return fmt.Errorf("idleloom state already exists at %s; use it or choose a different --state path", path)
+		return fmt.Errorf("an Idleloom worker already exists (state at %s); check it with \"idlectl status\", or pass a different --state path", path)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect state path %s: %w", path, err)
 	}
@@ -175,6 +176,9 @@ func EnsureStatePathAvailable(path string) error {
 func LoadState(path string) (State, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return State{}, fmt.Errorf("no Idleloom worker exists on this Mac (state file %s not found); create one with \"idlectl create worker NAME\". If this Mac is a Native Metal host, use \"idlectl delete host NAME\" instead", path)
+		}
 		return State{}, fmt.Errorf("read state %s: %w", path, err)
 	}
 	var state State

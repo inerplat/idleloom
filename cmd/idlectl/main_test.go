@@ -65,6 +65,9 @@ func TestKubernetesStyleResourceReferences(t *testing.T) {
 		{args: []string{"workload", "job"}, wantResource: resourceWorkloads, wantName: "job"},
 		{args: []string{"workload/job"}, wantResource: resourceWorkloads, wantName: "job"},
 		{args: []string{"hosts/studio"}, wantResource: resourceHosts, wantName: "studio"},
+		{args: []string{"workers"}, wantResource: resourceWorkers},
+		{args: []string{"worker", "mac-idle"}, wantResource: resourceWorkers, wantName: "mac-idle"},
+		{args: []string{"worker/mac-idle"}, wantResource: resourceWorkers, wantName: "mac-idle"},
 		{args: []string{"job"}, allowBare: true, wantResource: resourceWorkloads, wantName: "job"},
 	}
 	for _, test := range tests {
@@ -85,14 +88,22 @@ func TestPublicUsageIsResourceOriented(t *testing.T) {
 	if !strings.HasPrefix(usageText, "idlectl ") {
 		t.Fatalf("usage does not expose the idlectl binary name: %s", usageText)
 	}
-	for _, expected := range []string{"join HOST", "run NAME", "recipe (list | show NAME | render NAME", "get (hosts|workloads) [NAME]", "logs (WORKLOAD | workload/WORKLOAD)", "delete ((host|workload) NAME | (host|workload)/NAME)", "version"} {
+	for _, expected := range []string{
+		"Native Metal —", "Worker —",
+		"join HOST", "run NAME", "recipe (list | show NAME@VERSION | render NAME@VERSION",
+		"logs (WORKLOAD | workload/WORKLOAD)",
+		"create worker NAME", "start worker [NAME]", "stop worker [NAME]",
+		"get (hosts|workers|workloads) [NAME]",
+		"delete ((host|worker|workload) NAME | (host|worker|workload)/NAME)",
+		"idlectl status", "version",
+	} {
 		if !strings.Contains(usageText, expected) {
 			t.Fatalf("usage does not contain %q", expected)
 		}
 	}
-	for _, legacy := range []string{" admin ", " serve ", " debug ", "enroll", "connectivity-run"} {
+	for _, legacy := range []string{" admin ", " serve ", " debug ", "enroll", "connectivity-run", "idlectl worker ", "worker init", "maintain", "internal"} {
 		if strings.Contains(usageText, legacy) {
-			t.Fatalf("usage still exposes legacy command %q", legacy)
+			t.Fatalf("usage still exposes legacy or hidden command %q", legacy)
 		}
 	}
 }
@@ -247,6 +258,8 @@ func TestQualifiedKubernetesResourceNames(t *testing.T) {
 	for input, want := range map[string]string{
 		"idleloomworkloads.ai.idleloom.io": resourceWorkloads,
 		"idleloomhosts.ai.idleloom.io":     resourceHosts,
+		"worker":                           resourceWorkers,
+		"workers":                          resourceWorkers,
 	} {
 		got, err := canonicalResource(input)
 		if err != nil || got != want {

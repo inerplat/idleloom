@@ -216,7 +216,7 @@ func Run(ctx context.Context, config Config) (Result, error) {
 			return Result{}, err
 		}
 		if hasWireKubeState {
-			return Result{}, fmt.Errorf("the WireKube leaf state already exists; run delete host/HOST before reenrolling with api-only connectivity")
+			return Result{}, fmt.Errorf("this Mac still has WireKube link state from a previous join; run \"idlectl delete host %s\" before rejoining with --link api-only", hostID)
 		}
 	}
 	intent, err := loadOrCreateIntent(stateDirectory, hostID)

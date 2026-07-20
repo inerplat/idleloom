@@ -65,7 +65,7 @@ func ReserveRuntimeNetwork(ctx context.Context, client kubernetes.Interface, nod
 			return RuntimeNetwork{}, "", "", fmt.Errorf("reserve worker network %s: %w", network.Subnet, err)
 		}
 	}
-	return RuntimeNetwork{}, "", "", fmt.Errorf("could not reserve a collision-free worker network after 1024 attempts")
+	return RuntimeNetwork{}, "", "", fmt.Errorf("could not reserve a collision-free /29 worker subnet inside 172.16.0.0/12 after 1024 attempts; delete unused Idleloom workers or their stale idleloom-network-* Leases in kube-system to free subnets")
 }
 
 func newRuntimeNetworkLease(leaseName, nodeName, reservationID string) *coordinationv1.Lease {

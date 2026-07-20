@@ -40,7 +40,7 @@ type KrunkitRuntime struct {
 func (k KrunkitRuntime) Preflight(ctx context.Context) error {
 	for _, binary := range []string{"krunkit", "gvproxy", "ssh", "scp", "ssh-keygen", "hdiutil"} {
 		if _, err := exec.LookPath(binary); err != nil {
-			return fmt.Errorf("required executable %q was not found in PATH", binary)
+			return fmt.Errorf("required executable %q was not found in PATH; Idleloom worker VMs need krunkit and gvproxy — install them (brew tap libkrun/krun && brew install krunkit) and rerun \"idlectl create worker\"", binary)
 		}
 	}
 	if output, err := k.Runner.Output(ctx, "krunkit", "--version"); err != nil {
@@ -71,7 +71,7 @@ func (k KrunkitRuntime) Plan(_ context.Context, cfg RuntimeConfig) (RuntimeState
 		return RuntimeState{}, fmt.Errorf("runtime directory cannot contain a comma: %s", runtimeDir)
 	}
 	if _, err := os.Lstat(runtimeDir); err == nil {
-		return RuntimeState{}, fmt.Errorf("runtime directory already exists: %s", runtimeDir)
+		return RuntimeState{}, fmt.Errorf("runtime directory already exists: %s, likely from an interrupted worker; if no worker is using it, remove the directory and rerun, or pass --runtime-dir", runtimeDir)
 	} else if !os.IsNotExist(err) {
 		return RuntimeState{}, fmt.Errorf("inspect runtime directory: %w", err)
 	}
@@ -109,7 +109,7 @@ func (k KrunkitRuntime) Create(ctx context.Context, state *RuntimeState) (err er
 	}
 	if err := os.Mkdir(state.RuntimeDir, 0o700); err != nil {
 		if os.IsExist(err) {
-			return fmt.Errorf("runtime directory already exists: %s", state.RuntimeDir)
+			return fmt.Errorf("runtime directory already exists: %s, likely from an interrupted worker; if no worker is using it, remove the directory and rerun, or pass --runtime-dir", state.RuntimeDir)
 		}
 		return fmt.Errorf("create runtime directory: %w", err)
 	}
@@ -310,7 +310,7 @@ func (k KrunkitRuntime) startGVProxy(ctx context.Context, state *RuntimeState) (
 		pid := gvproxy.Process.Pid
 		_ = gvproxy.Process.Release()
 		_ = gvproxyLog.Close()
-		pathErr := waitForPath(ctx, networkSocket(*state), 3*time.Second)
+		pathErr := waitForPath(ctx, networkSocket(*state), "the gvproxy network socket", 3*time.Second)
 		processErr := waitForProcess(ctx, gvproxyPIDFile(*state), "gvproxy", 3*time.Second)
 		if pathErr == nil && processErr == nil {
 			return pid, nil
@@ -358,7 +358,7 @@ func (k KrunkitRuntime) stopUnlocked(ctx context.Context, state RuntimeState) er
 				_ = process.Signal(syscall.SIGTERM)
 			}
 		}
-		if err := waitForPIDExit(ctx, pid, 30*time.Second); err != nil {
+		if err := waitForPIDExit(ctx, pid, "krunkit", 30*time.Second); err != nil {
 			if terminateErr := terminatePID(pid, "krunkit", 10*time.Second); terminateErr != nil {
 				return terminateErr
 			}
@@ -967,7 +967,7 @@ func validateRuntimeOwnership(state RuntimeState) error {
 	}
 	data, err := os.ReadFile(filepath.Join(canonical, runtimeMarker))
 	if err != nil {
-		return fmt.Errorf("refusing to use unmarked runtime directory %s: %w", canonical, err)
+		return fmt.Errorf("refusing to use runtime directory %s: its Idleloom ownership marker %s is missing or unreadable (%w); Idleloom only manages directories it marked at creation — if this directory is left over from an old worker, remove it manually, and run \"idlectl status\" to find the state file that references it", canonical, runtimeMarker, err)
 	}
 	var marker runtimeMarkerData
 	if err := json.Unmarshal(data, &marker); err != nil {
@@ -1063,15 +1063,15 @@ func tcpPortAvailable(port int) bool {
 	return true
 }
 
-func waitForPath(ctx context.Context, path string, timeout time.Duration) error {
-	return waitUntil(ctx, timeout, func() bool {
+func waitForPath(ctx context.Context, path, subject string, timeout time.Duration) error {
+	return waitUntilFor(ctx, timeout, subject, func() bool {
 		_, err := os.Stat(path)
 		return err == nil
 	})
 }
 
 func waitForProcess(ctx context.Context, pidFile, executable string, timeout time.Duration) error {
-	return waitUntil(ctx, timeout, func() bool {
+	return waitUntilFor(ctx, timeout, executable+" to start", func() bool {
 		_, running, _ := processFromPIDFile(pidFile, executable)
 		return running
 	})
@@ -1091,6 +1091,27 @@ func waitUntil(ctx context.Context, timeout time.Duration, ready func() bool) er
 			return ctx.Err()
 		case <-deadline.C:
 			return fmt.Errorf("timed out after %s", timeout)
+		case <-ticker.C:
+		}
+	}
+}
+
+// waitUntilFor is waitUntil with a subject so timeout errors describe what was
+// being waited on, e.g. "timed out after 30s waiting for krunkit (pid 7) to exit".
+func waitUntilFor(ctx context.Context, timeout time.Duration, subject string, ready func() bool) error {
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if ready() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out after %s waiting for %s", timeout, subject)
 		case <-ticker.C:
 		}
 	}
@@ -1147,7 +1168,7 @@ func terminatePID(pid int, executable string, timeout time.Duration) error {
 		return fmt.Errorf("signal %s process %d: %w", executable, pid, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	err = waitForPIDExit(ctx, pid, timeout)
+	err = waitForPIDExit(ctx, pid, executable, timeout)
 	cancel()
 	if err == nil {
 		return nil
@@ -1157,14 +1178,14 @@ func terminatePID(pid int, executable string, timeout time.Duration) error {
 	}
 	killCtx, killCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer killCancel()
-	if err := waitForPIDExit(killCtx, pid, 5*time.Second); err != nil {
+	if err := waitForPIDExit(killCtx, pid, executable, 5*time.Second); err != nil {
 		return fmt.Errorf("%s process %d did not exit after SIGKILL: %w", executable, pid, err)
 	}
 	return nil
 }
 
-func waitForPIDExit(ctx context.Context, pid int, timeout time.Duration) error {
-	return waitUntil(ctx, timeout, func() bool {
+func waitForPIDExit(ctx context.Context, pid int, executable string, timeout time.Duration) error {
+	return waitUntilFor(ctx, timeout, fmt.Sprintf("%s (pid %d) to exit", executable, pid), func() bool {
 		process, err := os.FindProcess(pid)
 		return err != nil || process.Signal(syscall.Signal(0)) != nil || processIsZombie(pid)
 	})

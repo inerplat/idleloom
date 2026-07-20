@@ -154,7 +154,7 @@ func startMaintainer(ctx context.Context, statePath string, stderr io.Writer) er
 	if err != nil {
 		return fmt.Errorf("open certificate maintainer log: %w", err)
 	}
-	command := detachedCommand(executable, maintainerCommandArguments(canonicalState)...)
+	command := detachedCommand(executable, maintainerCommandArgs(canonicalState)...)
 	command.Stdout = logFile
 	command.Stderr = logFile
 	if err := command.Start(); err != nil {
@@ -174,6 +174,13 @@ func startMaintainer(ctx context.Context, statePath string, stderr io.Writer) er
 		return fmt.Errorf("wait for certificate maintainer: %w", err)
 	}
 	return nil
+}
+
+// maintainerCommandArgs builds the self-exec arguments for the detached
+// maintainer. The trailing "maintain --state <path>" tokens are also the
+// suffix readAndValidateMaintainer matches against ps output.
+func maintainerCommandArgs(statePath string) []string {
+	return []string{"internal", "maintain", "--state", statePath}
 }
 
 func stopMaintainer(statePath string) error {
@@ -300,19 +307,11 @@ func readAndValidateMaintainer(statePath string) (maintainerProcessData, bool, e
 	if err != nil {
 		return metadata, false, nil
 	}
-	if !maintainerCommandMatches(string(args), statePath) {
+	expected := " maintain --state " + statePath
+	if !strings.HasSuffix(strings.TrimSpace(string(args)), expected) {
 		return metadata, false, nil
 	}
 	return metadata, true, nil
-}
-
-func maintainerCommandArguments(statePath string) []string {
-	return []string{"worker", "maintain", "--state", statePath}
-}
-
-func maintainerCommandMatches(commandLine, statePath string) bool {
-	expected := " " + strings.Join(maintainerCommandArguments(statePath), " ")
-	return strings.HasSuffix(strings.TrimSpace(commandLine), expected)
 }
 
 func processStartIdentity(pid int) (string, error) {

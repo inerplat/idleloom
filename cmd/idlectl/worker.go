@@ -4,85 +4,59 @@ import (
 	"bufio"
 	"context"
 	"errors"
-	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/inerplat/idleloom/internal/idleloom"
+	"github.com/inerplat/idleloom/internal/native/enroll"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 )
 
-func runWorker(ctx context.Context, args []string) error {
-	if len(args) == 0 {
-		printUsage()
-		return nil
+const (
+	createWorkerUsage = "idlectl create worker NAME [flags]"
+	startWorkerUsage  = "idlectl start worker [NAME] [flags]"
+	stopWorkerUsage   = "idlectl stop worker [NAME] [flags]"
+	statusUsage       = "idlectl status [flags]"
+	workerStateHelp   = "Idleloom worker state file (default ~/.idleloom/state.json)"
+)
+
+func workerPFlags(name, usage string) *pflag.FlagSet {
+	flags := pflag.NewFlagSet(name, pflag.ContinueOnError)
+	flags.Usage = func() {
+		_, _ = fmt.Fprintf(flags.Output(), "Usage:\n  %s\n\nFlags:\n", usage)
+		flags.PrintDefaults()
 	}
-	app := idleloom.NewApp(os.Stdout, os.Stderr)
-	switch args[0] {
-	case "init":
-		return runInit(ctx, app, args[1:])
-	case "status":
-		flags := flag.NewFlagSet("status", flag.ContinueOnError)
-		flags.SetOutput(os.Stderr)
-		statePath := flags.String("state", "", "Idleloom state file")
-		if err := flags.Parse(args[1:]); err != nil {
-			return flagParseError(err)
-		}
-		return app.Status(ctx, *statePath)
-	case "start":
-		flags := flag.NewFlagSet("start", flag.ContinueOnError)
-		flags.SetOutput(os.Stderr)
-		statePath := flags.String("state", "", "Idleloom state file")
-		timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait for worker recovery")
-		if err := flags.Parse(args[1:]); err != nil {
-			return flagParseError(err)
-		}
-		return app.Start(ctx, *statePath, *timeout)
-	case "stop":
-		flags := flag.NewFlagSet("stop", flag.ContinueOnError)
-		flags.SetOutput(os.Stderr)
-		statePath := flags.String("state", "", "Idleloom state file")
-		localOnly := flags.Bool("local-only", false, "stop the local VM without contacting Kubernetes")
-		if err := flags.Parse(args[1:]); err != nil {
-			return flagParseError(err)
-		}
-		return app.Stop(ctx, *statePath, *localOnly)
-	case "delete":
-		flags := flag.NewFlagSet("delete", flag.ContinueOnError)
-		flags.SetOutput(os.Stderr)
-		statePath := flags.String("state", "", "Idleloom state file")
-		force := flags.Bool("force", false, "delete even when workload Pods are active")
-		localOnly := flags.Bool("local-only", false, "delete local VM state without contacting Kubernetes")
-		if err := flags.Parse(args[1:]); err != nil {
-			return flagParseError(err)
-		}
-		return app.Delete(ctx, *statePath, *force, *localOnly)
-	case "maintain":
-		flags := flag.NewFlagSet("maintain", flag.ContinueOnError)
-		flags.SetOutput(os.Stderr)
-		statePath := flags.String("state", "", "Idleloom state file")
-		if err := flags.Parse(args[1:]); err != nil {
-			return flagParseError(err)
-		}
-		return app.Maintain(ctx, *statePath)
-	case "help", "--help", "-h":
-		printUsage()
-		return nil
-	default:
-		return fmt.Errorf("unknown idlectl worker command %q", args[0])
-	}
+	return flags
 }
 
-func runInit(ctx context.Context, app *idleloom.App, args []string) error {
-	defaults := defaultNames()
-	flags := flag.NewFlagSet("init", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
+// workerNameArgument extracts the optional worker NAME from the positional
+// arguments of a worker verb, requiring the "worker" resource token.
+func workerNameArgument(positionals []string, usage string) (string, error) {
+	if len(positionals) == 0 {
+		return "", usagef("usage: %s", usage)
+	}
+	resourceName, name, err := parseResourceReference(positionals, false)
+	if err != nil || resourceName != resourceWorkers {
+		return "", usagef("usage: %s", usage)
+	}
+	return name, nil
+}
+
+func runCreateWorker(ctx context.Context, args []string) error {
+	flags := workerPFlags("create worker", createWorkerUsage)
 	kubeconfig := flags.String("kubeconfig", "", "kubeconfig used to enroll the worker")
 	contextName := flags.String("context", "", "kubeconfig context (defaults to current-context)")
-	nodeName := flags.String("name", defaults, "Kubernetes node name")
 	cpus := flags.Int("cpus", 4, "worker CPU count")
 	memory := flags.String("memory", defaultMemory(), "worker memory, for example 8g")
 	disk := flags.String("disk", "40g", "worker disk size, for example 40g")
@@ -91,15 +65,19 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait per enrollment stage")
 	tokenTTL := flags.Duration("token-ttl", 30*time.Minute, "bootstrap token lifetime")
 	waitForReady := flags.Bool("wait", true, "wait for WireKube and Kubernetes Node readiness")
-	statePath := flags.String("state", "", "Idleloom state file")
+	statePath := flags.String("state", "", workerStateHelp)
 	runtimeDir := flags.String("runtime-dir", "", "worker runtime directory (advanced)")
 	yes := flags.Bool("yes", false, "accept defaults without prompting")
 	dryRun := flags.Bool("dry-run", false, "run preflight checks without changing the host or cluster")
 	if err := flags.Parse(args); err != nil {
-		return flagParseError(err)
+		return err
 	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("init does not accept positional arguments")
+	name, err := workerNameArgument(flags.Args(), createWorkerUsage)
+	if err != nil {
+		return err
+	}
+	if name == "" && (*yes || *dryRun) {
+		return usagef("a worker NAME is required with --yes or --dry-run; usage: %s", createWorkerUsage)
 	}
 
 	if !*yes && !*dryRun {
@@ -109,9 +87,8 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 		explicit := explicitFlags(flags)
 		reader := bufio.NewReader(os.Stdin)
 		fmt.Println("Idleloom turns this Mac into an after-hours Kubernetes worker.")
-		var err error
-		if !explicit["name"] {
-			if *nodeName, err = prompt(ctx, reader, "Node name", *nodeName); err != nil {
+		if name == "" {
+			if name, err = prompt(ctx, reader, "Node name", defaultNames()); err != nil {
 				return err
 			}
 		}
@@ -135,7 +112,7 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 				return err
 			}
 		}
-		fmt.Printf("Worker: %s (%d CPUs, %s memory, %s disk, %s network)\n", *nodeName, *cpus, *memory, *disk, *network)
+		fmt.Printf("Worker: %s (%d CPUs, %s memory, %s disk, %s network)\n", name, *cpus, *memory, *disk, *network)
 		answer, err := prompt(ctx, reader, "Create this worker?", "yes")
 		if err != nil {
 			return err
@@ -154,10 +131,11 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid --disk: %w", err)
 	}
+	app := idleloom.NewApp(os.Stdout, os.Stderr)
 	return app.Init(ctx, idleloom.InitOptions{
 		KubeconfigPath: *kubeconfig,
 		Context:        *contextName,
-		NodeName:       *nodeName,
+		NodeName:       name,
 		CPUs:           *cpus,
 		MemoryMB:       memoryMB,
 		DiskMB:         diskMB,
@@ -172,19 +150,238 @@ func runInit(ctx context.Context, app *idleloom.App, args []string) error {
 	})
 }
 
-// explicitFlags reports which flags were set on the command line, so the
-// interactive wizard only prompts for values the user did not provide.
-func explicitFlags(flags *flag.FlagSet) map[string]bool {
-	set := map[string]bool{}
-	flags.Visit(func(f *flag.Flag) { set[f.Name] = true })
-	return set
+func runStartWorker(ctx context.Context, args []string) error {
+	flags := workerPFlags("start worker", startWorkerUsage)
+	statePath := flags.String("state", "", workerStateHelp)
+	timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait for worker recovery")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	name, err := workerNameArgument(flags.Args(), startWorkerUsage)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		if err := ensureLocalWorkerNamed(*statePath, name); err != nil {
+			return err
+		}
+	}
+	return idleloom.NewApp(os.Stdout, os.Stderr).Start(ctx, *statePath, *timeout)
 }
 
-func flagParseError(err error) error {
-	if errors.Is(err, flag.ErrHelp) {
+func runStopWorker(ctx context.Context, args []string) error {
+	flags := workerPFlags("stop worker", stopWorkerUsage)
+	statePath := flags.String("state", "", workerStateHelp)
+	localOnly := flags.Bool("local-only", false, "stop the local VM without contacting Kubernetes")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	name, err := workerNameArgument(flags.Args(), stopWorkerUsage)
+	if err != nil {
+		return err
+	}
+	if name != "" {
+		if err := ensureLocalWorkerNamed(*statePath, name); err != nil {
+			return err
+		}
+	}
+	return idleloom.NewApp(os.Stdout, os.Stderr).Stop(ctx, *statePath, *localOnly)
+}
+
+// deleteWorker removes this Mac's worker. NAME is required as a confirmation
+// affordance and must match the locally recorded worker.
+func deleteWorker(ctx context.Context, statePath, name string, force, localOnly bool) error {
+	if name == "" {
+		return usagef(`deleting a worker requires its NAME as confirmation; run "idlectl get workers" to see this Mac's worker`)
+	}
+	if err := ensureLocalWorkerNamed(statePath, name); err != nil {
+		return err
+	}
+	return idleloom.NewApp(os.Stdout, os.Stderr).Delete(ctx, statePath, force, localOnly)
+}
+
+// runStatus prints a local overview of this Mac: the Native Metal enrollment
+// and the Idleloom worker. Absence of either is a normal answer, not an error.
+func runStatus(_ context.Context, args []string, out io.Writer) error {
+	flags := workerPFlags("status", statusUsage)
+	stateDirectory := flags.String("state-dir", mustStateDirectory(), "private Native Metal enrollment state")
+	statePath := flags.String("state", "", workerStateHelp)
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if len(flags.Args()) != 0 {
+		return usagef("usage: %s", statusUsage)
+	}
+	identity, err := enroll.IdentityFromState(*stateDirectory)
+	switch {
+	case err == nil:
+		_, _ = fmt.Fprintf(out, "Native Metal host: %s (joined)\n", identity.HostID)
+	case errors.Is(err, fs.ErrNotExist):
+		_, _ = fmt.Fprintln(out, "Native Metal host: not joined")
+	default:
+		return fmt.Errorf("read enrolled host identity: %w", err)
+	}
+	path, err := workerStatePath(*statePath)
+	if err != nil {
+		return err
+	}
+	exists, err := workerStateExists(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		_, _ = fmt.Fprintln(out, "Worker:            no worker")
 		return nil
 	}
-	return err
+	state, err := idleloom.LoadState(path)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(out, "Worker:            %s (%s)\n", state.NodeName, state.Phase)
+	return nil
+}
+
+type workerRow struct {
+	Name      string `json:"name"`
+	Phase     string `json:"phase"`
+	NodeReady string `json:"nodeReady"`
+	Age       string `json:"age"`
+}
+
+func getWorkers(ctx context.Context, out io.Writer, kubeconfig, kubeContext, statePath, name, output string) error {
+	path, err := workerStatePath(statePath)
+	if err != nil {
+		return err
+	}
+	exists, err := workerStateExists(path)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		if name != "" {
+			return fmt.Errorf(`worker %q was not found: no Idleloom worker exists on this Mac; workers are created with "idlectl create worker NAME"`, name)
+		}
+		_, _ = fmt.Fprintln(out, `No Idleloom worker exists on this Mac. Create one with "idlectl create worker NAME".`)
+		return nil
+	}
+	state, err := idleloom.LoadState(path)
+	if err != nil {
+		return err
+	}
+	if name != "" && name != state.NodeName {
+		return fmt.Errorf("worker %q was not found; this Mac's worker is %q", name, state.NodeName)
+	}
+	if kubeconfig == "" {
+		kubeconfig = state.KubeconfigPath
+	}
+	if kubeContext == "" {
+		kubeContext = state.Context
+	}
+	config, err := loadConfig(kubeconfig, kubeContext)
+	if err != nil {
+		return err
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return err
+	}
+	nodeReady := "Absent"
+	node, err := clientset.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
+	switch {
+	case err == nil:
+		nodeReady = workerNodeReadyStatus(node)
+	case apierrors.IsNotFound(err):
+	default:
+		return fmt.Errorf("get worker node %s: %w", state.NodeName, err)
+	}
+	age := "-"
+	if !state.CreatedAt.IsZero() {
+		age = time.Since(state.CreatedAt).Round(time.Second).String()
+	}
+	if output != "table" {
+		return printStructured(workerRow{Name: state.NodeName, Phase: state.Phase, NodeReady: nodeReady, Age: age}, output)
+	}
+	writer := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(writer, "NAME\tPHASE\tNODE READY\tAGE")
+	_, _ = fmt.Fprintf(writer, "%s\t%s\t%s\t%s\n", state.NodeName, state.Phase, nodeReady, age)
+	return writer.Flush()
+}
+
+func workerNodeReadyStatus(node *corev1.Node) string {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return string(condition.Status)
+		}
+	}
+	return "Unknown"
+}
+
+func workerStatePath(statePath string) (string, error) {
+	if statePath != "" {
+		return statePath, nil
+	}
+	return idleloom.DefaultStatePath()
+}
+
+// workerStateExists reports whether a worker state file is present. It checks
+// the path directly so the answer does not depend on how LoadState words its
+// missing-file error.
+func workerStateExists(path string) (bool, error) {
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect worker state: %w", err)
+	}
+	return true, nil
+}
+
+func loadLocalWorkerState(statePath string) (idleloom.State, error) {
+	path, err := workerStatePath(statePath)
+	if err != nil {
+		return idleloom.State{}, err
+	}
+	exists, err := workerStateExists(path)
+	if err != nil {
+		return idleloom.State{}, err
+	}
+	if !exists {
+		return idleloom.State{}, fmt.Errorf(`no Idleloom worker exists on this Mac; create one with "idlectl create worker NAME"`)
+	}
+	return idleloom.LoadState(path)
+}
+
+func ensureLocalWorkerNamed(statePath, name string) error {
+	state, err := loadLocalWorkerState(statePath)
+	if err != nil {
+		return err
+	}
+	if state.NodeName != name {
+		return fmt.Errorf("this Mac's worker is %q, not %q", state.NodeName, name)
+	}
+	return nil
+}
+
+// localWorkerNodeName reports the node name of this Mac's worker from the
+// default state file, or "" when no worker state exists or it is unreadable.
+func localWorkerNodeName() string {
+	path, err := idleloom.DefaultStatePath()
+	if err != nil {
+		return ""
+	}
+	state, err := idleloom.LoadState(path)
+	if err != nil {
+		return ""
+	}
+	return state.NodeName
+}
+
+// explicitFlags reports which flags were set on the command line, so the
+// interactive wizard only prompts for values the user did not provide.
+func explicitFlags(flags *pflag.FlagSet) map[string]bool {
+	set := map[string]bool{}
+	flags.Visit(func(f *pflag.Flag) { set[f.Name] = true })
+	return set
 }
 
 func defaultNames() string {
@@ -281,20 +478,4 @@ func promptInt(ctx context.Context, reader *bufio.Reader, label string, defaultV
 		return defaultValue, nil
 	}
 	return parsed, nil
-}
-
-func printUsage() {
-	fmt.Print(`Idleloom - weave idle Macs into Kubernetes compute
-
-Usage:
-  idlectl worker init [flags]
-  idlectl worker status [flags]
-  idlectl worker start [flags]
-  idlectl worker stop [flags]
-  idlectl worker delete [flags]
-  idlectl worker maintain [flags]
-
-Start with:
-  idlectl worker init --kubeconfig ~/.kube/config
-`)
 }
