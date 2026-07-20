@@ -102,10 +102,12 @@ Install or reuse WireKube, then preview and enroll the Worker:
 
 ```sh
 wirekubectl install --dry-run \
+  --node-addresses internal-ip \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 
 wirekubectl install \
+  --node-addresses internal-ip \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 

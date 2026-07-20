@@ -27,6 +27,7 @@ Preview the infrastructure plan first:
 
 ```sh
 wirekubectl install \
+  --node-addresses internal-ip \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
   --dry-run
@@ -37,6 +38,7 @@ installation:
 
 ```sh
 wirekubectl install \
+  --node-addresses internal-ip \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}"
 
@@ -52,7 +54,9 @@ kube get wirekubemesh default \
   -o jsonpath='{.spec.autoAllowedIPs.includeNodeInternalIP}{"\n"}'
 ```
 
-The result must be `true`.
+The result must be `true`. An existing installation that reports `false` was
+installed with the default `mesh-only` exposure; fix it in place with
+`wirekubectl upgrade --node-addresses internal-ip` against the same context.
 
 ## Preview and join the Worker
 
