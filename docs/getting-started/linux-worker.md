@@ -61,24 +61,22 @@ installed with the default `mesh-only` exposure; fix it in place with
 ## Preview and join the Worker
 
 ```sh
-idlectl worker init \
+idlectl create worker evening-worker \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
-  --name evening-worker \
   --cpus 4 \
   --memory 8g \
   --disk 40g \
   --dry-run
 
-idlectl worker init \
+idlectl create worker evening-worker \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
-  --name evening-worker \
   --cpus 4 \
   --memory 8g \
   --disk 40g
 
-idlectl worker status
+idlectl status
 kube get node evening-worker -o wide
 ```
 
@@ -92,13 +90,12 @@ WireKube gateway after kubelet registration. Defer only the final readiness
 waits in that case:
 
 ```sh
-idlectl worker init \
+idlectl create worker evening-worker \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
-  --name evening-worker \
   --wait=false
 
-idlectl worker status
+idlectl status
 kube get node evening-worker -o wide
 ```
 
@@ -108,8 +105,8 @@ bootstrap identity removal, and Node registration. It records phase
 ready, finish the strict readiness checks and uncordon the Node:
 
 ```sh
-idlectl worker start --timeout 10m
-idlectl worker status
+idlectl start worker --timeout 10m
+idlectl status
 ```
 
 Do not schedule workloads until the Node reports `Ready`.

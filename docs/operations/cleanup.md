@@ -31,7 +31,7 @@ Delete user Pods and optional DRA resources before the Worker:
 ```sh
 kube delete deviceclass apple-vulkan --ignore-not-found
 kube delete -k "${IDLELOOM_REPO}/deploy/base" --ignore-not-found
-idlectl worker delete
+idlectl delete worker WORKER
 ```
 
 Idleloom does not uninstall WireKube.

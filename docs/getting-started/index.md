@@ -17,7 +17,7 @@ macOS 14 or later, krunkit, and Kubernetes bootstrap-token support.
 ## Prepare the CLI and repository
 
 The Homebrew formula provides `idlectl`, including the Native bundle and the
-`idlectl worker` commands. A repository checkout provides reviewed examples
+Linux Worker commands. A repository checkout provides reviewed examples
 and is required only to build the development Vulkan driver.
 
 ```sh
@@ -53,6 +53,10 @@ every terminal that follows a guide.
 - Use [Linux Worker](linux-worker.md) for normal Pods, containers, volumes,
   `exec`, or port-forward.
 - Read [Choose a Mode](choose-mode.md) when the boundary is unclear.
+
+In the CLI, Native Metal manages `host` and `workload` resources, the Linux
+Worker path manages the `worker` resource, and the verbs `get`, `delete`, and
+`status` are shared across both.
 
 Do not execute every guide as one script. Ollama, standalone GGUF, Longhorn,
 NFS, and Vulkan are optional paths with separate prerequisites.

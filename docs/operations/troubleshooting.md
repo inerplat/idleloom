@@ -82,12 +82,12 @@ version, DeviceClass, and ResourceSlice publication.
 
 ## Worker remains registered but NotReady
 
-An intentional `init --wait=false` leaves the Node cordoned in phase
+An intentional `create worker --wait=false` leaves the Node cordoned in phase
 `registered`. Complete the cluster-side CNI or WireKube work, then run:
 
 ```sh
-idlectl worker start --timeout 10m
-idlectl worker status
+idlectl start worker --timeout 10m
+idlectl status
 kube get node -l idleloom-worker=true -o wide
 ```
 

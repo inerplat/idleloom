@@ -30,6 +30,10 @@ Worker when the workload expects ordinary Kubernetes Pods and storage.
 Native projection is observability-only. It publishes ephemeral Node and Pod
 objects for status and logs; it is not a kubelet and cannot run arbitrary Pods.
 
+In the CLI, Native Metal manages `host` and `workload` resources, the Linux
+Worker path manages the `worker` resource, and the verbs `get`, `delete`, and
+`status` are shared across both.
+
 ## Native Metal quick start
 
 Install the CLI and join the current Mac:
@@ -111,21 +115,19 @@ wirekubectl install \
   --kubeconfig ~/.kube/config \
   --context my-cluster
 
-idlectl worker init --dry-run \
+idlectl create worker evening-worker --dry-run \
   --kubeconfig ~/.kube/config \
-  --context my-cluster \
-  --name evening-worker
+  --context my-cluster
 
-idlectl worker init \
+idlectl create worker evening-worker \
   --kubeconfig ~/.kube/config \
-  --context my-cluster \
-  --name evening-worker
+  --context my-cluster
 ```
 
 Managed clusters that need operator-side CNI or WireKube work after secure
-registration can use `idlectl worker init --wait=false`. The Node remains
-cordoned in phase `registered`; run `idlectl worker start` only after the
-network path is ready.
+registration can use `idlectl create worker NAME --wait=false`. The Node
+remains cordoned in phase `registered`; run `idlectl start worker` only after
+the network path is ready.
 
 Continue with the [Linux Worker guide](docs/getting-started/linux-worker.md).
 
