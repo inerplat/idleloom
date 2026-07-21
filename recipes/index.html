@@ -1,0 +1,2153 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Use idle Apple Silicon Macs as Kubernetes compute">
+      
+      
+      
+        <link rel="canonical" href="https://inerplat.github.io/idleloom/recipes/">
+      
+      
+        <link rel="prev" href="../operations/troubleshooting/">
+      
+      
+        <link rel="next" href="../native-training/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Recipes - Idleloom</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="deep-orange">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#reproducible-ml-workload-recipes" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Idleloom" class="md-header__button md-logo" aria-label="Idleloom" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Idleloom
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Recipes
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="deep-orange"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="amber"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/inerplat/idleloom" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    inerplat/idleloom
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../getting-started/" class="md-tabs__link">
+          
+  
+  
+  Getting Started
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../guides/native-shell/" class="md-tabs__link">
+          
+  
+  
+  Guides
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../operations/lifecycle/" class="md-tabs__link">
+          
+  
+  
+  Operations
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+  Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Idleloom" class="md-nav__button md-logo" aria-label="Idleloom" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    Idleloom
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/inerplat/idleloom" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    inerplat/idleloom
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Getting Started
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide Map
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Start Here
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/choose-mode/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Choose a Mode
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/native-metal/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native Metal
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../getting-started/linux-worker/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Linux Worker
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guides
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guides
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/native-shell/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native Shells
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/native-mlx/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MLX Workloads
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/native-ollama/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ollama
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/native-llama-cpp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    llama.cpp Metal
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/native-serving/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native Serving
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/worker-storage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Worker Storage
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../guides/worker-vulkan/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Worker Vulkan
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Operations
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Operations
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/lifecycle/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Lifecycle
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/cleanup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cleanup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../operations/troubleshooting/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Troubleshooting
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recipes
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Recipes
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#discover-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discover recipes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-training" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal training
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#linux-worker-training" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Linux worker training
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-batch-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal batch inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-ollama-gguf-batch-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal Ollama GGUF batch inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-llamacpp-gguf-batch-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal llama.cpp GGUF batch inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#linux-worker-vulkan-batch-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Linux worker Vulkan batch inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-serving" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal serving
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#linux-worker-vulkan-serving" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Linux worker Vulkan serving
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#manifest-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manifest contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#current-result-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current result boundary
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../native-training/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Native Training Contract
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../worker-bootstrap/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Worker Bootstrap
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#discover-recipes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Discover recipes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-training" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal training
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#linux-worker-training" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Linux worker training
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-batch-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal batch inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-ollama-gguf-batch-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal Ollama GGUF batch inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-llamacpp-gguf-batch-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal llama.cpp GGUF batch inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#linux-worker-vulkan-batch-inference" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Linux worker Vulkan batch inference
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#native-metal-serving" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Native Metal serving
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#linux-worker-vulkan-serving" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Linux worker Vulkan serving
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#manifest-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Manifest contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#current-result-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Current result boundary
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="reproducible-ml-workload-recipes">Reproducible ML workload recipes<a class="headerlink" href="#reproducible-ml-workload-recipes" title="Permanent link">&para;</a></h1>
+<p>Idleloom recipes produce ordinary Kubernetes YAML for one of two execution
+contracts. A recipe is a versioned manifest bundle in this repository, not a
+cluster API or another custom resource.</p>
+<table>
+<thead>
+<tr>
+<th>Backend</th>
+<th>Rendered resource</th>
+<th>Execution contract</th>
+<th>Best fit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Native Metal</td>
+<td><code>IdleloomWorkload</code></td>
+<td>A restricted macOS process with direct Metal access</td>
+<td>MLX, local Ollama or llama.cpp GGUF, and trusted host tools</td>
+</tr>
+<tr>
+<td>Linux worker</td>
+<td>Standard resources such as <code>Job</code> and <code>ResourceClaim</code></td>
+<td>A normal OCI container managed by kubelet and containerd</td>
+<td>Portable training code, Pod networking, volumes, DRA, and standard Kubernetes tooling</td>
+</tr>
+</tbody>
+</table>
+<p>Both backends use the same recipe discovery and rendering commands. The
+rendered YAML is the durable interface: it can be reviewed, stored, changed
+under source control, and applied with <code>kubectl</code> without a separate Idleloom
+run service.</p>
+<p>For a zero-context installation, start with the
+<a href="../getting-started/">documentation entry point</a> and select either the
+<a href="../getting-started/native-metal/">Native Metal</a> or
+<a href="../getting-started/linux-worker/">Linux Worker</a> path. This document is the
+deeper recipe reference.</p>
+<p>Commands that reference <code>examples/...</code> assume the current directory is the
+repository root. Recipe discovery and rendering themselves remain embedded in
+<code>idlectl</code> and do not require a checkout.</p>
+<p>Install <code>kubectl</code> and define the kubeconfig, context, and namespace used for
+enrollment. The helper keeps selection explicit without changing the
+kubeconfig's persistent <code>current-context</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>brew<span class="w"> </span>install<span class="w"> </span>kubectl
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="o">=</span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">HOME</span><span class="si">}</span><span class="s2">/.kube/config&quot;</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="nb">export</span><span class="w"> </span><span class="nv">IDLELOOM_CONTEXT</span><span class="o">=</span>my-cluster
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="nb">export</span><span class="w"> </span><span class="nv">IDLELOOM_NAMESPACE</span><span class="o">=</span>default
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>kube<span class="o">()</span><span class="w"> </span><span class="o">{</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span>kubectl<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">    </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">    </span><span class="s2">&quot;</span><span class="nv">$@</span><span class="s2">&quot;</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="o">}</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>idlectl<span class="w"> </span>version
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>list
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>kube<span class="w"> </span>cluster-info
+</code></pre></div>
+<p>The examples render <code>namespace: default</code>, matching <code>IDLELOOM_NAMESPACE</code> above.
+To use another namespace, change the variable and pass the same <code>namespace</code>
+value through each recipe's <code>--values</code> file; edit the standalone client Pod
+manifest to match.</p>
+<p>If <code>idlectl recipe list</code> reports <code>unknown command "recipe"</code>, the installed
+release predates this guide. Build the current repository checkout and put its
+<code>bin</code> directory first on <code>PATH</code>, as described in the main README.</p>
+<h2 id="discover-recipes">Discover recipes<a class="headerlink" href="#discover-recipes" title="Permanent link">&para;</a></h2>
+<p>List the immutable recipe versions included in the current <code>idlectl</code> binary:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>list
+</code></pre></div>
+<p>Inspect prerequisites, defaults, and accepted parameters before rendering:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>train/mlx-linear-regression@v1
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>train/container-linear-regression@v1
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>infer/mlx-batch@v1
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>infer/ollama-gguf@v1
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>infer/llama-cpp-metal@v1
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>infer/llama-vulkan@v1
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>serve/mlx-qwen@v1
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>serve/ollama-gguf@v1
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>serve/llama-cpp-metal@v1
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>show<span class="w"> </span>serve/llama-vulkan@v1
+</code></pre></div>
+<p>The version suffix is required. A manifest always records the exact recipe ID
+and separate SHA-256 digests for the embedded recipe content and normalized
+render inputs. <code>recipe show</code> includes a complete example values object.</p>
+<p>Rendering without <code>--values</code> uses embedded defaults when every parameter has a
+default. Recipes with required operator-owned inputs, such as the Worker
+serving API-key Secret, require a values file. Pass a user-owned YAML file or
+pipe YAML through <code>--values -</code>; no source checkout is required for rendering.</p>
+<h2 id="native-metal-training">Native Metal training<a class="headerlink" href="#native-metal-training" title="Permanent link">&para;</a></h2>
+<p>This recipe creates an explicit <code>Train</code> run on a joined Native Metal host.
+Idleloom creates and seals its own MLX environment on first use. Python 3.12
+must be installed on the host, but users do not manage a separate MLX virtual
+environment. The detailed run model, metric and artifact protocol, retry
+semantics, and link-mode behavior are covered in
+<a href="../native-training/"><code>native-training.md</code></a>.</p>
+<p>Review the example values:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">namespace</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">default</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nt">experiment</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">linear-regression</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="nt">attempt</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="nt">learningRate</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.08</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="nt">steps</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="nt">timeoutSeconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">120</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="nt">unifiedMemory</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">512Mi</span>
+</code></pre></div>
+<p>Render and inspect the Kubernetes manifest:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>train/mlx-linear-regression@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span>--name<span class="w"> </span>native-train<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>native-train.yaml
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-f<span class="w"> </span>native-train.yaml
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>native-train.yaml
+</code></pre></div>
+<p>The output is an immutable <code>ai.idleloom.io/v1alpha1</code> <code>IdleloomWorkload</code>. Its
+status records start and finish times, the latest bounded metric summaries,
+and checkpoint references. Logs retain the complete metric stream only while
+that assignment remains in the host mailbox; export them before another run
+reclaims the mailbox when durable history is required.</p>
+<p>Observe and remove the run with the Native resource commands:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>idlectl<span class="w"> </span>get<span class="w"> </span>workload/native-train<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>idlectl<span class="w"> </span>logs<span class="w"> </span>-f<span class="w"> </span>workload/native-train<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>idlectl<span class="w"> </span>delete<span class="w"> </span>workload/native-train<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>For an API-only host, use <code>idlectl logs --local</code> on the joined Mac after the
+workload has completed.</p>
+<h2 id="linux-worker-training">Linux worker training<a class="headerlink" href="#linux-worker-training" title="Permanent link">&para;</a></h2>
+<p>This recipe creates a real Kubernetes Job on a joined Idleloom worker. The
+Job uses a multi-architecture Python image pinned by OCI digest and selects
+Nodes labeled <code>idleloom-worker=true</code>.</p>
+<p>Review the example values:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nt">namespace</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">default</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="nt">epochs</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">120</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="nt">learningRate</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">0.08</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="nt">cpu</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">250m</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="nt">memory</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">128Mi</span>
+</code></pre></div>
+<p>Render and apply the Job:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>train/container-linear-regression@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="w">  </span>--name<span class="w"> </span>worker-train<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>worker-train.yaml
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-f<span class="w"> </span>worker-train.yaml
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>worker-train.yaml
+</code></pre></div>
+<p>Because this backend is a normal Job, standard Kubernetes operations retain
+their usual meaning:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">condition</span><span class="o">=</span><span class="nb">complete</span><span class="w"> </span>job/worker-train<span class="w"> </span>--timeout<span class="o">=</span>2m
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>logs<span class="w"> </span>job/worker-train
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>describe<span class="w"> </span>job/worker-train
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>delete<span class="w"> </span>job/worker-train
+</code></pre></div>
+<p>The same contract supports Pod networking, <code>ConfigMap</code>, <code>Secret</code>, PVC and CSI
+volumes, <code>exec</code>, and port forwarding when a workload shape needs them. Those
+are Worker capabilities; the Native backend does not emulate them.</p>
+<p>The runnable toolbox, hostPath, and Longhorn manifests under
+<a href="https://github.com/inerplat/idleloom/tree/main/examples/worker"><code>examples/worker</code></a>
+exercise these standard Pod semantics. The exact <code>logs</code>, <code>exec</code>, and
+port-forward path starts in the
+<a href="../getting-started/linux-worker/">Linux Worker quick start</a>.</p>
+<h2 id="native-metal-batch-inference">Native Metal batch inference<a class="headerlink" href="#native-metal-batch-inference" title="Permanent link">&para;</a></h2>
+<p>The Native batch recipe creates an explicit <code>Batch</code> <code>IdleloomWorkload</code>; it
+does not hide inference inside a shell command. <code>idlectl join</code> installs the
+locked <code>qwen3-5-0-8b-mlx</code> catalog entry. A compatible Native host advertises
+that it can prepare this model, and the agent downloads and verifies the
+locked MLX runtime and model files on first use.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>infer/mlx-batch@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span>--name<span class="w"> </span>native-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>native-infer.yaml
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>native-infer.yaml
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>idlectl<span class="w"> </span>get<span class="w"> </span>workload/native-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>idlectl<span class="w"> </span>logs<span class="w"> </span>-f<span class="w"> </span>workload/native-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-9-13" name="__codelineno-9-13" href="#__codelineno-9-13"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>Wait for a terminal success state when running this in automation:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">&#39;{.status.phase}&#39;</span><span class="o">=</span>Succeeded<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span>idleloomworkload/native-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">  </span>--timeout<span class="o">=</span>20m
+</code></pre></div>
+<p>The first execution requires outbound HTTPS access from the Mac and downloads
+approximately 650 MB of model files plus the locked Python runtime. Later runs
+reuse the verified local copy. Runtime preparation renews the assignment lease
+and reports progress through the normal workload log.</p>
+<p>Prompts are stored in the Kubernetes API as part of the immutable workload.
+Do not put credentials or other secrets in a prompt.</p>
+<p>A successful log ends with one structured result record. The generated text
+varies, but the envelope is stable:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="p">{</span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="s2">&quot;result&quot;</span><span class="p">,</span><span class="nt">&quot;text&quot;</span><span class="p">:</span><span class="s2">&quot;...&quot;</span><span class="p">,</span><span class="nt">&quot;elapsedMillis&quot;</span><span class="p">:</span><span class="mi">1234</span><span class="p">}</span>
+</code></pre></div>
+<p>Remove the workload after inspecting the result:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>idlectl<span class="w"> </span>delete<span class="w"> </span>workload/native-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>rm<span class="w"> </span>-f<span class="w"> </span>native-infer.yaml
+</code></pre></div>
+<p>Native API and catalog installation currently happens during <code>idlectl join</code>.
+A host joined by an older binary must be deleted and joined again with the
+current binary before applying a <code>Batch</code> or serving workload; in-place join
+upgrades are not yet implemented.</p>
+<h2 id="native-metal-ollama-gguf-batch-inference">Native Metal Ollama GGUF batch inference<a class="headerlink" href="#native-metal-ollama-gguf-batch-inference" title="Permanent link">&para;</a></h2>
+<p>The Ollama recipe uses the same <code>Batch</code> workload contract and result envelope
+as MLX, but the agent runs a digest-pinned GGUF model through an
+Idleloom-owned Ollama daemon. The user's existing Ollama daemon on port 11434
+is not reused, stopped, or exposed to the cluster.</p>
+<p>Install Ollama 0.17.1 or later and the exact local model before starting the
+workload:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>brew<span class="w"> </span>install<span class="w"> </span>--cask<span class="w"> </span>ollama
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>brew<span class="w"> </span>install<span class="w"> </span>jq
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>open<span class="w"> </span>-a<span class="w"> </span>Ollama
+<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>ollama<span class="w"> </span>pull<span class="w"> </span>qwen3.5:9b
+<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>ollama<span class="w"> </span>list
+</code></pre></div>
+<p>The current v1 catalog pins <code>qwen3.5:9b</code> to manifest digest
+<code>sha256:6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7</code>.
+The agent advertises the runtime only when that model is present and the
+scheduler matches its name, digest, format, and size. Before every execution,
+the agent hashes the manifest and all referenced blobs. Idleloom never invokes
+<code>ollama pull</code> automatically. Startup also requires Ollama to report the whole
+loaded model in Metal memory; partial CPU/GPU placement fails the assignment.</p>
+<p>Other local GGUF models use the same runtime. Read the exact name, digest, and
+byte size from the local Ollama API, then create an immutable cluster catalog
+entry and recipe values file:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OLLAMA_MODEL</span><span class="o">=</span>qwen3.5:9b
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OLLAMA_CATALOG</span><span class="o">=</span>example-local-gguf
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OLLAMA_INFO</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="w">  </span>curl<span class="w"> </span>--fail<span class="w"> </span>--silent<span class="w"> </span>http://127.0.0.1:11434/api/tags<span class="w"> </span><span class="p">|</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="w">    </span>jq<span class="w"> </span>-c<span class="w"> </span>--arg<span class="w"> </span>model<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">OLLAMA_MODEL</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="s1">&#39;.models[] | select(.name == $model)&#39;</span>
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="k">)</span><span class="s2">&quot;</span>
+<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OLLAMA_DIGEST</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;%s&#39;</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">OLLAMA_INFO</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;.digest&#39;</span><span class="k">)</span><span class="s2">&quot;</span>
+<a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a><span class="nb">export</span><span class="w"> </span><span class="nv">OLLAMA_SIZE</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span><span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;%s&#39;</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">OLLAMA_INFO</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span>-r<span class="w"> </span><span class="s1">&#39;.size&#39;</span><span class="k">)</span><span class="s2">&quot;</span>
+<a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a>
+<a id="__codelineno-14-10" name="__codelineno-14-10" href="#__codelineno-14-10"></a><span class="nb">test</span><span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">OLLAMA_DIGEST</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-14-11" name="__codelineno-14-11" href="#__codelineno-14-11"></a><span class="nb">test</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">OLLAMA_DIGEST</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>!<span class="o">=</span><span class="w"> </span>null
+<a id="__codelineno-14-12" name="__codelineno-14-12" href="#__codelineno-14-12"></a><span class="nb">test</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">OLLAMA_SIZE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>-gt<span class="w"> </span><span class="m">0</span>
+<a id="__codelineno-14-13" name="__codelineno-14-13" href="#__codelineno-14-13"></a>
+<a id="__codelineno-14-14" name="__codelineno-14-14" href="#__codelineno-14-14"></a>cat<span class="w"> </span>&gt;<span class="w"> </span>custom-ollama-model.yaml<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<a id="__codelineno-14-15" name="__codelineno-14-15" href="#__codelineno-14-15"></a><span class="s">apiVersion: ai.idleloom.io/v1alpha1</span>
+<a id="__codelineno-14-16" name="__codelineno-14-16" href="#__codelineno-14-16"></a><span class="s">kind: IdleloomModel</span>
+<a id="__codelineno-14-17" name="__codelineno-14-17" href="#__codelineno-14-17"></a><span class="s">metadata:</span>
+<a id="__codelineno-14-18" name="__codelineno-14-18" href="#__codelineno-14-18"></a><span class="s">  name: ${OLLAMA_CATALOG}</span>
+<a id="__codelineno-14-19" name="__codelineno-14-19" href="#__codelineno-14-19"></a><span class="s">spec:</span>
+<a id="__codelineno-14-20" name="__codelineno-14-20" href="#__codelineno-14-20"></a><span class="s">  family: ollama-gguf</span>
+<a id="__codelineno-14-21" name="__codelineno-14-21" href="#__codelineno-14-21"></a><span class="s">  runtimeProfile: ollama-gguf-v1</span>
+<a id="__codelineno-14-22" name="__codelineno-14-22" href="#__codelineno-14-22"></a><span class="s">  artifact:</span>
+<a id="__codelineno-14-23" name="__codelineno-14-23" href="#__codelineno-14-23"></a><span class="s">    ollamaModel: ${OLLAMA_MODEL}</span>
+<a id="__codelineno-14-24" name="__codelineno-14-24" href="#__codelineno-14-24"></a><span class="s">    manifestDigest: ${OLLAMA_DIGEST}</span>
+<a id="__codelineno-14-25" name="__codelineno-14-25" href="#__codelineno-14-25"></a><span class="s">    format: gguf-v1</span>
+<a id="__codelineno-14-26" name="__codelineno-14-26" href="#__codelineno-14-26"></a><span class="s">    sizeBytes: ${OLLAMA_SIZE}</span>
+<a id="__codelineno-14-27" name="__codelineno-14-27" href="#__codelineno-14-27"></a><span class="s">  minimumUnifiedMemory: 16Gi</span>
+<a id="__codelineno-14-28" name="__codelineno-14-28" href="#__codelineno-14-28"></a><span class="s">  maxContextLength: 2048</span>
+<a id="__codelineno-14-29" name="__codelineno-14-29" href="#__codelineno-14-29"></a><span class="s">  maxConcurrentRequests: 1</span>
+<a id="__codelineno-14-30" name="__codelineno-14-30" href="#__codelineno-14-30"></a><span class="s">EOF</span>
+<a id="__codelineno-14-31" name="__codelineno-14-31" href="#__codelineno-14-31"></a>
+<a id="__codelineno-14-32" name="__codelineno-14-32" href="#__codelineno-14-32"></a>cat<span class="w"> </span>&gt;<span class="w"> </span>custom-ollama-values.yaml<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<a id="__codelineno-14-33" name="__codelineno-14-33" href="#__codelineno-14-33"></a><span class="s">namespace: ${IDLELOOM_NAMESPACE}</span>
+<a id="__codelineno-14-34" name="__codelineno-14-34" href="#__codelineno-14-34"></a><span class="s">model: ${OLLAMA_CATALOG}</span>
+<a id="__codelineno-14-35" name="__codelineno-14-35" href="#__codelineno-14-35"></a><span class="s">prompt: Explain why idle compute is useful in one sentence.</span>
+<a id="__codelineno-14-36" name="__codelineno-14-36" href="#__codelineno-14-36"></a><span class="s">maxTokens: 128</span>
+<a id="__codelineno-14-37" name="__codelineno-14-37" href="#__codelineno-14-37"></a><span class="s">timeoutSeconds: 600</span>
+<a id="__codelineno-14-38" name="__codelineno-14-38" href="#__codelineno-14-38"></a><span class="s">unifiedMemory: 16Gi</span>
+<a id="__codelineno-14-39" name="__codelineno-14-39" href="#__codelineno-14-39"></a><span class="s">EOF</span>
+<a id="__codelineno-14-40" name="__codelineno-14-40" href="#__codelineno-14-40"></a>
+<a id="__codelineno-14-41" name="__codelineno-14-41" href="#__codelineno-14-41"></a>kube<span class="w"> </span>apply<span class="w"> </span>--dry-run<span class="o">=</span>server<span class="w"> </span>-f<span class="w"> </span>custom-ollama-model.yaml
+<a id="__codelineno-14-42" name="__codelineno-14-42" href="#__codelineno-14-42"></a>kube<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>custom-ollama-model.yaml
+</code></pre></div>
+<p>Pass <code>--values custom-ollama-values.yaml</code> to <code>recipe render</code>. The admission
+policy rejects malformed sources, and scheduling remains blocked until a host
+advertises the exact local model. <code>minimumUnifiedMemory</code> must cover the model,
+runtime overhead, and context; use a conservative value above the local model
+size rather than treating it as an enforced memory limit.</p>
+<p>Render, apply, and read the result:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>infer/ollama-gguf@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="w">  </span>--name<span class="w"> </span>native-ollama-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>native-ollama-infer.yaml
+<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>
+<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>native-ollama-infer.yaml
+<a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">&#39;{.status.phase}&#39;</span><span class="o">=</span>Succeeded<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a><span class="w">  </span>idleloomworkload/native-ollama-infer<span class="w"> </span>--timeout<span class="o">=</span>20m
+<a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a>idlectl<span class="w"> </span>logs<span class="w"> </span>workload/native-ollama-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-15-10" name="__codelineno-15-10" href="#__codelineno-15-10"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-15-11" name="__codelineno-15-11" href="#__codelineno-15-11"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>For the custom catalog above, render with:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>infer/ollama-gguf@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="w">  </span>--name<span class="w"> </span>native-ollama-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="w">  </span>--values<span class="w"> </span>custom-ollama-values.yaml<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>native-ollama-infer.yaml
+</code></pre></div>
+<p>Delete the workload after reading the result:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>idlectl<span class="w"> </span>delete<span class="w"> </span>workload/native-ollama-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>rm<span class="w"> </span>-f<span class="w"> </span>native-ollama-infer.yaml
+</code></pre></div>
+<h2 id="native-metal-llamacpp-gguf-batch-inference">Native Metal llama.cpp GGUF batch inference<a class="headerlink" href="#native-metal-llamacpp-gguf-batch-inference" title="Permanent link">&para;</a></h2>
+<p>Use the llama.cpp runtime when the operator already has a standalone GGUF and
+wants direct control over the native Metal backend without an Ollama model
+store. Idleloom starts a private <code>llama-server</code> for each assignment, binds it
+only to loopback inside the macOS sandbox, and requires every model layer to be
+offloaded to the selected Apple Metal device.</p>
+<p>Install llama.cpp and copy an operator-approved GGUF into the managed directory
+under the same <code>--root</code> used during <code>idlectl join</code>. The default root is shown
+here:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>brew<span class="w"> </span>install<span class="w"> </span>llama.cpp
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a><span class="nb">export</span><span class="w"> </span><span class="nv">IDLELOOM_ROOT</span><span class="o">=</span>/var/tmp/idleloom
+<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="nb">export</span><span class="w"> </span><span class="nv">GGUF_SOURCE</span><span class="o">=</span>/absolute/path/to/model.gguf
+<a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="nb">export</span><span class="w"> </span><span class="nv">GGUF_FILE</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>basename<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">GGUF_SOURCE</span><span class="si">}</span><span class="s2">&quot;</span><span class="k">)</span><span class="s2">&quot;</span>
+<a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a>
+<a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a>mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_ROOT</span><span class="si">}</span><span class="s2">/models/gguf&quot;</span>
+<a id="__codelineno-18-8" name="__codelineno-18-8" href="#__codelineno-18-8"></a>chmod<span class="w"> </span><span class="m">700</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_ROOT</span><span class="si">}</span><span class="s2">/models/gguf&quot;</span>
+<a id="__codelineno-18-9" name="__codelineno-18-9" href="#__codelineno-18-9"></a>cp<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">GGUF_SOURCE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_ROOT</span><span class="si">}</span><span class="s2">/models/gguf/</span><span class="si">${</span><span class="nv">GGUF_FILE</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-18-10" name="__codelineno-18-10" href="#__codelineno-18-10"></a>chmod<span class="w"> </span><span class="m">600</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_ROOT</span><span class="si">}</span><span class="s2">/models/gguf/</span><span class="si">${</span><span class="nv">GGUF_FILE</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-18-11" name="__codelineno-18-11" href="#__codelineno-18-11"></a>
+<a id="__codelineno-18-12" name="__codelineno-18-12" href="#__codelineno-18-12"></a><span class="nb">export</span><span class="w"> </span><span class="nv">GGUF_SHA256</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>shasum<span class="w"> </span>-a<span class="w"> </span><span class="m">256</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_ROOT</span><span class="si">}</span><span class="s2">/models/gguf/</span><span class="si">${</span><span class="nv">GGUF_FILE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>awk<span class="w"> </span><span class="s1">&#39;{print $1}&#39;</span><span class="k">)</span><span class="s2">&quot;</span>
+<a id="__codelineno-18-13" name="__codelineno-18-13" href="#__codelineno-18-13"></a><span class="nb">export</span><span class="w"> </span><span class="nv">GGUF_SIZE</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>stat<span class="w"> </span>-f<span class="w"> </span>%z<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_ROOT</span><span class="si">}</span><span class="s2">/models/gguf/</span><span class="si">${</span><span class="nv">GGUF_FILE</span><span class="si">}</span><span class="s2">&quot;</span><span class="k">)</span><span class="s2">&quot;</span>
+<a id="__codelineno-18-14" name="__codelineno-18-14" href="#__codelineno-18-14"></a><span class="nb">printf</span><span class="w"> </span><span class="s1">&#39;file=%s\nsha256=%s\nsizeBytes=%s\n&#39;</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">GGUF_FILE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">GGUF_SHA256</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">GGUF_SIZE</span><span class="si">}</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>The filename must end in <code>.gguf</code> and contain only letters, digits, dots,
+underscores, and hyphens. Idleloom never downloads this file, follows a model
+path outside the managed directory, or treats an Ollama tag as the same
+artifact. Confirm that the installed llama.cpp build supports the chosen GGUF;
+model metadata support can differ between llama.cpp and Ollama releases.</p>
+<p>Create an immutable cluster catalog entry from the measured values:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a>cat<span class="w"> </span>&gt;<span class="w"> </span>llama-cpp-model.yaml<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="s">apiVersion: ai.idleloom.io/v1alpha1</span>
+<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a><span class="s">kind: IdleloomModel</span>
+<a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a><span class="s">metadata:</span>
+<a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a><span class="s">  name: local-gguf</span>
+<a id="__codelineno-19-6" name="__codelineno-19-6" href="#__codelineno-19-6"></a><span class="s">spec:</span>
+<a id="__codelineno-19-7" name="__codelineno-19-7" href="#__codelineno-19-7"></a><span class="s">  family: gguf</span>
+<a id="__codelineno-19-8" name="__codelineno-19-8" href="#__codelineno-19-8"></a><span class="s">  runtimeProfile: llama-cpp-metal-v1</span>
+<a id="__codelineno-19-9" name="__codelineno-19-9" href="#__codelineno-19-9"></a><span class="s">  artifact:</span>
+<a id="__codelineno-19-10" name="__codelineno-19-10" href="#__codelineno-19-10"></a><span class="s">    ggufFile: ${GGUF_FILE}</span>
+<a id="__codelineno-19-11" name="__codelineno-19-11" href="#__codelineno-19-11"></a><span class="s">    manifestDigest: sha256:${GGUF_SHA256}</span>
+<a id="__codelineno-19-12" name="__codelineno-19-12" href="#__codelineno-19-12"></a><span class="s">    format: gguf-v1</span>
+<a id="__codelineno-19-13" name="__codelineno-19-13" href="#__codelineno-19-13"></a><span class="s">    sizeBytes: ${GGUF_SIZE}</span>
+<a id="__codelineno-19-14" name="__codelineno-19-14" href="#__codelineno-19-14"></a><span class="s">  minimumUnifiedMemory: 16Gi</span>
+<a id="__codelineno-19-15" name="__codelineno-19-15" href="#__codelineno-19-15"></a><span class="s">  maxContextLength: 2048</span>
+<a id="__codelineno-19-16" name="__codelineno-19-16" href="#__codelineno-19-16"></a><span class="s">  maxConcurrentRequests: 1</span>
+<a id="__codelineno-19-17" name="__codelineno-19-17" href="#__codelineno-19-17"></a><span class="s">EOF</span>
+<a id="__codelineno-19-18" name="__codelineno-19-18" href="#__codelineno-19-18"></a>
+<a id="__codelineno-19-19" name="__codelineno-19-19" href="#__codelineno-19-19"></a>kube<span class="w"> </span>apply<span class="w"> </span>--dry-run<span class="o">=</span>server<span class="w"> </span>-f<span class="w"> </span>llama-cpp-model.yaml
+<a id="__codelineno-19-20" name="__codelineno-19-20" href="#__codelineno-19-20"></a>kube<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>llama-cpp-model.yaml
+</code></pre></div>
+<p>Increase <code>minimumUnifiedMemory</code> for larger files or context windows. It is a
+conservative scheduling reservation rather than an enforced macOS memory
+limit. The agent advertises the model only after hashing the complete file,
+and it repeats that strong verification immediately before every execution.</p>
+<p>Render and run the batch recipe:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>infer/llama-cpp-metal@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a><span class="w">  </span>--name<span class="w"> </span>native-llama-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>native-llama-infer.yaml
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a>
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>native-llama-infer.yaml
+<a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">&#39;{.status.phase}&#39;</span><span class="o">=</span>Succeeded<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-7" name="__codelineno-20-7" href="#__codelineno-20-7"></a><span class="w">  </span>idleloomworkload/native-llama-infer<span class="w"> </span>--timeout<span class="o">=</span>20m
+<a id="__codelineno-20-8" name="__codelineno-20-8" href="#__codelineno-20-8"></a>idlectl<span class="w"> </span>logs<span class="w"> </span>workload/native-llama-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-9" name="__codelineno-20-9" href="#__codelineno-20-9"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-10" name="__codelineno-20-10" href="#__codelineno-20-10"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-20-11" name="__codelineno-20-11" href="#__codelineno-20-11"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>The result uses the same structured batch envelope as MLX and Ollama. A
+startup fails closed if llama.cpp selects no Metal device, loads only part of
+the model on Metal, or the file no longer matches the catalog digest.</p>
+<p>Clean up the run and catalog entry without deleting the host-local GGUF:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a>idlectl<span class="w"> </span>delete<span class="w"> </span>workload/native-llama-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="w">  </span>--kubeconfig<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_KUBECONFIG</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a><span class="w">  </span>--context<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_CONTEXT</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a><span class="w">  </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a>kube<span class="w"> </span>delete<span class="w"> </span>-f<span class="w"> </span>llama-cpp-model.yaml
+<a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a>rm<span class="w"> </span>-f<span class="w"> </span>native-llama-infer.yaml<span class="w"> </span>llama-cpp-model.yaml
+</code></pre></div>
+<h2 id="linux-worker-vulkan-batch-inference">Linux worker Vulkan batch inference<a class="headerlink" href="#linux-worker-vulkan-batch-inference" title="Permanent link">&para;</a></h2>
+<p>The Worker inference recipe renders two standard Kubernetes objects: a
+<code>resource.k8s.io/v1</code> <code>ResourceClaim</code> and a <code>batch/v1</code> <code>Job</code>. The Job downloads
+a Qwen3 0.6B GGUF file from a commit-pinned URL, verifies its SHA-256, and runs
+the llama.cpp CLI from a digest-pinned Ramalama image whose Mesa userspace is
+compatible with the krunkit Venus device. Before loading the model, the
+container requires <code>llama-cli --list-devices</code> to report a <code>Virtio-GPU Venus</code>
+Vulkan device; the run fails instead of silently falling back to CPU.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>infer/llama-vulkan@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="w">  </span>--name<span class="w"> </span>worker-infer<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>worker-infer.yaml
+<a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a>
+<a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-f<span class="w"> </span>worker-infer.yaml
+<a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>worker-infer.yaml
+<a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">condition</span><span class="o">=</span><span class="nb">complete</span><span class="w"> </span>job/worker-infer<span class="w"> </span>--timeout<span class="o">=</span>30m
+<a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>logs<span class="w"> </span>job/worker-infer
+<a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>delete<span class="w"> </span>-f<span class="w"> </span>worker-infer.yaml
+</code></pre></div>
+<p>The target cluster must already have the Idleloom Apple Vulkan DRA driver and
+an <code>apple-vulkan</code> <code>DeviceClass</code>. Follow the registry push, DaemonSet rollout,
+and <code>ResourceSlice</code> verification steps in the main README before this recipe.
+Override <code>modelURL</code>, <code>modelSHA256</code>,
+<code>modelStorage</code>, and <code>memory</code> together when using a larger operator-approved
+model; <code>deviceClass</code> selects another DRA configuration. The inference image
+runs as nonroot UID and GID <code>65532</code>. The DRA CDI specification publishes the
+render device with group-writable permissions, while the Pod uses <code>fsGroup:
+65532</code>, drops all capabilities, forbids privilege escalation, and keeps the
+image root filesystem read-only. This remains an experimental device boundary,
+not a reviewed multi-tenant isolation boundary.</p>
+<h2 id="native-metal-serving">Native Metal serving<a class="headerlink" href="#native-metal-serving" title="Permanent link">&para;</a></h2>
+<p>The Native serving recipe renders an explicit <code>Server</code> <code>IdleloomWorkload</code> and
+a selectorless ClusterIP <code>Service</code>. It can schedule only to a Native host with
+a healthy WireKube relay session and synchronized peer routes. The controller creates an <code>EndpointSlice</code> that
+points at the host's WireKube mesh address after the assignment reaches
+<code>Running</code>; API-only hosts are rejected by capability scheduling and continue
+to use batch inference.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>serve/mlx-qwen@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="w">  </span>--name<span class="w"> </span>native-mlx-serve<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>native-mlx-serve.yaml
+<a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a>
+<a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>native-mlx-serve.yaml
+<a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">condition</span><span class="o">=</span>Ready<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-23-7" name="__codelineno-23-7" href="#__codelineno-23-7"></a><span class="w">  </span>idleloomworkload/native-mlx-serve<span class="w"> </span>--timeout<span class="o">=</span>15m
+<a id="__codelineno-23-8" name="__codelineno-23-8" href="#__codelineno-23-8"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>get<span class="w"> </span>endpointslice/native-mlx-serve
+</code></pre></div>
+<p>The controller generates <code>Secret/native-mlx-serve-auth</code> in the workload namespace
+and copies the same API key into a fixed, agent-readable Secret in the selected
+host namespace. Secret values never enter the Workload or Assignment CRs.
+The client must run on a real schedulable Linux kubelet node that participates
+in the WireKube mesh. The example clients tolerate Idleloom's default Worker
+taint and require Pod affinity to a <code>wirekube-agent</code> or
+<code>wirekube-agent-proxy</code> Pod on the same node. The Native projection Node is
+deliberately unschedulable and cannot run these Pods.</p>
+<p>The repository provides one complete, digest-pinned client manifest for each
+Native runtime. Each client asserts an unauthenticated HTTP 401 before making
+an authenticated request. Apply the MLX client, wait for completion, and read
+the response:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a>kube<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>examples/native/serve-mlx-client.yaml
+<a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a>kube<span class="w"> </span>-n<span class="w"> </span>default<span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">&#39;{.status.phase}&#39;</span><span class="o">=</span>Succeeded<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a><span class="w">  </span>pod/native-mlx-serve-client<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-24-4" name="__codelineno-24-4" href="#__codelineno-24-4"></a><span class="w">  </span>--timeout<span class="o">=</span>5m
+<a id="__codelineno-24-5" name="__codelineno-24-5" href="#__codelineno-24-5"></a>kube<span class="w"> </span>-n<span class="w"> </span>default<span class="w"> </span>logs<span class="w"> </span>pod/native-mlx-serve-client
+</code></pre></div>
+<p>These example clients intentionally use namespace <code>default</code>. Copy and edit the
+manifest when the serving recipe uses another namespace.</p>
+<p>The Kubernetes API Service proxy accepts only Pod-backed endpoints, while this
+alpha path publishes the Mac through a WireKube <code>EndpointSlice</code>; <code>kubectl
+proxy</code> therefore cannot expose this Service. The logs-only projection also
+does not implement <code>kubectl port-forward</code> yet.</p>
+<p>The current adapter implements
+non-streaming chat completions, <code>GET /v1/models</code>, and a 512-token response
+limit. One generation may run at a time; concurrent requests receive HTTP 429
+with <code>Retry-After: 1</code> instead of waiting in an unbounded queue. A generation
+already accepted by the model finishes even if its client disconnects, so the
+shared model process remains available for later requests. Traffic to the Mac
+is encrypted by WireGuard and authenticated with the generated API key; this
+slice does not add application-layer TLS or expose an Ingress. The first MLX
+request path may require the same approximately 650 MB locked runtime and
+model preparation as Native batch inference.</p>
+<p>To serve the pinned local GGUF model instead, render
+<code>serve/ollama-gguf@v1</code>. The Service, generated Secret, authentication,
+concurrency limit, and OpenAI-compatible API are identical; only the private
+model process changes:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>serve/ollama-gguf@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="w">  </span>--name<span class="w"> </span>native-ollama-serve<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>native-ollama-serve.yaml
+<a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>native-ollama-serve.yaml
+<a id="__codelineno-25-5" name="__codelineno-25-5" href="#__codelineno-25-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">condition</span><span class="o">=</span>Ready<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-25-6" name="__codelineno-25-6" href="#__codelineno-25-6"></a><span class="w">  </span>idleloomworkload/native-ollama-serve<span class="w"> </span>--timeout<span class="o">=</span>15m
+<a id="__codelineno-25-7" name="__codelineno-25-7" href="#__codelineno-25-7"></a>kube<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>examples/native/serve-ollama-client.yaml
+<a id="__codelineno-25-8" name="__codelineno-25-8" href="#__codelineno-25-8"></a>kube<span class="w"> </span>-n<span class="w"> </span>default<span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">&#39;{.status.phase}&#39;</span><span class="o">=</span>Succeeded<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-25-9" name="__codelineno-25-9" href="#__codelineno-25-9"></a><span class="w">  </span>pod/native-ollama-serve-client<span class="w"> </span>--timeout<span class="o">=</span>5m
+<a id="__codelineno-25-10" name="__codelineno-25-10" href="#__codelineno-25-10"></a>kube<span class="w"> </span>-n<span class="w"> </span>default<span class="w"> </span>logs<span class="w"> </span>pod/native-ollama-serve-client
+</code></pre></div>
+<p>The client uses model alias <code>qwen3-5-9b</code>, Service
+<code>native-ollama-serve.default.svc</code>, and generated Secret
+<code>native-ollama-serve-auth</code>. For a custom catalog, create a serving values file
+with <code>model</code>, <code>modelAlias</code>, <code>servicePort</code>, <code>namespace</code>, and <code>unifiedMemory</code>, then
+pass it through <code>--values</code> when rendering.</p>
+<p>The direct GGUF runtime uses the same serving contract. Keep the
+<code>IdleloomModel</code> from the llama.cpp batch section, then render the serving
+recipe:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>serve/llama-cpp-metal@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a><span class="w">  </span>--name<span class="w"> </span>native-llama-serve<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>native-llama-serve.yaml
+<a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>native-llama-serve.yaml
+<a id="__codelineno-26-5" name="__codelineno-26-5" href="#__codelineno-26-5"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">condition</span><span class="o">=</span>Ready<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-26-6" name="__codelineno-26-6" href="#__codelineno-26-6"></a><span class="w">  </span>idleloomworkload/native-llama-serve<span class="w"> </span>--timeout<span class="o">=</span>15m
+<a id="__codelineno-26-7" name="__codelineno-26-7" href="#__codelineno-26-7"></a>kube<span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>examples/native/serve-llama-cpp-client.yaml
+<a id="__codelineno-26-8" name="__codelineno-26-8" href="#__codelineno-26-8"></a>kube<span class="w"> </span>-n<span class="w"> </span>default<span class="w"> </span><span class="nb">wait</span><span class="w"> </span>--for<span class="o">=</span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">&#39;{.status.phase}&#39;</span><span class="o">=</span>Succeeded<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-26-9" name="__codelineno-26-9" href="#__codelineno-26-9"></a><span class="w">  </span>pod/native-llama-serve-client<span class="w"> </span>--timeout<span class="o">=</span>5m
+<a id="__codelineno-26-10" name="__codelineno-26-10" href="#__codelineno-26-10"></a>kube<span class="w"> </span>-n<span class="w"> </span>default<span class="w"> </span>logs<span class="w"> </span>pod/native-llama-serve-client
+</code></pre></div>
+<p>The client calls model alias <code>local-gguf</code> through Service
+<code>native-llama-serve.default.svc</code> with generated Secret
+<code>native-llama-serve-auth</code>. Authentication, the one-request concurrency limit,
+restart behavior, and cluster-private WireKube endpoint are identical to MLX
+and Ollama serving. The private llama.cpp server itself remains bound to
+loopback; only Idleloom's authenticated adapter listens on the host mesh
+address.</p>
+<p>Delete the manifest to stop the process and remove its EndpointSlice and
+managed Secrets:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a>kube<span class="w"> </span>-n<span class="w"> </span>default<span class="w"> </span>delete<span class="w"> </span>pod/native-mlx-serve-client<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="w">  </span>pod/native-ollama-serve-client<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a><span class="w">  </span>pod/native-llama-serve-client<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="w">  </span>--ignore-not-found
+<a id="__codelineno-27-5" name="__codelineno-27-5" href="#__codelineno-27-5"></a><span class="k">for</span><span class="w"> </span>manifest<span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-6" name="__codelineno-27-6" href="#__codelineno-27-6"></a><span class="w">  </span>native-mlx-serve.yaml<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-7" name="__codelineno-27-7" href="#__codelineno-27-7"></a><span class="w">  </span>native-ollama-serve.yaml<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-27-8" name="__codelineno-27-8" href="#__codelineno-27-8"></a><span class="w">  </span>native-llama-serve.yaml
+<a id="__codelineno-27-9" name="__codelineno-27-9" href="#__codelineno-27-9"></a><span class="k">do</span>
+<a id="__codelineno-27-10" name="__codelineno-27-10" href="#__codelineno-27-10"></a><span class="w">  </span><span class="k">if</span><span class="w"> </span><span class="nb">test</span><span class="w"> </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">manifest</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">;</span><span class="w"> </span><span class="k">then</span>
+<a id="__codelineno-27-11" name="__codelineno-27-11" href="#__codelineno-27-11"></a><span class="w">    </span>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>delete<span class="w"> </span>-f<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">manifest</span><span class="si">}</span><span class="s2">&quot;</span>
+<a id="__codelineno-27-12" name="__codelineno-27-12" href="#__codelineno-27-12"></a><span class="w">  </span><span class="k">fi</span>
+<a id="__codelineno-27-13" name="__codelineno-27-13" href="#__codelineno-27-13"></a><span class="k">done</span>
+<a id="__codelineno-27-14" name="__codelineno-27-14" href="#__codelineno-27-14"></a>rm<span class="w"> </span>-f<span class="w"> </span>native-mlx-serve.yaml<span class="w"> </span>native-ollama-serve.yaml<span class="w"> </span>native-llama-serve.yaml
+</code></pre></div>
+<h2 id="linux-worker-vulkan-serving">Linux worker Vulkan serving<a class="headerlink" href="#linux-worker-vulkan-serving" title="Permanent link">&para;</a></h2>
+<p>The serving recipe renders a <code>resource.k8s.io/v1</code> <code>ResourceClaimTemplate</code>, an
+<code>apps/v1</code> <code>Deployment</code>, and a ClusterIP <code>Service</code>. It uses one replica with a
+<code>Recreate</code> strategy so two Pods cannot contend for the single DRA device during
+a rollout. Complete the same registry-published DRA driver and <code>apple-vulkan</code>
+<code>DeviceClass</code> setup required by Worker batch inference first. The llama.cpp
+OpenAI-compatible API requires a key from an existing Kubernetes Secret; the
+key is never placed in recipe values or generated YAML.
+The key protects generation endpoints such as <code>/v1/chat/completions</code>.
+Upstream llama.cpp leaves <code>/v1/models</code> readable to clients that can already
+reach the cluster-private Service, so model identifiers are not treated as
+secret metadata.</p>
+<p>Create the Secret and a values file:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a>openssl<span class="w"> </span>rand<span class="w"> </span>-hex<span class="w"> </span><span class="m">32</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>create<span class="w"> </span>secret<span class="w"> </span>generic<span class="w"> </span>worker-serve-auth<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a><span class="w">  </span>--from-file<span class="o">=</span>api-key<span class="o">=</span>/dev/stdin
+<a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a>
+<a id="__codelineno-28-4" name="__codelineno-28-4" href="#__codelineno-28-4"></a>cat<span class="w"> </span>&gt;<span class="w"> </span>worker-serve-values.yaml<span class="w"> </span><span class="s">&lt;&lt;EOF</span>
+<a id="__codelineno-28-5" name="__codelineno-28-5" href="#__codelineno-28-5"></a><span class="s">namespace: ${IDLELOOM_NAMESPACE}</span>
+<a id="__codelineno-28-6" name="__codelineno-28-6" href="#__codelineno-28-6"></a><span class="s">apiKeySecret: worker-serve-auth</span>
+<a id="__codelineno-28-7" name="__codelineno-28-7" href="#__codelineno-28-7"></a><span class="s">EOF</span>
+</code></pre></div>
+<p>Render, inspect, and apply the manifest:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a>idlectl<span class="w"> </span>recipe<span class="w"> </span>render<span class="w"> </span>serve/llama-vulkan@v1<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-29-2" name="__codelineno-29-2" href="#__codelineno-29-2"></a><span class="w">  </span>--name<span class="w"> </span>worker-serve<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-29-3" name="__codelineno-29-3" href="#__codelineno-29-3"></a><span class="w">  </span>--values<span class="w"> </span>worker-serve-values.yaml<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-29-4" name="__codelineno-29-4" href="#__codelineno-29-4"></a><span class="w">  </span>-o<span class="w"> </span>yaml<span class="w"> </span>&gt;<span class="w"> </span>worker-serve.yaml
+<a id="__codelineno-29-5" name="__codelineno-29-5" href="#__codelineno-29-5"></a>
+<a id="__codelineno-29-6" name="__codelineno-29-6" href="#__codelineno-29-6"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>--dry-run<span class="o">=</span>client<span class="w"> </span>-f<span class="w"> </span>worker-serve.yaml
+<a id="__codelineno-29-7" name="__codelineno-29-7" href="#__codelineno-29-7"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>apply<span class="w"> </span>-f<span class="w"> </span>worker-serve.yaml
+<a id="__codelineno-29-8" name="__codelineno-29-8" href="#__codelineno-29-8"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>rollout<span class="w"> </span>status<span class="w"> </span>deployment/worker-serve<span class="w"> </span>--timeout<span class="o">=</span>30m
+</code></pre></div>
+<p>Forward the cluster-private Service in one terminal:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>port-forward<span class="w"> </span>service/worker-serve<span class="w"> </span><span class="m">8080</span>:8080
+</code></pre></div>
+<p>Read the key and call the endpoint from another terminal:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a><span class="nv">API_KEY</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>get<span class="w"> </span>secret<span class="w"> </span>worker-serve-auth<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-31-2" name="__codelineno-31-2" href="#__codelineno-31-2"></a><span class="w">  </span>-o<span class="w"> </span><span class="nv">jsonpath</span><span class="o">=</span><span class="s1">&#39;{.data.api-key}&#39;</span><span class="w"> </span><span class="p">|</span><span class="w"> </span>openssl<span class="w"> </span>base64<span class="w"> </span>-d<span class="w"> </span>-A<span class="k">)</span><span class="s2">&quot;</span>
+<a id="__codelineno-31-3" name="__codelineno-31-3" href="#__codelineno-31-3"></a>
+<a id="__codelineno-31-4" name="__codelineno-31-4" href="#__codelineno-31-4"></a>curl<span class="w"> </span>--fail-with-body<span class="w"> </span>http://127.0.0.1:8080/v1/chat/completions<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-31-5" name="__codelineno-31-5" href="#__codelineno-31-5"></a><span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Authorization: Bearer </span><span class="si">${</span><span class="nv">API_KEY</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-31-6" name="__codelineno-31-6" href="#__codelineno-31-6"></a><span class="w">  </span>-H<span class="w"> </span><span class="s1">&#39;Content-Type: application/json&#39;</span><span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-31-7" name="__codelineno-31-7" href="#__codelineno-31-7"></a><span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{&quot;model&quot;:&quot;qwen3-0.6b&quot;,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;Why is idle compute useful?&quot;}],&quot;max_tokens&quot;:64}&#39;</span>
+</code></pre></div>
+<p>The default model is downloaded and checksum-verified into Pod-local
+<code>emptyDir</code> storage on each replacement Pod. Use an operator-managed persistent
+model cache in a future recipe before treating restarts as a fast path. The
+Pod also mounts a writable runtime cache for Vulkan shader compilation while
+keeping the image root filesystem read-only. The Service is cluster-private
+and does not configure Ingress, external TLS, or
+tenant authorization. Remove the generated resources and Secret explicitly:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>delete<span class="w"> </span>-f<span class="w"> </span>worker-serve.yaml
+<a id="__codelineno-32-2" name="__codelineno-32-2" href="#__codelineno-32-2"></a>kube<span class="w"> </span>-n<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">IDLELOOM_NAMESPACE</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>delete<span class="w"> </span>secret<span class="w"> </span>worker-serve-auth
+</code></pre></div>
+<h2 id="manifest-contract">Manifest contract<a class="headerlink" href="#manifest-contract" title="Permanent link">&para;</a></h2>
+<p>Every rendered object carries the same queryable metadata:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a><span class="nt">metadata</span><span class="p">:</span>
+<a id="__codelineno-33-2" name="__codelineno-33-2" href="#__codelineno-33-2"></a><span class="w">  </span><span class="nt">labels</span><span class="p">:</span>
+<a id="__codelineno-33-3" name="__codelineno-33-3" href="#__codelineno-33-3"></a><span class="w">    </span><span class="nt">app.kubernetes.io/managed-by</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">idleloom</span>
+<a id="__codelineno-33-4" name="__codelineno-33-4" href="#__codelineno-33-4"></a><span class="w">    </span><span class="nt">ai.idleloom.io/run</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RUN</span>
+<a id="__codelineno-33-5" name="__codelineno-33-5" href="#__codelineno-33-5"></a><span class="w">    </span><span class="nt">ai.idleloom.io/task</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">train-infer-or-serve</span>
+<a id="__codelineno-33-6" name="__codelineno-33-6" href="#__codelineno-33-6"></a><span class="w">    </span><span class="nt">ai.idleloom.io/backend</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">native-or-worker</span>
+<a id="__codelineno-33-7" name="__codelineno-33-7" href="#__codelineno-33-7"></a><span class="w">    </span><span class="nt">ai.idleloom.io/runtime</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RUNTIME</span>
+<a id="__codelineno-33-8" name="__codelineno-33-8" href="#__codelineno-33-8"></a><span class="w">  </span><span class="nt">annotations</span><span class="p">:</span>
+<a id="__codelineno-33-9" name="__codelineno-33-9" href="#__codelineno-33-9"></a><span class="w">    </span><span class="nt">ai.idleloom.io/recipe</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TASK/RECIPE@v1</span>
+<a id="__codelineno-33-10" name="__codelineno-33-10" href="#__codelineno-33-10"></a><span class="w">    </span><span class="nt">ai.idleloom.io/recipe-digest</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sha256:...</span>
+<a id="__codelineno-33-11" name="__codelineno-33-11" href="#__codelineno-33-11"></a><span class="w">    </span><span class="nt">ai.idleloom.io/input-digest</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sha256:...</span>
+</code></pre></div>
+<p>The recipe annotation documents provenance; it is not a hidden controller
+trigger. A hand-written <code>IdleloomWorkload</code> or Job uses the same execution path
+as a rendered object. Recipe rendering adds strict input validation,
+deterministic defaults, pinned assets, and consistent metadata.</p>
+<p>Query runs across both backends with the shared labels:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a>kube<span class="w"> </span>-A<span class="w"> </span>get<span class="w"> </span>idleloomworkloads,jobs,deployments<span class="w"> </span><span class="se">\</span>
+<a id="__codelineno-34-2" name="__codelineno-34-2" href="#__codelineno-34-2"></a><span class="w">  </span>-l<span class="w"> </span>app.kubernetes.io/managed-by<span class="o">=</span>idleloom
+</code></pre></div>
+<h2 id="current-result-boundary">Current result boundary<a class="headerlink" href="#current-result-boundary" title="Permanent link">&para;</a></h2>
+<p>Native training recognizes bounded metric and artifact records in process
+output. Host-local <code>file://</code> artifacts are digest-verified and retained only as
+a small alpha cache; durable runs should upload checkpoints to an external
+artifact store and emit a credential-free URI. Worker recipes keep normal
+container semantics and can use volumes or an experiment tracker directly.
+Neither backend puts object-store credentials into recipe values or workload
+metadata.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.sections", "navigation.expand", "navigation.top", "search.suggest", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  </body>
+</html>
