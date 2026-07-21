@@ -129,6 +129,12 @@ registration can use `idlectl create worker NAME --wait=false`. The Node
 remains cordoned in phase `registered`; run `idlectl start worker` only after
 the network path is ready.
 
+When the cluster's system images sit behind a registry the worker cannot reach
+or must authenticate to, `create worker` accepts `--registry-mirror HOST=URL`
+to redirect pulls to a reachable mirror and `--credential-provider-bin/-config/-env-file`
+to inject a kubelet image credential provider. See
+[Private registries and credential providers](docs/getting-started/linux-worker.md#private-registries-and-credential-providers).
+
 Continue with the [Linux Worker guide](docs/getting-started/linux-worker.md).
 
 ## Recipes

@@ -111,6 +111,76 @@ idlectl status
 
 Do not schedule workloads until the Node reports `Ready`.
 
+## Private registries and credential providers
+
+The worker VM pulls the cluster's system images (CNI, CSI, DNS) the moment it
+registers. When those images live behind a registry the VM cannot reach or must
+authenticate to, configure the pull path at `create worker` time. These flags
+are advanced and optional.
+
+### Redirect pulls to a reachable mirror
+
+`--registry-mirror HOST=URL` (repeatable) writes a containerd `certs.d`
+`hosts.toml` that redirects pulls for `HOST` to the mirror `URL`. Use it when a
+registry resolves to a VPC-private address the worker cannot route to but a
+public endpoint serves the same content. For example, an NKS cluster references
+`nks.kr.private-ncr.ntruss.com` (private) whose public twin
+`nks.kr.ncr.ntruss.com` allows anonymous pulls:
+
+```sh
+idlectl create worker evening-worker \
+  --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+  --context "${IDLELOOM_CONTEXT}" \
+  --registry-mirror nks.kr.private-ncr.ntruss.com=https://nks.kr.ncr.ntruss.com
+```
+
+The mirror URL must be `https` (plain `http` is accepted with a warning). `HOST`
+must be a bare registry host, optionally with a port — no scheme or path.
+
+### Authenticate with a kubelet credential provider
+
+For registries that require dynamic credentials (for example an EKS-owned ECR
+whose token rotates every few hours), inject a kubelet image credential
+provider:
+
+```sh
+idlectl create worker evening-worker \
+  --kubeconfig "${IDLELOOM_KUBECONFIG}" \
+  --context "${IDLELOOM_CONTEXT}" \
+  --credential-provider-bin ./ecr-credential-provider \
+  --credential-provider-config ./credential-providers.yaml \
+  --credential-provider-env-file ./aws.env
+```
+
+- `--credential-provider-bin` (repeatable) is the provider binary. It must be a
+  **linux/arm64** build — the binary runs inside the worker VM, so a macOS build
+  is rejected up front. `idlectl` validates the ELF architecture on your Mac
+  without executing the binary.
+- `--credential-provider-config` is a kubelet `CredentialProviderConfig`
+  (`apiVersion: kubelet.config.k8s.io/v1`). Every provider `name` it lists must
+  match a supplied binary's filename.
+- `--credential-provider-env-file` is an optional `KEY=VALUE` file (for example
+  `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) exported to the provider. It is
+  treated as a secret: installed `0600` inside the VM, never logged, and only its
+  path — never its contents — is recorded in the worker state file.
+
+An example `credential-providers.yaml` for ECR:
+
+```yaml
+apiVersion: kubelet.config.k8s.io/v1
+kind: CredentialProviderConfig
+providers:
+  - name: ecr-credential-provider
+    matchImages: ["*.dkr.ecr.*.amazonaws.com"]
+    defaultCacheDuration: 12h
+    apiVersion: credentialprovider.kubelet.k8s.io/v1
+```
+
+All of these settings are validated before any host or cluster change, so
+`--dry-run` reports a bad binary or config immediately. They are also persisted
+and reapplied automatically when a deferred worker is finished with
+`idlectl start worker`.
+
 ## Run an ordinary Pod
 
 ```sh
