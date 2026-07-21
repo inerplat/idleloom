@@ -1,6 +1,7 @@
 package idleloom
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,8 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -58,6 +61,7 @@ type App struct {
 	Now                      func() time.Time
 	Runtime                  WorkerRuntime
 	DownloadKubelet          func(context.Context, string) (string, error)
+	SaveImage                func(context.Context, string, []string, string) error
 	ApproveKubeletServingCSR func(context.Context, *Cluster, string, string, time.Time, bool, time.Duration) error
 	StartMaintainer          func(context.Context, string, io.Writer) error
 	StepIndex                int
@@ -74,6 +78,7 @@ func NewApp(out, errOut io.Writer) *App {
 			Out:    out,
 			Err:    errOut,
 		},
+		SaveImage: SaveImage,
 	}
 }
 
@@ -678,6 +683,105 @@ func (a *App) downloadKubelet(ctx context.Context, version string) (string, erro
 	return DownloadKubelet(ctx, version)
 }
 
+// LoadImage loads local container image(s) directly into the worker VM's
+// containerd so Pods with imagePullPolicy IfNotPresent or Never can use them
+// without a registry. Either refs (exported with a container engine) or a
+// pre-saved --archive tar is uploaded and imported.
+func (a *App) LoadImage(ctx context.Context, statePath string, refs []string, archivePath, enginePath string) error {
+	resolvedPath, err := resolveStatePath(statePath)
+	if err != nil {
+		return err
+	}
+	state, err := LoadState(resolvedPath)
+	if err != nil {
+		return err
+	}
+	status, err := a.Runtime.Status(ctx, &state.Runtime)
+	if err != nil {
+		return err
+	}
+	if status.VM != "running" {
+		return fmt.Errorf("worker %s is not running; start it with \"idlectl start worker\" before loading images", state.NodeName)
+	}
+
+	tarPath := archivePath
+	descriptor := "archive " + archivePath
+	if archivePath != "" {
+		info, err := os.Stat(archivePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("image archive %s does not exist", archivePath)
+			}
+			return fmt.Errorf("inspect image archive %s: %w", archivePath, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("image archive %s is not a regular file", archivePath)
+		}
+	} else {
+		if len(refs) == 0 {
+			return fmt.Errorf("at least one image reference is required unless --archive is set")
+		}
+		exportDir, err := os.MkdirTemp("", "idleloom-image-*")
+		if err != nil {
+			return fmt.Errorf("create image export directory: %w", err)
+		}
+		defer func() { _ = os.RemoveAll(exportDir) }()
+		tarPath = filepath.Join(exportDir, "image.tar")
+		if err := a.saveImage(ctx, enginePath, refs, tarPath); err != nil {
+			return err
+		}
+		if err := os.Chmod(tarPath, 0o600); err != nil {
+			return fmt.Errorf("protect exported image archive: %w", err)
+		}
+		descriptor = strings.Join(refs, ", ")
+	}
+
+	if err := a.Runtime.LoadImage(ctx, state.Runtime, tarPath); err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintf(a.Out, "\nLoaded %s into worker %s.\n", descriptor, state.NodeName)
+	return nil
+}
+
+func (a *App) saveImage(ctx context.Context, enginePath string, refs []string, dest string) error {
+	if a.SaveImage != nil {
+		return a.SaveImage(ctx, enginePath, refs, dest)
+	}
+	return SaveImage(ctx, enginePath, refs, dest)
+}
+
+// SaveImage exports the named images into dest as a tar. When enginePath is
+// empty it auto-detects a container engine (docker, nerdctl, then podman) from
+// PATH; all three support "<engine> save <refs...> -o <dest>".
+func SaveImage(ctx context.Context, enginePath string, refs []string, dest string) error {
+	engine := enginePath
+	if engine == "" {
+		detected, err := detectContainerEngine()
+		if err != nil {
+			return err
+		}
+		engine = detected
+	}
+	args := append([]string{"save"}, refs...)
+	args = append(args, "-o", dest)
+	command := exec.CommandContext(ctx, engine, args...)
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("export images with %s: %w: %s", engine, err, strings.TrimSpace(stderr.String()))
+	}
+	return nil
+}
+
+func detectContainerEngine() (string, error) {
+	for _, name := range []string{"docker", "nerdctl", "podman"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("no container engine found (looked for docker, nerdctl, podman); install one or pass --archive PATH")
+}
+
 func (a *App) approveKubeletServingCSR(ctx context.Context, cluster *Cluster, nodeName, guestIP string, notBefore time.Time, wait bool, timeout time.Duration) error {
 	if a.ApproveKubeletServingCSR != nil {
 		return a.ApproveKubeletServingCSR(ctx, cluster, nodeName, guestIP, notBefore, wait, timeout)
@@ -1139,4 +1243,3 @@ func (a *App) step(message string) {
 	a.StepIndex++
 	_, _ = fmt.Fprintf(a.Out, "\n[%d] %s...\n", a.StepIndex, message)
 }
-

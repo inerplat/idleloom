@@ -67,6 +67,7 @@ type WorkerRuntime interface {
 	Stop(context.Context, RuntimeState) error
 	Delete(context.Context, RuntimeState) error
 	InstallBundle(context.Context, RuntimeState, string) error
+	LoadImage(context.Context, RuntimeState, string) error
 	RemoveBootstrapIdentity(context.Context, RuntimeState) error
 	Status(context.Context, *RuntimeState) (WorkerStatus, error)
 }
