@@ -27,6 +27,7 @@ const (
 	createWorkerUsage = "idlectl create worker NAME [flags]"
 	startWorkerUsage  = "idlectl start worker [NAME] [flags]"
 	stopWorkerUsage   = "idlectl stop worker [NAME] [flags]"
+	loadImageUsage    = "idlectl load image REF [REF...] [flags]"
 	statusUsage       = "idlectl status [flags]"
 	workerStateHelp   = "Idleloom worker state file (default ~/.idleloom/state.json)"
 )
@@ -203,6 +204,39 @@ func runStopWorker(ctx context.Context, args []string) error {
 		}
 	}
 	return idleloom.NewApp(os.Stdout, os.Stderr).Stop(ctx, *statePath, *localOnly)
+}
+
+// runLoadImage loads local container image(s) into the worker VM's containerd
+// so Pods with imagePullPolicy IfNotPresent or Never can use them without a
+// registry. The first positional token must be the "image" resource.
+func runLoadImage(ctx context.Context, args []string) error {
+	flags := workerPFlags("load image", loadImageUsage)
+	statePath := flags.String("state", "", workerStateHelp)
+	archive := flags.String("archive", "", "pre-saved image archive (docker or OCI tar) to load as-is; makes REF optional")
+	engine := flags.String("engine", "", "container engine used to export images; defaults to the first of docker, nerdctl, podman found in PATH")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	positionals := flags.Args()
+	if len(positionals) == 0 || !isImageResource(positionals[0]) {
+		return usagef("usage: %s", loadImageUsage)
+	}
+	refs := positionals[1:]
+	if len(refs) == 0 && *archive == "" {
+		return usagef("at least one image REF is required unless --archive is set; usage: %s", loadImageUsage)
+	}
+	return idleloom.NewApp(os.Stdout, os.Stderr).LoadImage(ctx, *statePath, refs, *archive, *engine)
+}
+
+// isImageResource reports whether the positional token names the "image"
+// resource loaded by "idlectl load".
+func isImageResource(token string) bool {
+	switch strings.ToLower(token) {
+	case "image", "images":
+		return true
+	default:
+		return false
+	}
 }
 
 // deleteWorker removes this Mac's worker. NAME is required as a confirmation

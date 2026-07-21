@@ -429,6 +429,32 @@ func (k KrunkitRuntime) InstallBundle(ctx context.Context, state RuntimeState, b
 	return nil
 }
 
+func (k KrunkitRuntime) LoadImage(ctx context.Context, state RuntimeState, localTarPath string) error {
+	destination := "/tmp/idleloom-image.tar"
+	args := []string{
+		"-i", state.SSHPrivateKey,
+		"-P", strconv.Itoa(state.SSHPort),
+		"-o", "BatchMode=yes",
+		"-o", "IdentitiesOnly=yes",
+		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "UserKnownHostsFile=" + filepath.Join(state.RuntimeDir, "known_hosts"),
+		localTarPath, "idleloom@127.0.0.1:" + destination,
+	}
+	if err := k.Runner.Run(ctx, k.Out, k.Err, "scp", args...); err != nil {
+		return fmt.Errorf("copy image archive into VM: %w", err)
+	}
+	// Import into the k8s.io containerd namespace so the kubelet's CRI view can
+	// resolve the image; the default namespace would be invisible to kubelet.
+	// Remove the archive unconditionally even if the import fails partway (a
+	// bare `&& rm` would leak the archive on failure).
+	command := "chmod 600 " + destination + "; " +
+		"sudo ctr -n k8s.io images import " + destination + "; status=$?; rm -f " + destination + "; exit $status"
+	if err := k.ssh(ctx, state, command); err != nil {
+		return fmt.Errorf("import image into worker containerd: %w", err)
+	}
+	return nil
+}
+
 func (k KrunkitRuntime) RemoveBootstrapIdentity(ctx context.Context, state RuntimeState) error {
 	if err := k.ssh(ctx, state, "sudo rm -f /var/lib/idleloom/config/bootstrap-kubelet.conf"); err != nil {
 		return fmt.Errorf("remove bootstrap identity from worker: %w", err)

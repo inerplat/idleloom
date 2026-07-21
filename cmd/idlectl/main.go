@@ -64,6 +64,7 @@ Worker — run a schedulable Kubernetes Node in a Linux VM on this Mac:
   idlectl create worker NAME [flags]
   idlectl start worker [NAME] [flags]
   idlectl stop worker [NAME] [flags]
+  idlectl load (image REF...) [flags]
 
 Shared:
   idlectl get (hosts|workers|workloads) [NAME] [flags]
@@ -177,6 +178,8 @@ func runPublicCommand(ctx context.Context, command string, args []string) (bool,
 		return true, runStartWorker(ctx, args)
 	case "stop":
 		return true, runStopWorker(ctx, args)
+	case "load":
+		return true, runLoadImage(ctx, args)
 	case "status":
 		return true, runStatus(ctx, args, os.Stdout)
 	case "worker":

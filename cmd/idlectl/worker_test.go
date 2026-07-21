@@ -290,6 +290,60 @@ func TestStatusReportsExistingWorkerNameAndPhase(t *testing.T) {
 	}
 }
 
+func TestLoadImageRequiresImageResourceAndRefs(t *testing.T) {
+	if err := runLoadImage(context.Background(), nil); err == nil || !isUsageError(err) {
+		t.Fatalf("load without a resource error = %v", err)
+	}
+	if err := runLoadImage(context.Background(), []string{"image"}); err == nil || !isUsageError(err) {
+		t.Fatalf("load image without refs error = %v", err)
+	}
+	if err := runLoadImage(context.Background(), []string{"workload", "nginx:local"}); err == nil || !isUsageError(err) {
+		t.Fatalf("load with a non-image resource error = %v", err)
+	}
+}
+
+func TestLoadDispatchWithoutArgsIsUsageError(t *testing.T) {
+	handled, err := runPublicCommand(context.Background(), "load", nil)
+	if !handled {
+		t.Fatal("load command was not handled")
+	}
+	if err == nil || !isUsageError(err) {
+		t.Fatalf("load without args error = %v", err)
+	}
+}
+
+func TestLoadImageParsesRefsAgainstMissingWorker(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	// Refs parse; the command then fails on the absent worker rather than usage.
+	err := runLoadImage(context.Background(), []string{"image", "nginx:local", "app:poc", "--state", statePath})
+	if err == nil || isUsageError(err) {
+		t.Fatalf("load image with refs error = %v, want a non-usage no-worker error", err)
+	}
+	if !strings.Contains(err.Error(), "no Idleloom worker exists on this Mac") {
+		t.Fatalf("load image no-worker error = %v", err)
+	}
+}
+
+func TestLoadImageArchiveMakesRefsOptional(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	// With --archive the parse accepts a bare "image" token and defers to the
+	// worker lookup, which fails because no worker exists.
+	err := runLoadImage(context.Background(), []string{"image", "--archive", "/tmp/whatever.tar", "--state", statePath})
+	if err == nil || isUsageError(err) {
+		t.Fatalf("load image --archive error = %v, want a non-usage no-worker error", err)
+	}
+	if !strings.Contains(err.Error(), "no Idleloom worker exists on this Mac") {
+		t.Fatalf("load image --archive no-worker error = %v", err)
+	}
+}
+
+func TestLoadHelpRoutesToCommandHelp(t *testing.T) {
+	handled, err := runPublicCommand(context.Background(), "help", []string{"load"})
+	if !handled || !errors.Is(err, pflag.ErrHelp) {
+		t.Fatalf("help load handled=%t err=%v", handled, err)
+	}
+}
+
 func TestInternalMaintainIsDispatched(t *testing.T) {
 	handled, err := runInternalCommand(context.Background(), []string{"internal", "maintain", "--help"})
 	if !handled || !errors.Is(err, flag.ErrHelp) {

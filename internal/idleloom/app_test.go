@@ -381,6 +381,116 @@ func TestCompleteRegisteredEnrollmentFailureStaysRegisteredAndCordoned(t *testin
 	}
 }
 
+func writeReadyWorkerState(t *testing.T, nodeName string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := SaveState(path, State{
+		NodeName: nodeName,
+		Phase:    PhaseReady,
+		Runtime:  RuntimeState{NodeName: nodeName},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// loadImageRuntime records LoadImage calls and reports a configurable VM
+// status, standing in for a live worker without a real krunkit VM.
+type loadImageRuntime struct {
+	rejectingRuntime
+	status         WorkerStatus
+	loadImageCalls int
+	loadImagePath  string
+	loadImageState RuntimeState
+	loadImageErr   error
+}
+
+func (r *loadImageRuntime) Status(context.Context, *RuntimeState) (WorkerStatus, error) {
+	return r.status, nil
+}
+
+func (r *loadImageRuntime) LoadImage(_ context.Context, state RuntimeState, path string) error {
+	r.loadImageCalls++
+	r.loadImageState = state
+	r.loadImagePath = path
+	return r.loadImageErr
+}
+
+func TestLoadImageExportsThenImportsExportedTar(t *testing.T) {
+	statePath := writeReadyWorkerState(t, "worker-a")
+	runtime := &loadImageRuntime{status: WorkerStatus{VM: "running", Network: "running"}}
+	app := &App{Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: runtime}
+	var savedRefs []string
+	var savedDest string
+	app.SaveImage = func(_ context.Context, _ string, refs []string, dest string) error {
+		savedRefs = refs
+		savedDest = dest
+		return os.WriteFile(dest, []byte("dummy-image-tar"), 0o600)
+	}
+	if err := app.LoadImage(context.Background(), statePath, []string{"nginx:local", "app:poc"}, "", ""); err != nil {
+		t.Fatalf("LoadImage: %v", err)
+	}
+	if runtime.loadImageCalls != 1 {
+		t.Fatalf("Runtime.LoadImage calls = %d, want 1", runtime.loadImageCalls)
+	}
+	if runtime.loadImagePath != savedDest {
+		t.Fatalf("Runtime.LoadImage tar = %q, exported tar = %q", runtime.loadImagePath, savedDest)
+	}
+	if len(savedRefs) != 2 || savedRefs[0] != "nginx:local" || savedRefs[1] != "app:poc" {
+		t.Fatalf("SaveImage refs = %v", savedRefs)
+	}
+}
+
+func TestLoadImageRefusesStoppedWorker(t *testing.T) {
+	statePath := writeReadyWorkerState(t, "worker-a")
+	runtime := &loadImageRuntime{status: WorkerStatus{VM: "stopped", Network: "stopped"}}
+	app := &App{Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: runtime}
+	app.SaveImage = func(context.Context, string, []string, string) error {
+		t.Fatal("SaveImage must not run for a stopped worker")
+		return nil
+	}
+	err := app.LoadImage(context.Background(), statePath, []string{"nginx:local"}, "", "")
+	if err == nil || !strings.Contains(err.Error(), "is not running") {
+		t.Fatalf("LoadImage error = %v, want not-running error", err)
+	}
+	if runtime.loadImageCalls != 0 {
+		t.Fatalf("Runtime.LoadImage calls = %d, want 0", runtime.loadImageCalls)
+	}
+}
+
+func TestLoadImageArchiveBypassesEngineExport(t *testing.T) {
+	statePath := writeReadyWorkerState(t, "worker-a")
+	archive := filepath.Join(t.TempDir(), "preexported.tar")
+	if err := os.WriteFile(archive, []byte("archive-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &loadImageRuntime{status: WorkerStatus{VM: "running", Network: "running"}}
+	app := &App{Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: runtime}
+	app.SaveImage = func(context.Context, string, []string, string) error {
+		t.Fatal("SaveImage must not run when --archive is set")
+		return nil
+	}
+	if err := app.LoadImage(context.Background(), statePath, nil, archive, ""); err != nil {
+		t.Fatalf("LoadImage: %v", err)
+	}
+	if runtime.loadImagePath != archive {
+		t.Fatalf("Runtime.LoadImage tar = %q, want archive %q", runtime.loadImagePath, archive)
+	}
+}
+
+func TestLoadImageRejectsMissingArchiveFile(t *testing.T) {
+	statePath := writeReadyWorkerState(t, "worker-a")
+	runtime := &loadImageRuntime{status: WorkerStatus{VM: "running", Network: "running"}}
+	app := &App{Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: runtime}
+	err := app.LoadImage(context.Background(), statePath, nil, filepath.Join(t.TempDir(), "absent.tar"), "")
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("LoadImage error = %v, want missing-archive error", err)
+	}
+	if runtime.loadImageCalls != 0 {
+		t.Fatalf("Runtime.LoadImage calls = %d, want 0", runtime.loadImageCalls)
+	}
+}
+
 type rejectingRuntime struct {
 	err error
 }
@@ -425,6 +535,7 @@ func (r *resumeRuntime) InstallBundle(_ context.Context, _ RuntimeState, path st
 	r.bundle = data
 	return nil
 }
+func (r *resumeRuntime) LoadImage(context.Context, RuntimeState, string) error { return nil }
 func (r *resumeRuntime) RemoveBootstrapIdentity(context.Context, RuntimeState) error {
 	r.removeBootstrapCalls++
 	return r.removeBootstrapErr
@@ -451,6 +562,7 @@ func (r rejectingRuntime) Delete(context.Context, RuntimeState) error { return n
 func (r rejectingRuntime) InstallBundle(context.Context, RuntimeState, string) error {
 	return nil
 }
+func (r rejectingRuntime) LoadImage(context.Context, RuntimeState, string) error       { return nil }
 func (r rejectingRuntime) RemoveBootstrapIdentity(context.Context, RuntimeState) error { return nil }
 func (r rejectingRuntime) Status(context.Context, *RuntimeState) (WorkerStatus, error) {
 	return WorkerStatus{}, nil
