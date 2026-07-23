@@ -40,27 +40,34 @@ func TestRuntimeNetworkCanProbePastCollision(t *testing.T) {
 func TestKrunkitArgsUseDirectRuntimeDevices(t *testing.T) {
 	state := RuntimeState{
 		NodeName: "test-node", RuntimeDir: "/tmp/idleloom/runtime", RootDisk: "/tmp/idleloom/runtime/root.qcow2",
-		DataDisk: "/tmp/idleloom/runtime/data.raw", SeedISO: "/tmp/idleloom/runtime/seed.iso",
+		SeedISO:    "/tmp/idleloom/runtime/seed.iso",
 		MACAddress: "02:00:00:00:00:01", CPUs: 4, MemoryMB: 8192,
 	}
 	joined := strings.Join(krunkitArgs(state), " ")
 	for _, expected := range []string{
 		"virtio-net,type=unixgram", "offloading=on", "vfkitMagic=on",
 		"virtio-blk,path=/tmp/idleloom/runtime/root.qcow2,format=qcow2",
-		"virtio-blk,path=/tmp/idleloom/runtime/data.raw,format=raw",
 		"virtio-blk,path=/tmp/idleloom/runtime/seed.iso,format=raw",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("krunkit arguments are missing %q: %s", expected, joined)
 		}
 	}
+	if strings.Contains(joined, "data.raw") {
+		t.Errorf("krunkit arguments still attach a data disk: %s", joined)
+	}
 }
 
 func TestCloudInitPreparesContainerStorageAndISCSI(t *testing.T) {
 	data := renderCloudInit("evening-mac", "ssh-ed25519 AAAA test")
-	for _, expected := range []string{"/dev/vdb", "/var/lib/idleloom/$name", "containerd:/var/lib/containerd", "apt-cache:/var/cache/apt", "open-iscsi", "/usr/lib/cni/*", "/opt/cni/bin/${plugin##*/}"} {
+	for _, expected := range []string{"resize_rootfs: true", "growpart:", "open-iscsi", "/usr/lib/cni/*", "/opt/cni/bin/${plugin##*/}", "touch /var/lib/idleloom/.prepared"} {
 		if !strings.Contains(data, expected) {
 			t.Errorf("cloud-init is missing %q", expected)
+		}
+	}
+	for _, absent := range []string{"/dev/vdb", "/var/lib/idleloom/$name", "containerd:/var/lib/containerd", "apt-cache:/var/cache/apt", "mount --bind"} {
+		if strings.Contains(data, absent) {
+			t.Errorf("cloud-init still references removed data-disk setup %q", absent)
 		}
 	}
 }
@@ -141,8 +148,8 @@ func TestRuntimeStatusRecoversDurableSSHPort(t *testing.T) {
 	}
 	state := RuntimeState{
 		NodeName: "worker-a", RuntimeDir: runtimeDir,
-		RootDisk: filepath.Join(runtimeDir, "root.qcow2"), DataDisk: filepath.Join(runtimeDir, "data.raw"),
-		SeedISO: filepath.Join(runtimeDir, "seed.iso"), SSHPrivateKey: filepath.Join(runtimeDir, "id_ed25519"),
+		RootDisk: filepath.Join(runtimeDir, "root.qcow2"),
+		SeedISO:  filepath.Join(runtimeDir, "seed.iso"), SSHPrivateKey: filepath.Join(runtimeDir, "id_ed25519"),
 		SSHPort: 22022,
 	}
 	if err := writeRuntimeMarker(state); err != nil {

@@ -38,9 +38,9 @@ type KrunkitRuntime struct {
 }
 
 func (k KrunkitRuntime) Preflight(ctx context.Context) error {
-	for _, binary := range []string{"krunkit", "gvproxy", "ssh", "scp", "ssh-keygen", "hdiutil"} {
+	for _, binary := range []string{"krunkit", "gvproxy", "qemu-img", "ssh", "scp", "ssh-keygen", "hdiutil"} {
 		if _, err := exec.LookPath(binary); err != nil {
-			return fmt.Errorf("required executable %q was not found in PATH; Idleloom worker VMs need krunkit and gvproxy — install them (brew tap libkrun/krun && brew install krunkit) and rerun \"idlectl create worker\"", binary)
+			return fmt.Errorf("required executable %q was not found in PATH; Idleloom worker VMs need krunkit and gvproxy (qemu-img ships with qemu) — install them (brew tap libkrun/krun && brew install krunkit qemu) and rerun \"idlectl create worker\"", binary)
 		}
 	}
 	if output, err := k.Runner.Output(ctx, "krunkit", "--version"); err != nil {
@@ -82,7 +82,6 @@ func (k KrunkitRuntime) Plan(_ context.Context, cfg RuntimeConfig) (RuntimeState
 		NodeName:      cfg.NodeName,
 		RuntimeDir:    runtimeDir,
 		RootDisk:      filepath.Join(runtimeDir, "root.qcow2"),
-		DataDisk:      filepath.Join(runtimeDir, "data.raw"),
 		SeedISO:       filepath.Join(runtimeDir, "seed.iso"),
 		SSHPrivateKey: filepath.Join(runtimeDir, "id_ed25519"),
 		MACAddress:    cfg.Network.MAC,
@@ -151,15 +150,8 @@ func (k KrunkitRuntime) Create(ctx context.Context, state *RuntimeState) (err er
 	if err := cloneOrCopyFile(baseImage, state.RootDisk, 0o600); err != nil {
 		return fmt.Errorf("create worker root disk: %w", err)
 	}
-	dataDisk, err := os.OpenFile(state.DataDisk, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("create worker data disk: %w", err)
-	}
-	if err := dataDisk.Truncate(int64(state.DiskMB) * 1024 * 1024); err != nil {
-		return errors.Join(fmt.Errorf("size worker data disk: %w", err), dataDisk.Close())
-	}
-	if err := dataDisk.Close(); err != nil {
-		return fmt.Errorf("close worker data disk: %w", err)
+	if err := k.Runner.Run(ctx, k.Out, k.Err, "qemu-img", "resize", state.RootDisk, strconv.Itoa(state.DiskMB)+"M"); err != nil {
+		return fmt.Errorf("resize worker root disk: %w", err)
 	}
 	if err := k.createSeedISO(ctx, state.NodeName, *state); err != nil {
 		return err
@@ -628,7 +620,6 @@ func krunkitArgs(state RuntimeState) []string {
 		"--device", "virtio-net,type=unixgram,path=" + networkSocket(state) + ",mac=" + state.MACAddress + ",offloading=on,vfkitMagic=on",
 		"--device", "virtio-serial,logFilePath=" + filepath.Join(state.RuntimeDir, "serial.log"),
 		"--device", "virtio-blk,path=" + state.RootDisk + ",format=qcow2",
-		"--device", "virtio-blk,path=" + state.DataDisk + ",format=raw",
 		"--device", "virtio-blk,path=" + state.SeedISO + ",format=raw",
 	}
 }
@@ -645,6 +636,11 @@ hostname: %s
 manage_etc_hosts: true
 ssh_pwauth: false
 disable_root: true
+growpart:
+  mode: auto
+  devices: ['/']
+  ignore_growroot_disabled: false
+resize_rootfs: true
 users:
   - name: idleloom
     gecos: Idleloom Worker
@@ -672,25 +668,6 @@ write_files:
       set -euo pipefail
       swapoff -a
       sed -i.bak '/[[:space:]]swap[[:space:]]/d' /etc/fstab
-      systemctl stop containerd.service 2>/dev/null || true
-      if ! blkid /dev/vdb >/dev/null 2>&1; then
-        blocks=$(( $(blockdev --getsize64 /dev/vdb) / 4096 - 16 ))
-        mkfs.ext4 -F -L idleloom-data -b 4096 /dev/vdb "$blocks"
-      fi
-      install -d -m 0755 /var/lib/idleloom
-      if ! mountpoint -q /var/lib/idleloom; then
-        mount LABEL=idleloom-data /var/lib/idleloom
-      fi
-      grep -q '^LABEL=idleloom-data ' /etc/fstab || echo 'LABEL=idleloom-data /var/lib/idleloom ext4 defaults,nofail 0 2' >> /etc/fstab
-      for mapping in containerd:/var/lib/containerd kubelet:/var/lib/kubelet apt-cache:/var/cache/apt apt-lists:/var/lib/apt/lists; do
-        name=${mapping%%:*}
-        target=${mapping#*:}
-        install -d -m 0755 /var/lib/idleloom/$name "$target"
-        if ! mountpoint -q "$target"; then
-          mount --bind /var/lib/idleloom/$name "$target"
-        fi
-        grep -q "^/var/lib/idleloom/$name " /etc/fstab || echo "/var/lib/idleloom/$name $target none bind 0 0" >> /etc/fstab
-      done
       modprobe overlay
       modprobe br_netfilter
       sysctl --system >/dev/null
@@ -875,13 +852,11 @@ func validatePlannedRuntime(state RuntimeState) error {
 	}
 	expected := map[string]string{
 		"root disk":       filepath.Join(state.RuntimeDir, "root.qcow2"),
-		"data disk":       filepath.Join(state.RuntimeDir, "data.raw"),
 		"seed ISO":        filepath.Join(state.RuntimeDir, "seed.iso"),
 		"SSH private key": filepath.Join(state.RuntimeDir, "id_ed25519"),
 	}
 	actual := map[string]string{
 		"root disk":       state.RootDisk,
-		"data disk":       state.DataDisk,
 		"seed ISO":        state.SeedISO,
 		"SSH private key": state.SSHPrivateKey,
 	}
@@ -1011,13 +986,11 @@ func validateRuntimeOwnership(state RuntimeState) error {
 	}
 	expectedPaths := map[string]string{
 		"root disk":       filepath.Join(canonical, "root.qcow2"),
-		"data disk":       filepath.Join(canonical, "data.raw"),
 		"seed ISO":        filepath.Join(canonical, "seed.iso"),
 		"SSH private key": filepath.Join(canonical, "id_ed25519"),
 	}
 	actualPaths := map[string]string{
 		"root disk":       state.RootDisk,
-		"data disk":       state.DataDisk,
 		"seed ISO":        state.SeedISO,
 		"SSH private key": state.SSHPrivateKey,
 	}

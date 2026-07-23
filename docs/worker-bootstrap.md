@@ -67,15 +67,16 @@ provider manifests or mirroring images behind the operator's back.
 ## Persistent guest state
 
 Idleloom copies a checksum-verified Ubuntu cloud image for the root filesystem
-and attaches a separate sparse data disk. Durable worker state and large
-hostPath volumes live under `/var/lib/idleloom`.
+and resizes it to the requested `--disk` size; cloud-init grows the root
+partition to fill the disk on first boot. A single root filesystem backs the OS,
+container images (`/var/lib/containerd`), kubelet state (`/var/lib/kubelet`),
+Pod logs, and ephemeral storage, so the whole `--disk` budget is shared. Durable
+worker state and large hostPath volumes live under `/var/lib/idleloom`.
 
 | Path | Purpose |
 | --- | --- |
 | `/var/lib/idleloom/bin/kubelet` | Version-matched kubelet binary |
 | `/var/lib/idleloom/config` | CA, kubelet configuration, and installer |
-| `/var/lib/idleloom/containerd` | Persistent backing for `/var/lib/containerd` |
-| `/var/lib/idleloom/kubelet` | Persistent backing for `/var/lib/kubelet` |
 | `/var/lib/idleloom/volumes` | Recommended persistent hostPath root |
 
 The first join uses the bootstrap token. Later starts use the kubelet client

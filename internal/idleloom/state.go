@@ -82,7 +82,6 @@ type RuntimeState struct {
 	NodeName      string `json:"nodeName"`
 	RuntimeDir    string `json:"runtimeDir"`
 	RootDisk      string `json:"rootDisk"`
-	DataDisk      string `json:"dataDisk"`
 	SeedISO       string `json:"seedISO"`
 	SSHPrivateKey string `json:"sshPrivateKey"`
 	MACAddress    string `json:"macAddress"`
