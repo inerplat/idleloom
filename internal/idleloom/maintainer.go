@@ -111,6 +111,8 @@ func (a *App) approveServingCSRsOnce(ctx context.Context, statePath string) erro
 	if runtimeStatus.VM != "running" || runtimeStatus.Network != "running" {
 		return errMaintainerRuntimeStopped
 	}
+	// The maintainer daemon intentionally uses the enrollment-time cluster;
+	// per-invocation --kubeconfig/--context overrides never apply here.
 	cluster, err := LoadCluster(ctx, state.KubeconfigPath, state.Context)
 	if err != nil {
 		return err

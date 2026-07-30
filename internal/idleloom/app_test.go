@@ -61,9 +61,57 @@ func TestDeleteValidatesRuntimeBeforeLoadingCluster(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := &App{Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: rejectingRuntime{err: sentinel}}
-	err := app.Delete(context.Background(), statePath, false, false)
+	err := app.Delete(context.Background(), statePath, ClusterOverride{}, false, false)
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("Delete error = %v, want runtime validation error", err)
+	}
+}
+
+func TestResolveClusterSource(t *testing.T) {
+	state := State{KubeconfigPath: "/state/kubeconfig", Context: "state-context"}
+	tests := []struct {
+		name           string
+		override       ClusterOverride
+		wantKubeconfig string
+		wantContext    string
+	}{
+		{name: "no override keeps state values", override: ClusterOverride{}, wantKubeconfig: "/state/kubeconfig", wantContext: "state-context"},
+		{name: "context-only override", override: ClusterOverride{Context: "other"}, wantKubeconfig: "/state/kubeconfig", wantContext: "other"},
+		{name: "kubeconfig-only override", override: ClusterOverride{KubeconfigPath: "/flag/kubeconfig"}, wantKubeconfig: "/flag/kubeconfig", wantContext: "state-context"},
+		{name: "both overridden", override: ClusterOverride{KubeconfigPath: "/flag/kubeconfig", Context: "other"}, wantKubeconfig: "/flag/kubeconfig", wantContext: "other"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			kubeconfig, kubeContext := resolveClusterSource(state, test.override)
+			if kubeconfig != test.wantKubeconfig || kubeContext != test.wantContext {
+				t.Fatalf("resolveClusterSource = (%q, %q), want (%q, %q)", kubeconfig, kubeContext, test.wantKubeconfig, test.wantContext)
+			}
+		})
+	}
+}
+
+func TestDeleteThreadsClusterOverrideWithoutPersistingIt(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	recordedKubeconfig := filepath.Join(t.TempDir(), "recorded-kubeconfig")
+	if err := SaveState(statePath, State{
+		NodeName: "worker-a", Phase: PhaseReady,
+		KubeconfigPath: recordedKubeconfig, Context: "recorded-context",
+		Runtime: RuntimeState{NodeName: "worker-a", GuestIP: "172.20.10.2"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	overrideKubeconfig := filepath.Join(t.TempDir(), "override-kubeconfig")
+	app := &App{Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: runningRuntime{}}
+	err := app.Delete(context.Background(), statePath, ClusterOverride{KubeconfigPath: overrideKubeconfig, Context: "override-context"}, false, false)
+	if err == nil || !strings.Contains(err.Error(), overrideKubeconfig) {
+		t.Fatalf("delete must fail on the override kubeconfig path, got %v", err)
+	}
+	state, loadErr := LoadState(statePath)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if state.KubeconfigPath != recordedKubeconfig || state.Context != "recorded-context" {
+		t.Fatalf("per-invocation override was persisted into state: kubeconfig=%q context=%q", state.KubeconfigPath, state.Context)
 	}
 }
 
@@ -75,7 +123,7 @@ func TestLocalDeleteDoesNotAdvancePhaseWhenValidationFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := &App{Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: rejectingRuntime{err: sentinel}}
-	if err := app.Delete(context.Background(), statePath, false, true); !errors.Is(err, sentinel) {
+	if err := app.Delete(context.Background(), statePath, ClusterOverride{}, false, true); !errors.Is(err, sentinel) {
 		t.Fatalf("Delete error = %v, want validation error", err)
 	}
 	got, err := LoadState(statePath)
@@ -95,7 +143,7 @@ func TestLocalDeleteFailureLeavesPendingPhase(t *testing.T) {
 		t.Fatal(err)
 	}
 	app := &App{Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: deletingRuntime{err: sentinel}}
-	if err := app.Delete(context.Background(), statePath, false, true); !errors.Is(err, sentinel) {
+	if err := app.Delete(context.Background(), statePath, ClusterOverride{}, false, true); !errors.Is(err, sentinel) {
 		t.Fatalf("Delete error = %v, want delete error", err)
 	}
 	got, err := LoadState(statePath)

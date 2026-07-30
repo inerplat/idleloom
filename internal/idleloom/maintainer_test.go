@@ -133,7 +133,7 @@ func TestFailedDeleteKeepsRunningMaintainer(t *testing.T) {
 		cancel()
 		t.Fatal(err)
 	}
-	if err := app.Delete(context.Background(), statePath, false, false); err == nil {
+	if err := app.Delete(context.Background(), statePath, ClusterOverride{}, false, false); err == nil {
 		cancel()
 		t.Fatal("delete unexpectedly succeeded with a missing kubeconfig")
 	}

@@ -244,6 +244,38 @@ func TestDeleteSeparatesWorkerAndClusterFlags(t *testing.T) {
 	if err := runDelete(context.Background(), []string{"--wait=false", "worker", "mac-idle"}); err == nil || !strings.Contains(err.Error(), "does not apply to workers") {
 		t.Fatalf("worker --wait error = %v", err)
 	}
+	if err := runDelete(context.Background(), []string{"--namespace", "team", "worker", "mac-idle"}); err == nil || !strings.Contains(err.Error(), "does not apply to workers") {
+		t.Fatalf("worker --namespace error = %v", err)
+	}
+	// --kubeconfig/--context select the worker's cluster like kubectl; they
+	// must pass the cross-domain guard and fail on the local name check only.
+	statePath := savedWorkerState(t, "worker-a")
+	err := runDelete(context.Background(), []string{"--state", statePath, "--kubeconfig", filepath.Join(t.TempDir(), "missing"), "--context", "foo", "worker", "ghost"})
+	if err == nil || strings.Contains(err.Error(), "does not apply to workers") {
+		t.Fatalf("worker --kubeconfig/--context must not be rejected by the guard, got %v", err)
+	}
+	if !strings.Contains(err.Error(), `this Mac's worker is "worker-a", not "ghost"`) {
+		t.Fatalf("worker delete with cluster flags error = %v", err)
+	}
+}
+
+func TestStartAndStopWorkerAcceptClusterFlags(t *testing.T) {
+	statePath := savedWorkerState(t, "worker-a")
+	missingKubeconfig := filepath.Join(t.TempDir(), "missing-kubeconfig")
+	err := runStartWorker(context.Background(), []string{"worker", "worker-a", "--state", statePath, "--kubeconfig", missingKubeconfig, "--context", "foo"})
+	if err == nil || strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("start worker cluster flags must parse, got %v", err)
+	}
+	if !strings.Contains(err.Error(), missingKubeconfig) {
+		t.Fatalf("start worker must fail on the override kubeconfig path, got %v", err)
+	}
+	err = runStopWorker(context.Background(), []string{"worker", "worker-a", "--state", statePath, "--kubeconfig", missingKubeconfig, "--context", "foo"})
+	if err == nil || strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("stop worker cluster flags must parse, got %v", err)
+	}
+	if !strings.Contains(err.Error(), missingKubeconfig) {
+		t.Fatalf("stop worker must fail on the override kubeconfig path, got %v", err)
+	}
 }
 
 func TestGetWorkersWithoutStatePrintsFriendlyEmptyResult(t *testing.T) {

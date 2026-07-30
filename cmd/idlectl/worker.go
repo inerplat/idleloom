@@ -171,6 +171,8 @@ func runCreateWorker(ctx context.Context, args []string) error {
 func runStartWorker(ctx context.Context, args []string) error {
 	flags := workerPFlags("start worker", startWorkerUsage)
 	statePath := flags.String("state", "", workerStateHelp)
+	kubeconfig := flags.String("kubeconfig", "", "kubeconfig used to reach the worker's cluster (defaults to the one recorded at create)")
+	contextName := flags.String("context", "", "kubeconfig context (defaults to the one recorded at create)")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait for worker recovery")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -184,12 +186,15 @@ func runStartWorker(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	return idleloom.NewApp(os.Stdout, os.Stderr).Start(ctx, *statePath, *timeout)
+	override := idleloom.ClusterOverride{KubeconfigPath: *kubeconfig, Context: *contextName}
+	return idleloom.NewApp(os.Stdout, os.Stderr).Start(ctx, *statePath, override, *timeout)
 }
 
 func runStopWorker(ctx context.Context, args []string) error {
 	flags := workerPFlags("stop worker", stopWorkerUsage)
 	statePath := flags.String("state", "", workerStateHelp)
+	kubeconfig := flags.String("kubeconfig", "", "kubeconfig used to reach the worker's cluster (defaults to the one recorded at create)")
+	contextName := flags.String("context", "", "kubeconfig context (defaults to the one recorded at create)")
 	localOnly := flags.Bool("local-only", false, "stop the local VM without contacting Kubernetes")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -203,7 +208,8 @@ func runStopWorker(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	return idleloom.NewApp(os.Stdout, os.Stderr).Stop(ctx, *statePath, *localOnly)
+	override := idleloom.ClusterOverride{KubeconfigPath: *kubeconfig, Context: *contextName}
+	return idleloom.NewApp(os.Stdout, os.Stderr).Stop(ctx, *statePath, override, *localOnly)
 }
 
 // runLoadImage loads local container image(s) into the worker VM's containerd
@@ -241,14 +247,14 @@ func isImageResource(token string) bool {
 
 // deleteWorker removes this Mac's worker. NAME is required as a confirmation
 // affordance and must match the locally recorded worker.
-func deleteWorker(ctx context.Context, statePath, name string, force, localOnly bool) error {
+func deleteWorker(ctx context.Context, statePath, name string, override idleloom.ClusterOverride, force, localOnly bool) error {
 	if name == "" {
 		return usagef(`deleting a worker requires its NAME as confirmation; run "idlectl get workers" to see this Mac's worker`)
 	}
 	if err := ensureLocalWorkerNamed(statePath, name); err != nil {
 		return err
 	}
-	return idleloom.NewApp(os.Stdout, os.Stderr).Delete(ctx, statePath, force, localOnly)
+	return idleloom.NewApp(os.Stdout, os.Stderr).Delete(ctx, statePath, override, force, localOnly)
 }
 
 // runStatus prints a local overview of this Mac: the Native Metal enrollment

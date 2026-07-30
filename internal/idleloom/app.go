@@ -334,7 +334,30 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	return nil
 }
 
-func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration) error {
+// ClusterOverride carries explicit --kubeconfig/--context values. Explicit
+// values always win over the state file, mirroring kubectl: flags select the
+// cluster per invocation and are never persisted.
+type ClusterOverride struct {
+	KubeconfigPath string
+	Context        string
+}
+
+// resolveClusterSource picks the kubeconfig and context used to reach the
+// worker's cluster. Each override field wins independently over the value
+// recorded in the state file at create time, like kubectl's flags.
+func resolveClusterSource(state State, override ClusterOverride) (kubeconfig, kubeContext string) {
+	kubeconfig = state.KubeconfigPath
+	if override.KubeconfigPath != "" {
+		kubeconfig = override.KubeconfigPath
+	}
+	kubeContext = state.Context
+	if override.Context != "" {
+		kubeContext = override.Context
+	}
+	return kubeconfig, kubeContext
+}
+
+func (a *App) Start(ctx context.Context, statePath string, override ClusterOverride, timeout time.Duration) error {
 	resolvedPath, err := resolveStatePath(statePath)
 	if err != nil {
 		return err
@@ -348,7 +371,11 @@ func (a *App) Start(ctx context.Context, statePath string, timeout time.Duration
 	if err != nil {
 		return err
 	}
-	cluster, err := LoadCluster(ctx, state.KubeconfigPath, state.Context)
+	kubeconfig, kubeContext := resolveClusterSource(state, override)
+	if kubeconfig != state.KubeconfigPath || kubeContext != state.Context {
+		_, _ = fmt.Fprintf(a.Err, "warning: the background certificate maintainer keeps using the kubeconfig recorded at create (%s, context %q); recreate the worker if that kubeconfig no longer works\n", state.KubeconfigPath, state.Context)
+	}
+	cluster, err := LoadCluster(ctx, kubeconfig, kubeContext)
 	if err != nil {
 		return err
 	}
@@ -797,7 +824,7 @@ func durationSecondsCeil(duration time.Duration) int64 {
 	return seconds
 }
 
-func (a *App) Stop(ctx context.Context, statePath string, localOnly bool) error {
+func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverride, localOnly bool) error {
 	resolvedPath, err := resolveStatePath(statePath)
 	if err != nil {
 		return err
@@ -825,7 +852,8 @@ func (a *App) Stop(ctx context.Context, statePath string, localOnly bool) error 
 	if err := a.Runtime.Validate(ctx, state.Runtime); err != nil {
 		return err
 	}
-	cluster, err := LoadCluster(ctx, state.KubeconfigPath, state.Context)
+	kubeconfig, kubeContext := resolveClusterSource(state, override)
+	cluster, err := LoadCluster(ctx, kubeconfig, kubeContext)
 	if err != nil {
 		return err
 	}
@@ -868,7 +896,7 @@ func (a *App) Stop(ctx context.Context, statePath string, localOnly bool) error 
 	return nil
 }
 
-func (a *App) Delete(ctx context.Context, statePath string, force, localOnly bool) error {
+func (a *App) Delete(ctx context.Context, statePath string, override ClusterOverride, force, localOnly bool) error {
 	resolvedPath, err := resolveStatePath(statePath)
 	if err != nil {
 		return err
@@ -904,7 +932,8 @@ func (a *App) Delete(ctx context.Context, statePath string, force, localOnly boo
 		_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s was deleted locally; run delete again without --local-only when Kubernetes recovers.\n", state.NodeName)
 		return nil
 	}
-	cluster, err := LoadCluster(ctx, state.KubeconfigPath, state.Context)
+	kubeconfig, kubeContext := resolveClusterSource(state, override)
+	cluster, err := LoadCluster(ctx, kubeconfig, kubeContext)
 	if err != nil {
 		return err
 	}

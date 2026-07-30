@@ -1418,12 +1418,15 @@ func runDelete(ctx context.Context, args []string) error {
 		return usagef("usage: idlectl delete ((host|worker|workload) NAME | (host|worker|workload)/NAME) [flags]: %v", err)
 	}
 	if resourceName == resourceWorkers {
-		for _, flagName := range []string{"namespace", "state-dir", "allow-tofu", "reset-trust", "wait", "timeout", "kubeconfig", "context"} {
+		// --kubeconfig/--context select the worker's cluster like kubectl and
+		// stay allowed; only host/workload-scoped flags are rejected here.
+		for _, flagName := range []string{"namespace", "state-dir", "allow-tofu", "reset-trust", "wait", "timeout"} {
 			if flags.Changed(flagName) {
 				return usagef("--%s does not apply to workers", flagName)
 			}
 		}
-		return deleteWorker(ctx, *statePath, name, *force, *localOnly)
+		override := idleloom.ClusterOverride{KubeconfigPath: *kubeconfig, Context: *kubeContext}
+		return deleteWorker(ctx, *statePath, name, override, *force, *localOnly)
 	}
 	for _, flagName := range []string{"state", "force", "local-only"} {
 		if flags.Changed(flagName) {
