@@ -91,9 +91,9 @@ deletes the bootstrap token, removes the guest bootstrap identity, records phase
 Node `Ready` condition. Run `idlectl start worker` after fixing the
 cluster-side dependency; successful completion records phase `ready` and
 uncordons the Node. The WireKube mesh, agent DaemonSet, and Node InternalIP
-advertisement
-remain mandatory; only the zero-ready-peer check is relaxed during deferred
-registration.
+advertisement remain mandatory. No pre-existing ready ingress peer is required
+in either mode: on a bootstrapping mesh this worker becomes the first peer, and
+readiness is judged by waiting for the worker's own peer to connect.
 
 If `create worker` is interrupted after the kubelet has obtained its client
 certificate, the state remains in phase `enrolling`. Fix the external cause,
@@ -123,7 +123,7 @@ The current integration contract is deliberately small:
 1. `wirekube.io/v1alpha1` CRDs are installed.
 2. `WireKubeMesh/default` exists.
 3. `spec.autoAllowedIPs.includeNodeInternalIP` is true.
-4. A WireKube agent DaemonSet and at least one ready peer exist.
+4. A WireKube agent DaemonSet exists.
 5. Idleloom adds `wirekube.io/vpn-enabled=true` after Node registration.
 
 WireKube owns the encrypted mesh and NAT traversal. Idleloom owns host

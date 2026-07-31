@@ -122,21 +122,18 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	var wireKube WireKubeStatus
 	if opts.Network == NetworkWireKube {
 		a.step("Checking the WireKube node mesh")
-		if opts.SkipWait {
-			wireKube, err = checkWireKubeForRegistration(ctx, cluster.Client)
-		} else {
-			wireKube, err = CheckWireKube(ctx, cluster.Client)
-		}
-		if errors.Is(err, errNoReadyIngressPeers) {
-			return fmt.Errorf("%w; a single-node mesh has no remote peers until this worker joins — register with \"idlectl create worker NAME --wait=false\", then run \"idlectl start worker\"", err)
-		}
+		wireKube, err = CheckWireKube(ctx, cluster.Client)
 		if err != nil {
 			return err
 		}
 		_, _ = fmt.Fprintf(a.Out, "  Agent:   %s/%s\n", wireKube.AgentNamespace, wireKube.AgentName)
 		_, _ = fmt.Fprintf(a.Out, "  Peers:   %d ready\n", wireKube.ReadyPeers)
-		if opts.SkipWait && wireKube.ReadyPeers == 0 {
-			_, _ = fmt.Fprintln(a.Err, "warning: WireKube has no ready ingress peers; the registered worker will remain cordoned until \"idlectl start worker\" succeeds")
+		if wireKube.ReadyPeers == 0 {
+			if opts.SkipWait {
+				_, _ = fmt.Fprintln(a.Err, "warning: WireKube has no ready ingress peers; the registered worker will remain cordoned until \"idlectl start worker\" succeeds")
+			} else {
+				_, _ = fmt.Fprintln(a.Err, "warning: WireKube has no ready ingress peers yet; this worker should become the first once its agent connects — if the wait below times out, inspect the WireKubeMesh relay status")
+			}
 		}
 	}
 	a.step("Checking external worker compatibility")

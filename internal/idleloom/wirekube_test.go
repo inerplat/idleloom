@@ -5,23 +5,22 @@ import (
 	"testing"
 )
 
-func TestValidateWireKubeStatusAllowsDeferredRegistrationWithoutReadyPeer(t *testing.T) {
+func TestValidateWireKubeStatusNeverRequiresReadyPeers(t *testing.T) {
+	// A bootstrapping mesh has zero ready peers until this worker becomes the
+	// first one; readiness is judged later by waitForWireKube on the worker's
+	// own peer, so zero ready peers must never fail validation.
 	status := WireKubeStatus{
 		Installed:             true,
 		IncludeNodeInternalIP: true,
 		AgentNamespace:        "wirekube-system",
 		AgentName:             "wirekube-agent",
 	}
-	if err := validateWireKubeStatus(status, false); err != nil {
-		t.Fatalf("deferred registration rejected: %v", err)
-	}
-	err := validateWireKubeStatus(status, true)
-	if err == nil || !strings.Contains(err.Error(), "no ready ingress peers") {
-		t.Fatalf("strict readiness error = %v", err)
+	if err := validateWireKubeStatus(status); err != nil {
+		t.Fatalf("zero ready peers rejected: %v", err)
 	}
 }
 
-func TestValidateWireKubeStatusKeepsStructuralChecksForDeferredRegistration(t *testing.T) {
+func TestValidateWireKubeStatusKeepsStructuralChecks(t *testing.T) {
 	tests := []struct {
 		name   string
 		status WireKubeStatus
@@ -44,7 +43,7 @@ func TestValidateWireKubeStatusKeepsStructuralChecksForDeferredRegistration(t *t
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateWireKubeStatus(test.status, false)
+			err := validateWireKubeStatus(test.status)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("validation error = %v, want %q", err, test.want)
 			}
