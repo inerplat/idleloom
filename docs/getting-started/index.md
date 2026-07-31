@@ -39,8 +39,8 @@ kube() {
     "$@"
 }
 
-kube cluster-info
-kube get nodes -o wide
+kubectl cluster-info
+kubectl get nodes -o wide
 ```
 
 Replace `my-cluster` before continuing. Keep the exports and `kube` helper in

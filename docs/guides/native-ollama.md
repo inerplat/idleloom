@@ -41,8 +41,8 @@ idlectl recipe render infer/ollama-gguf@v1 \
   --name native-ollama-infer \
   -o yaml > native-ollama-infer.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-ollama-infer.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-ollama-infer.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait \
   --for=jsonpath='{.status.phase}'=Succeeded \
   idleloomworkload/native-ollama-infer \
   --timeout=20m
@@ -64,14 +64,14 @@ idlectl recipe render serve/ollama-gguf@v1 \
   --name native-ollama-serve \
   -o yaml > native-ollama-serve.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-ollama-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-ollama-serve.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
   idleloomworkload/native-ollama-serve --timeout=20m
 
-kube apply -f "${IDLELOOM_REPO}/examples/native/serve-ollama-client.yaml"
-kube -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl apply -f "${IDLELOOM_REPO}/examples/native/serve-ollama-client.yaml"
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
   pod/native-ollama-serve-client --timeout=10m
-kube -n default logs pod/native-ollama-serve-client
+kubectl -n default logs pod/native-ollama-serve-client
 ```
 
 The client first asserts HTTP 401 without credentials, then mounts the
@@ -81,9 +81,9 @@ controller-generated Secret and makes an authenticated request. See
 ## Cleanup
 
 ```sh
-kube -n default delete pod/native-ollama-serve-client --ignore-not-found
-kube -n "${IDLELOOM_NAMESPACE}" delete -f native-ollama-serve.yaml --ignore-not-found
-kube -n "${IDLELOOM_NAMESPACE}" delete -f native-ollama-infer.yaml --ignore-not-found
+kubectl -n default delete pod/native-ollama-serve-client --ignore-not-found
+kubectl -n "${IDLELOOM_NAMESPACE}" delete -f native-ollama-serve.yaml --ignore-not-found
+kubectl -n "${IDLELOOM_NAMESPACE}" delete -f native-ollama-infer.yaml --ignore-not-found
 rm -f native-ollama-serve.yaml native-ollama-infer.yaml
 ```
 

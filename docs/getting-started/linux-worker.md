@@ -50,7 +50,7 @@ wirekubectl doctor \
 The mesh must advertise Node InternalIPs:
 
 ```sh
-kube get wirekubemesh default \
+kubectl get wirekubemesh default \
   -o jsonpath='{.spec.autoAllowedIPs.includeNodeInternalIP}{"\n"}'
 ```
 
@@ -77,7 +77,7 @@ idlectl create worker evening-worker \
   --disk 40g
 
 idlectl status
-kube get node evening-worker -o wide
+kubectl get node evening-worker -o wide
 ```
 
 The Node must report `Ready` and carry labels `idleloom-worker=true` and
@@ -96,7 +96,7 @@ idlectl create worker evening-worker \
   --wait=false
 
 idlectl status
-kube get node evening-worker -o wide
+kubectl get node evening-worker -o wide
 ```
 
 `--wait=false` still completes TLS bootstrap, serving certificate approval,
@@ -184,11 +184,11 @@ and reapplied automatically when a deferred worker is finished with
 ## Run an ordinary Pod
 
 ```sh
-kube apply -f "${IDLELOOM_REPO}/examples/worker/toolbox-pod.yaml"
-kube wait --for=condition=Ready pod/idleloom-worker-toolbox --timeout=5m
-kube logs pod/idleloom-worker-toolbox
-kube exec pod/idleloom-worker-toolbox -- uname -m
-kube delete pod/idleloom-worker-toolbox
+kubectl apply -f "${IDLELOOM_REPO}/examples/worker/toolbox-pod.yaml"
+kubectl wait --for=condition=Ready pod/idleloom-worker-toolbox --timeout=5m
+kubectl logs pod/idleloom-worker-toolbox
+kubectl exec pod/idleloom-worker-toolbox -- uname -m
+kubectl delete pod/idleloom-worker-toolbox
 ```
 
 ## Next steps

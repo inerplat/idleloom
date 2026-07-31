@@ -50,8 +50,8 @@ spec:
   maxConcurrentRequests: 1
 EOF
 
-kube apply --dry-run=server -f llama-cpp-model.yaml
-kube apply -f llama-cpp-model.yaml
+kubectl apply --dry-run=server -f llama-cpp-model.yaml
+kubectl apply -f llama-cpp-model.yaml
 ```
 
 Increase the memory reservation for larger models or context windows.
@@ -63,8 +63,8 @@ idlectl recipe render infer/llama-cpp-metal@v1 \
   --name native-llama-infer \
   -o yaml > native-llama-infer.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-llama-infer.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-llama-infer.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait \
   --for=jsonpath='{.status.phase}'=Succeeded \
   idleloomworkload/native-llama-infer \
   --timeout=20m
@@ -84,14 +84,14 @@ idlectl recipe render serve/llama-cpp-metal@v1 \
   --name native-llama-serve \
   -o yaml > native-llama-serve.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-llama-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-llama-serve.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
   idleloomworkload/native-llama-serve --timeout=20m
 
-kube apply -f "${IDLELOOM_REPO}/examples/native/serve-llama-cpp-client.yaml"
-kube -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl apply -f "${IDLELOOM_REPO}/examples/native/serve-llama-cpp-client.yaml"
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
   pod/native-llama-serve-client --timeout=10m
-kube -n default logs pod/native-llama-serve-client
+kubectl -n default logs pod/native-llama-serve-client
 ```
 
 Read [Native Serving](native-serving.md) for the shared API and connectivity
@@ -100,10 +100,10 @@ contract.
 ## Cleanup
 
 ```sh
-kube -n default delete pod/native-llama-serve-client --ignore-not-found
-kube -n "${IDLELOOM_NAMESPACE}" delete -f native-llama-serve.yaml --ignore-not-found
-kube -n "${IDLELOOM_NAMESPACE}" delete -f native-llama-infer.yaml --ignore-not-found
-kube delete idleloommodel local-gguf --ignore-not-found
+kubectl -n default delete pod/native-llama-serve-client --ignore-not-found
+kubectl -n "${IDLELOOM_NAMESPACE}" delete -f native-llama-serve.yaml --ignore-not-found
+kubectl -n "${IDLELOOM_NAMESPACE}" delete -f native-llama-infer.yaml --ignore-not-found
+kubectl delete idleloommodel local-gguf --ignore-not-found
 rm -f native-llama-serve.yaml native-llama-infer.yaml llama-cpp-model.yaml
 ```
 

@@ -40,8 +40,8 @@ idlectl join "${IDLELOOM_HOST}" \
 idlectl recipe render train/mlx-linear-regression@v1 \
   --name linear-api \
   -o yaml > linear-api.yaml
-kube -n "${IDLELOOM_NAMESPACE}" apply -f linear-api.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f linear-api.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait \
   --for=jsonpath='{.status.phase}'=Succeeded \
   idleloomworkload/linear-api \
   --timeout=15m

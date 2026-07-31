@@ -13,7 +13,7 @@ idlectl get workload/WORKLOAD -o yaml \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
   -n "${IDLELOOM_NAMESPACE}"
-kube get idleloomworkloadassignments -A -o wide
+kubectl get idleloomworkloadassignments -A -o wide
 ```
 
 Check host readiness, free unified memory, exact model catalog capability, and
@@ -42,8 +42,8 @@ and requires administrator access. Do not delete launchd files manually; use
 Projection readiness and address publication converge independently:
 
 ```sh
-kube get nodes,pods -A -l native.idleloom.io/projection=true -o wide
-kube get wirekubepeers -o wide
+kubectl get nodes,pods -A -l native.idleloom.io/projection=true -o wide
+kubectl get wirekubepeers -o wide
 idlectl logs -f workload/WORKLOAD \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
@@ -57,8 +57,8 @@ workloads use `idlectl logs --local` after completion.
 ## Native serving is unreachable
 
 ```sh
-kube -n "${IDLELOOM_NAMESPACE}" get idleloomworkload/WORKLOAD -o wide
-kube -n "${IDLELOOM_NAMESPACE}" get service,endpointSlice
+kubectl -n "${IDLELOOM_NAMESPACE}" get idleloomworkload/WORKLOAD -o wide
+kubectl -n "${IDLELOOM_NAMESPACE}" get service,endpointSlice
 wirekubectl doctor \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}"
@@ -71,10 +71,10 @@ proxy and `kubectl port-forward` do not support the Native endpoint.
 ## Worker Pod remains Pending
 
 ```sh
-kube describe pod POD -n "${IDLELOOM_NAMESPACE}"
-kube get node -l idleloom-worker=true -o wide
-kube get resourceslices -o wide
-kube -n kube-system get daemonset apple-vulkan-dra-node
+kubectl describe pod POD -n "${IDLELOOM_NAMESPACE}"
+kubectl get node -l idleloom-worker=true -o wide
+kubectl get resourceslices -o wide
+kubectl -n kube-system get daemonset apple-vulkan-dra-node
 ```
 
 Check the dedicated taint toleration, image-pull access, CNI readiness, DRA API
@@ -88,7 +88,7 @@ An intentional `create worker --wait=false` leaves the Node cordoned in phase
 ```sh
 idlectl start worker --timeout 10m
 idlectl status
-kube get node -l idleloom-worker=true -o wide
+kubectl get node -l idleloom-worker=true -o wide
 ```
 
 Do not use deferred readiness to declare a broken Node healthy.
@@ -96,11 +96,11 @@ Do not use deferred readiness to declare a broken Node healthy.
 ## Inventory before cleanup
 
 ```sh
-kube get idleloomworkloads,idleloomworkloadassignments -A
-kube get idleloomhosts -A
-kube get idleloommodels
-kube get wirekubepeers
-kube get nodes -l idleloom-worker=true
+kubectl get idleloomworkloads,idleloomworkloadassignments -A
+kubectl get idleloomhosts -A
+kubectl get idleloommodels
+kubectl get wirekubepeers
+kubectl get nodes -l idleloom-worker=true
 ```
 
 Do not delete shared WireKube resources as part of ordinary Idleloom cleanup.

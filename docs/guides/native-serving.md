@@ -27,8 +27,8 @@ Each serving recipe renders:
 Inspect the endpoint without printing the API key:
 
 ```sh
-kube -n "${IDLELOOM_NAMESPACE}" get service,endpointSlice
-kube -n "${IDLELOOM_NAMESPACE}" get secret SERVICE-auth \
+kubectl -n "${IDLELOOM_NAMESPACE}" get service,endpointSlice
+kubectl -n "${IDLELOOM_NAMESPACE}" get secret SERVICE-auth \
   -o jsonpath='{.metadata.name}{"\n"}'
 ```
 

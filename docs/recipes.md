@@ -43,7 +43,7 @@ kube() {
 
 idlectl version
 idlectl recipe list
-kube cluster-info
+kubectl cluster-info
 ```
 
 The examples render `namespace: default`, matching `IDLELOOM_NAMESPACE` above.
@@ -115,8 +115,8 @@ idlectl recipe render train/mlx-linear-regression@v1 \
   --name native-train \
   -o yaml > native-train.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f native-train.yaml
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-train.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f native-train.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-train.yaml
 ```
 
 The output is an immutable `ai.idleloom.io/v1alpha1` `IdleloomWorkload`. Its
@@ -168,18 +168,18 @@ idlectl recipe render train/container-linear-regression@v1 \
   --name worker-train \
   -o yaml > worker-train.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-train.yaml
-kube -n "${IDLELOOM_NAMESPACE}" apply -f worker-train.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-train.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f worker-train.yaml
 ```
 
 Because this backend is a normal Job, standard Kubernetes operations retain
 their usual meaning:
 
 ```sh
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=complete job/worker-train --timeout=2m
-kube -n "${IDLELOOM_NAMESPACE}" logs job/worker-train
-kube -n "${IDLELOOM_NAMESPACE}" describe job/worker-train
-kube -n "${IDLELOOM_NAMESPACE}" delete job/worker-train
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=condition=complete job/worker-train --timeout=2m
+kubectl -n "${IDLELOOM_NAMESPACE}" logs job/worker-train
+kubectl -n "${IDLELOOM_NAMESPACE}" describe job/worker-train
+kubectl -n "${IDLELOOM_NAMESPACE}" delete job/worker-train
 ```
 
 The same contract supports Pod networking, `ConfigMap`, `Secret`, PVC and CSI
@@ -205,7 +205,7 @@ idlectl recipe render infer/mlx-batch@v1 \
   --name native-infer \
   -o yaml > native-infer.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-infer.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-infer.yaml
 idlectl get workload/native-infer \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
@@ -219,7 +219,7 @@ idlectl logs -f workload/native-infer \
 Wait for a terminal success state when running this in automation:
 
 ```sh
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded \
   idleloomworkload/native-infer \
   --timeout=20m
 ```
@@ -325,8 +325,8 @@ timeoutSeconds: 600
 unifiedMemory: 16Gi
 EOF
 
-kube apply --dry-run=server -f custom-ollama-model.yaml
-kube apply -f custom-ollama-model.yaml
+kubectl apply --dry-run=server -f custom-ollama-model.yaml
+kubectl apply -f custom-ollama-model.yaml
 ```
 
 Pass `--values custom-ollama-values.yaml` to `recipe render`. The admission
@@ -342,8 +342,8 @@ idlectl recipe render infer/ollama-gguf@v1 \
   --name native-ollama-infer \
   -o yaml > native-ollama-infer.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-ollama-infer.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-ollama-infer.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded \
   idleloomworkload/native-ollama-infer --timeout=20m
 idlectl logs workload/native-ollama-infer \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
@@ -426,8 +426,8 @@ spec:
   maxConcurrentRequests: 1
 EOF
 
-kube apply --dry-run=server -f llama-cpp-model.yaml
-kube apply -f llama-cpp-model.yaml
+kubectl apply --dry-run=server -f llama-cpp-model.yaml
+kubectl apply -f llama-cpp-model.yaml
 ```
 
 Increase `minimumUnifiedMemory` for larger files or context windows. It is a
@@ -442,8 +442,8 @@ idlectl recipe render infer/llama-cpp-metal@v1 \
   --name native-llama-infer \
   -o yaml > native-llama-infer.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-llama-infer.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-llama-infer.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=jsonpath='{.status.phase}'=Succeeded \
   idleloomworkload/native-llama-infer --timeout=20m
 idlectl logs workload/native-llama-infer \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
@@ -462,7 +462,7 @@ idlectl delete workload/native-llama-infer \
   --kubeconfig "${IDLELOOM_KUBECONFIG}" \
   --context "${IDLELOOM_CONTEXT}" \
   -n "${IDLELOOM_NAMESPACE}"
-kube delete -f llama-cpp-model.yaml
+kubectl delete -f llama-cpp-model.yaml
 rm -f native-llama-infer.yaml llama-cpp-model.yaml
 ```
 
@@ -481,11 +481,11 @@ idlectl recipe render infer/llama-vulkan@v1 \
   --name worker-infer \
   -o yaml > worker-infer.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-infer.yaml
-kube -n "${IDLELOOM_NAMESPACE}" apply -f worker-infer.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=complete job/worker-infer --timeout=30m
-kube -n "${IDLELOOM_NAMESPACE}" logs job/worker-infer
-kube -n "${IDLELOOM_NAMESPACE}" delete -f worker-infer.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-infer.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f worker-infer.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=condition=complete job/worker-infer --timeout=30m
+kubectl -n "${IDLELOOM_NAMESPACE}" logs job/worker-infer
+kubectl -n "${IDLELOOM_NAMESPACE}" delete -f worker-infer.yaml
 ```
 
 The target cluster must already have the Idleloom Apple Vulkan DRA driver and
@@ -514,10 +514,10 @@ idlectl recipe render serve/mlx-qwen@v1 \
   --name native-mlx-serve \
   -o yaml > native-mlx-serve.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-mlx-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-mlx-serve.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
   idleloomworkload/native-mlx-serve --timeout=15m
-kube -n "${IDLELOOM_NAMESPACE}" get endpointslice/native-mlx-serve
+kubectl -n "${IDLELOOM_NAMESPACE}" get endpointslice/native-mlx-serve
 ```
 
 The controller generates `Secret/native-mlx-serve-auth` in the workload namespace
@@ -535,11 +535,11 @@ an authenticated request. Apply the MLX client, wait for completion, and read
 the response:
 
 ```sh
-kube apply -f examples/native/serve-mlx-client.yaml
-kube -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl apply -f examples/native/serve-mlx-client.yaml
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
   pod/native-mlx-serve-client \
   --timeout=5m
-kube -n default logs pod/native-mlx-serve-client
+kubectl -n default logs pod/native-mlx-serve-client
 ```
 
 These example clients intentionally use namespace `default`. Copy and edit the
@@ -570,13 +570,13 @@ model process changes:
 idlectl recipe render serve/ollama-gguf@v1 \
   --name native-ollama-serve \
   -o yaml > native-ollama-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-ollama-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-ollama-serve.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
   idleloomworkload/native-ollama-serve --timeout=15m
-kube apply -f examples/native/serve-ollama-client.yaml
-kube -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl apply -f examples/native/serve-ollama-client.yaml
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
   pod/native-ollama-serve-client --timeout=5m
-kube -n default logs pod/native-ollama-serve-client
+kubectl -n default logs pod/native-ollama-serve-client
 ```
 
 The client uses model alias `qwen3-5-9b`, Service
@@ -593,13 +593,13 @@ recipe:
 idlectl recipe render serve/llama-cpp-metal@v1 \
   --name native-llama-serve \
   -o yaml > native-llama-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" apply -f native-llama-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f native-llama-serve.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
   idleloomworkload/native-llama-serve --timeout=15m
-kube apply -f examples/native/serve-llama-cpp-client.yaml
-kube -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl apply -f examples/native/serve-llama-cpp-client.yaml
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
   pod/native-llama-serve-client --timeout=5m
-kube -n default logs pod/native-llama-serve-client
+kubectl -n default logs pod/native-llama-serve-client
 ```
 
 The client calls model alias `local-gguf` through Service
@@ -614,7 +614,7 @@ Delete the manifest to stop the process and remove its EndpointSlice and
 managed Secrets:
 
 ```sh
-kube -n default delete pod/native-mlx-serve-client \
+kubectl -n default delete pod/native-mlx-serve-client \
   pod/native-ollama-serve-client \
   pod/native-llama-serve-client \
   --ignore-not-found
@@ -624,7 +624,7 @@ for manifest in \
   native-llama-serve.yaml
 do
   if test -f "${manifest}"; then
-    kube -n "${IDLELOOM_NAMESPACE}" delete -f "${manifest}"
+    kubectl -n "${IDLELOOM_NAMESPACE}" delete -f "${manifest}"
   fi
 done
 rm -f native-mlx-serve.yaml native-ollama-serve.yaml native-llama-serve.yaml
@@ -647,7 +647,7 @@ secret metadata.
 Create the Secret and a values file:
 
 ```sh
-openssl rand -hex 32 | kube -n "${IDLELOOM_NAMESPACE}" create secret generic worker-serve-auth \
+openssl rand -hex 32 | kubectl -n "${IDLELOOM_NAMESPACE}" create secret generic worker-serve-auth \
   --from-file=api-key=/dev/stdin
 
 cat > worker-serve-values.yaml <<EOF
@@ -664,21 +664,21 @@ idlectl recipe render serve/llama-vulkan@v1 \
   --values worker-serve-values.yaml \
   -o yaml > worker-serve.yaml
 
-kube -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" apply -f worker-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" rollout status deployment/worker-serve --timeout=30m
+kubectl -n "${IDLELOOM_NAMESPACE}" apply --dry-run=client -f worker-serve.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" apply -f worker-serve.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" rollout status deployment/worker-serve --timeout=30m
 ```
 
 Forward the cluster-private Service in one terminal:
 
 ```sh
-kube -n "${IDLELOOM_NAMESPACE}" port-forward service/worker-serve 8080:8080
+kubectl -n "${IDLELOOM_NAMESPACE}" port-forward service/worker-serve 8080:8080
 ```
 
 Read the key and call the endpoint from another terminal:
 
 ```sh
-API_KEY="$(kube -n "${IDLELOOM_NAMESPACE}" get secret worker-serve-auth \
+API_KEY="$(kubectl -n "${IDLELOOM_NAMESPACE}" get secret worker-serve-auth \
   -o jsonpath='{.data.api-key}' | openssl base64 -d -A)"
 
 curl --fail-with-body http://127.0.0.1:8080/v1/chat/completions \
@@ -696,8 +696,8 @@ and does not configure Ingress, external TLS, or
 tenant authorization. Remove the generated resources and Secret explicitly:
 
 ```sh
-kube -n "${IDLELOOM_NAMESPACE}" delete -f worker-serve.yaml
-kube -n "${IDLELOOM_NAMESPACE}" delete secret worker-serve-auth
+kubectl -n "${IDLELOOM_NAMESPACE}" delete -f worker-serve.yaml
+kubectl -n "${IDLELOOM_NAMESPACE}" delete secret worker-serve-auth
 ```
 
 ## Manifest contract
@@ -726,7 +726,7 @@ deterministic defaults, pinned assets, and consistent metadata.
 Query runs across both backends with the shared labels:
 
 ```sh
-kube -A get idleloomworkloads,jobs,deployments \
+kubectl -A get idleloomworkloads,jobs,deployments \
   -l app.kubernetes.io/managed-by=idleloom
 ```
 

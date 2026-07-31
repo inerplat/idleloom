@@ -10,19 +10,19 @@ The reviewed example writes, reads, and removes data under the Worker VM's
 `/var/lib/idleloom/volumes` directory:
 
 ```sh
-kube apply -f "${IDLELOOM_REPO}/examples/worker/hostpath-writer.yaml"
-kube -n default wait --for=condition=complete \
+kubectl apply -f "${IDLELOOM_REPO}/examples/worker/hostpath-writer.yaml"
+kubectl -n default wait --for=condition=complete \
   job/idleloom-hostpath-writer --timeout=5m
-kube -n default logs job/idleloom-hostpath-writer
+kubectl -n default logs job/idleloom-hostpath-writer
 
-kube -n default delete job/idleloom-hostpath-writer
-kube apply -f "${IDLELOOM_REPO}/examples/worker/hostpath-reader.yaml"
-kube -n default wait --for=condition=complete \
+kubectl -n default delete job/idleloom-hostpath-writer
+kubectl apply -f "${IDLELOOM_REPO}/examples/worker/hostpath-reader.yaml"
+kubectl -n default wait --for=condition=complete \
   job/idleloom-hostpath-reader --timeout=5m
-kube -n default logs job/idleloom-hostpath-reader
+kubectl -n default logs job/idleloom-hostpath-reader
 
-kube -n default delete job/idleloom-hostpath-reader
-kube apply -f "${IDLELOOM_REPO}/examples/worker/hostpath-cleanup.yaml"
+kubectl -n default delete job/idleloom-hostpath-reader
+kubectl apply -f "${IDLELOOM_REPO}/examples/worker/hostpath-cleanup.yaml"
 ```
 
 In a multi-Worker cluster, add an explicit hostname selector so the writer and
@@ -35,12 +35,12 @@ The Worker image includes `open-iscsi` and starts `iscsid`. When Longhorn is
 already installed and tolerates the Worker taint:
 
 ```sh
-kube get storageclass longhorn
-kube apply -f "${IDLELOOM_REPO}/examples/worker/longhorn-pvc-smoke.yaml"
-kube -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl get storageclass longhorn
+kubectl apply -f "${IDLELOOM_REPO}/examples/worker/longhorn-pvc-smoke.yaml"
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
   pod/idleloom-longhorn-smoke --timeout=10m
-kube -n default logs pod/idleloom-longhorn-smoke
-kube -n default delete -f \
+kubectl -n default logs pod/idleloom-longhorn-smoke
+kubectl -n default delete -f \
   "${IDLELOOM_REPO}/examples/worker/longhorn-pvc-smoke.yaml"
 ```
 
@@ -61,11 +61,11 @@ sed \
   "${IDLELOOM_REPO}/examples/worker/nfs-pv-smoke.example.yaml" \
   > nfs-pv-smoke.yaml
 
-kube apply -f nfs-pv-smoke.yaml
-kube -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
+kubectl apply -f nfs-pv-smoke.yaml
+kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
   pod/idleloom-nfs-smoke --timeout=10m
-kube -n default logs pod/idleloom-nfs-smoke
-kube delete -f nfs-pv-smoke.yaml
+kubectl -n default logs pod/idleloom-nfs-smoke
+kubectl delete -f nfs-pv-smoke.yaml
 rm -f nfs-pv-smoke.yaml
 ```
 
