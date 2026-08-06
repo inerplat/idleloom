@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -80,7 +82,7 @@ func LoadCluster(ctx context.Context, kubeconfigPath, contextName string) (*Clus
 		return nil, fmt.Errorf("build Kubernetes client configuration: %w", err)
 	}
 	restConfig.UserAgent = "idleloom/dev"
-	client, err := kubernetes.NewForConfig(restConfig)
+	client, err := newClient(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create Kubernetes client: %w", err)
 	}
@@ -101,7 +103,7 @@ func LoadCluster(ctx context.Context, kubeconfigPath, contextName string) (*Clus
 	secureConfig.Insecure = false
 	secureConfig.CAFile = ""
 	secureConfig.CAData = caData
-	secureClient, err := kubernetes.NewForConfig(secureConfig)
+	secureClient, err := newClient(secureConfig)
 	if err != nil {
 		return nil, fmt.Errorf("create CA-verified Kubernetes client: %w", err)
 	}
@@ -134,6 +136,57 @@ func LoadCluster(ctx context.Context, kubeconfigPath, contextName string) (*Clus
 		RESTConfig:     secureConfig,
 		Client:         client,
 	}, nil
+}
+
+// newClient builds a clientset that retries a request once after the API server
+// rejects the credential.
+//
+// Exec credential plugins that omit expirationTimestamp from the ExecCredential
+// leave client-go with a credential it considers valid forever, so it keeps
+// sending the cached token after the server has stopped accepting it. client-go
+// does re-run the plugin when it sees the resulting Unauthorized, but it returns
+// that Unauthorized to the caller rather than retrying. kubectl never notices
+// because every invocation is a fresh process; a single idlectl command that
+// outlives the token fails instead. Retrying once picks up the credential that
+// client-go has by then refreshed.
+func newClient(config *rest.Config) (kubernetes.Interface, error) {
+	httpClient, err := rest.HTTPClientFor(config)
+	if err != nil {
+		return nil, err
+	}
+	if config.ExecProvider != nil {
+		httpClient.Transport = &retryUnauthorizedTransport{base: httpClient.Transport}
+	}
+	return kubernetes.NewForConfigAndClient(config, httpClient)
+}
+
+// retryUnauthorizedTransport must wrap the transport client-go has already
+// assembled, so that the credential refresh triggered by the first Unauthorized
+// is in place before the retry re-enters the exec round tripper below it.
+type retryUnauthorizedTransport struct {
+	base http.RoundTripper
+}
+
+func (t *retryUnauthorizedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	response, err := t.base.RoundTrip(req)
+	if err != nil || response.StatusCode != http.StatusUnauthorized {
+		return response, err
+	}
+	// A request whose body cannot be rewound can only be sent once.
+	if req.Body != nil && req.GetBody == nil {
+		return response, nil
+	}
+	retry := req.Clone(req.Context())
+	if req.GetBody != nil {
+		body, bodyErr := req.GetBody()
+		if bodyErr != nil {
+			return response, nil
+		}
+		retry.Body = body
+	}
+	_, _ = io.Copy(io.Discard, response.Body)
+	_ = response.Body.Close()
+	return t.base.RoundTrip(retry)
 }
 
 func discoverClusterDNS(ctx context.Context, client kubernetes.Interface) (*corev1.Service, error) {
