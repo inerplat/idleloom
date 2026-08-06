@@ -70,6 +70,38 @@ spec:
       - name: gpu
         resourceClaimName: {{ quote .Name }}
       initContainers:
+      # The cache lives on the worker's own disk, so kubelet cannot chown it the
+      # way it does for managed volumes. Take CHOWN and nothing else.
+      - name: model-cache-prepare
+        image: quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -ec
+        - |
+          # DirectoryOrCreate already makes this 0755, so handing it to the
+          # fetch user is enough. Do not chmod: that needs FOWNER on top, and
+          # CHOWN alone is the smaller capability to hold.
+          chown 65532:65532 /models
+        resources:
+          requests:
+            cpu: 50m
+            memory: 32Mi
+          limits:
+            cpu: 200m
+            memory: 64Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - CHOWN
+          readOnlyRootFilesystem: true
+          runAsUser: 0
+        volumeMounts:
+        - name: model
+          mountPath: /models
       - name: model-fetch
         image: quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4
         imagePullPolicy: IfNotPresent
@@ -77,8 +109,25 @@ spec:
         - /bin/sh
         - -ec
         - |
-          curl --fail --location --retry 3 --output /models/model.gguf "$MODEL_URL"
-          echo "$MODEL_SHA256  /models/model.gguf" | sha256sum -c -
+          # Content-addressed: the digest names the file, so a changed model or
+          # quantisation lands beside the old one instead of silently reusing it.
+          target="/models/${MODEL_SHA256}.gguf"
+          if [ -f "$target" ] && echo "$MODEL_SHA256  $target" | sha256sum -c - >/dev/null 2>&1; then
+            echo "cache hit: $target"
+            exit 0
+          fi
+          # Download to a scratch name and rename, so an interrupted fetch can
+          # never be mistaken for a warm cache entry on the next start. mktemp
+          # rather than $$: Kubernetes collapses $$ to $ while expanding args,
+          # which would leave every fetcher sharing one scratch name.
+          partial="$(mktemp "${target}.partial.XXXXXX")"
+          trap 'rm -f "$partial"' EXIT
+          curl --fail --location --retry 3 --output "$partial" "$MODEL_URL"
+          echo "$MODEL_SHA256  $partial" | sha256sum -c -
+          # mktemp gives 0600; the cache is shared, so publish it readable.
+          chmod 0644 "$partial"
+          mv -f "$partial" "$target"
+          echo "cached: $target"
         env:
         - name: MODEL_URL
           value: {{ quote (index .Values "modelURL") }}
@@ -118,7 +167,7 @@ spec:
           exec /usr/bin/llama-cli "$@"
         - idleloom-llama
         - --model
-        - /models/model.gguf
+        - {{ quote (printf "/models/%s.gguf" (index .Values "modelSHA256")) }}
         - --prompt
         - {{ quote (index .Values "prompt") }}
         - --predict
@@ -163,8 +212,12 @@ spec:
         - name: runtime-cache
           mountPath: /tmp
       volumes:
+      # The GGUF file is content-addressed and lives on the worker, shared with
+      # the serving recipe by defaulting to the same cache directory, so a
+      # repeated run reuses whichever workload downloaded it first.
       - name: model
-        emptyDir:
-          sizeLimit: {{ quote (index .Values "modelStorage") }}
+        hostPath:
+          path: {{ quote (index .Values "modelCacheDir") }}
+          type: DirectoryOrCreate
       - name: runtime-cache
         emptyDir: {}

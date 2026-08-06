@@ -9,5 +9,6 @@ parametersSchema: parameters.schema.json
 example: example.yaml
 prerequisites:
 - A joined Idleloom Linux worker with the Apple Vulkan DRA driver running.
+- Worker disk capacity for the shared model cache under /var/lib/idleloom/volumes (idlectl create worker --disk).
 - A resource.k8s.io/v1 DeviceClass named apple-vulkan.
 - Outbound HTTPS access to the pinned model URL.

@@ -522,10 +522,16 @@ kubectl -n "${IDLELOOM_NAMESPACE}" delete -f worker-infer.yaml
 The target cluster must already have the Idleloom Apple Vulkan DRA driver and
 an `apple-vulkan` `DeviceClass`. Follow the registry push, DaemonSet rollout,
 and `ResourceSlice` verification steps in the main README before this recipe.
-Override `modelURL`, `modelSHA256`,
-`modelStorage`, and `memory` together when using a larger operator-approved
-model; `deviceClass` selects another DRA configuration. The inference image
-runs as nonroot UID and GID `65532`. The DRA CDI specification publishes the
+Override `modelURL`, `modelSHA256`, and `memory` together when using a larger
+operator-approved model; `deviceClass` selects another DRA configuration. The
+model is cached on the worker under `modelCacheDir` (default
+`/var/lib/idleloom/volumes/llama-models`) as `<modelSHA256>.gguf` and shared
+with the serving recipe, so a repeated run reuses whichever workload downloaded
+the file first. The cache contract is described under
+[Linux Worker Vulkan serving](#linux-worker-vulkan-serving). The inference image
+runs as nonroot UID and GID `65532`, apart from the `model-cache-prepare` init
+container, which runs as root holding only `CHOWN` to hand the worker's cache
+directory to that user. The DRA CDI specification publishes the
 render device with group-writable permissions, while the Pod uses `fsGroup:
 65532`, drops all capabilities, forbids privilege escalation, and keeps the
 image root filesystem read-only. This remains an experimental device boundary,
@@ -732,7 +738,9 @@ file is named after its SHA-256, so a replacement Pod re-verifies the cached
 copy and starts without downloading, while a changed `modelURL` or quantisation
 lands beside the old entry rather than silently reusing it. An interrupted fetch
 is written under a scratch name and renamed only after verification, so a
-partial download can never be mistaken for a warm cache.
+partial download can never be mistaken for a warm cache. The batch inference
+recipe defaults to the same directory, so serving and batch runs share one
+downloaded copy of each model.
 
 The cache is bounded by the worker disk (`idlectl create worker --disk`) and is
 never pruned automatically. Reclaim space by deleting digests you no longer

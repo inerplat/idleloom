@@ -23,21 +23,22 @@
     },
     "memory": {
       "type": "string",
-      "description": "Memory request and limit for llama.cpp.",
+      "description": "Memory request and limit for llama.cpp. The mapped GGUF file counts against this limit as reclaimable page cache, so size it above the model file to avoid thrashing.",
       "default": "2Gi",
       "format": "positiveQuantity"
+    },
+    "modelCacheDir": {
+      "type": "string",
+      "description": "Directory on the worker's own disk holding downloaded GGUF files, one per digest. It defaults to the serving recipe's cache, so a repeated run reuses whichever workload downloaded the file first; it is bounded by the worker disk (idlectl create worker --disk) and is never pruned automatically.",
+      "default": "/var/lib/idleloom/volumes/llama-models",
+      "minLength": 1,
+      "pattern": "^/var/lib/idleloom/volumes(/[A-Za-z0-9._-]+)+$"
     },
     "modelSHA256": {
       "type": "string",
       "description": "SHA-256 of the GGUF model file.",
       "default": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
       "format": "sha256Hex"
-    },
-    "modelStorage": {
-      "type": "string",
-      "description": "Ephemeral disk capacity reserved for the downloaded GGUF file.",
-      "default": "2Gi",
-      "format": "positiveQuantity"
     },
     "modelURL": {
       "type": "string",
