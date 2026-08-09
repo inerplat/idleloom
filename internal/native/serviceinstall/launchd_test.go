@@ -49,7 +49,7 @@ func TestLabelSuffixIsStableAndSafe(t *testing.T) {
 
 func TestWriteReceiptIsPrivateAndComplete(t *testing.T) {
 	directory := t.TempDir()
-	want := Receipt{Version: 1, HostID: "test", UserLabels: []string{"io.idleloom.agent.test"}}
+	want := Receipt{Version: 2, HostID: "test", UserLabels: []string{"io.idleloom.agent.test"}, RuntimeRoot: "/var/tmp/idleloom"}
 	if err := writeReceipt(directory, want); err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestWriteReceiptIsPrivateAndComplete(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got.Version != want.Version || len(got.UserLabels) != 1 || got.UserLabels[0] != want.UserLabels[0] {
+	if got.Version != want.Version || len(got.UserLabels) != 1 || got.UserLabels[0] != want.UserLabels[0] || got.RuntimeRoot != want.RuntimeRoot {
 		t.Fatalf("receipt = %#v, want %#v", got, want)
 	}
 }
@@ -110,7 +110,10 @@ func TestReceiptRejectsUntrustedCleanupPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, receipt := range []Receipt{
+		{Version: 3, HostID: "test"},
 		{Version: 2, HostID: "test"},
+		{Version: 2, HostID: "test", RuntimeRoot: "/"},
+		{Version: 1, HostID: "test", RuntimeRoot: "/var/tmp/idleloom"},
 		{Version: 1},
 		{Version: 1, HostID: "test", UserLabels: []string{"../../Library/LaunchAgents/other"}},
 		{Version: 1, HostID: "test", UserLabels: []string{"io.idleloom.agent.other"}},
@@ -121,6 +124,90 @@ func TestReceiptRejectsUntrustedCleanupPaths(t *testing.T) {
 		if err := validateReceipt(receipt); err == nil {
 			t.Fatalf("accepted unsafe receipt %#v", receipt)
 		}
+	}
+}
+
+func TestClaimedRuntimeRootIsRemovedOnlyForMatchingEnrollment(t *testing.T) {
+	base := t.TempDir()
+	stateDirectory := filepath.Join(base, "state")
+	if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeRoot := filepath.Join(base, "runtime")
+	claimed, err := claimRuntimeRoot(runtimeRoot, stateDirectory, "studio")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot, err := filepath.EvalSymlinks(runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed != wantRoot {
+		t.Fatalf("claimed runtime root = %q, want %q", claimed, wantRoot)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeRoot, "model.bin"), []byte("owned data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	receipt := Receipt{Version: 2, HostID: "studio", RuntimeRoot: claimed}
+	if err := removeRuntimeRoot(stateDirectory, receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(runtimeRoot); !os.IsNotExist(err) {
+		t.Fatalf("owned runtime root remains: %v", err)
+	}
+}
+
+func TestRuntimeRootCleanupRejectsMissingOrForeignOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		claimFirst bool
+		hostID     string
+	}{
+		{name: "missing marker"},
+		{name: "foreign marker", claimFirst: true, hostID: "other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			stateDirectory := filepath.Join(base, "state")
+			if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			runtimeRoot := filepath.Join(base, "runtime")
+			if test.claimFirst {
+				if _, err := claimRuntimeRoot(runtimeRoot, stateDirectory, test.hostID); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := removeRuntimeRoot(stateDirectory, Receipt{Version: 2, HostID: "studio", RuntimeRoot: runtimeRoot}); err == nil {
+				t.Fatal("unowned runtime root was removed")
+			}
+			if _, err := os.Stat(runtimeRoot); err != nil {
+				t.Fatalf("unowned runtime root changed: %v", err)
+			}
+		})
+	}
+}
+
+func TestClaimRuntimeRootRejectsNonEmptyUnownedDirectory(t *testing.T) {
+	base := t.TempDir()
+	stateDirectory := filepath.Join(base, "state")
+	runtimeRoot := filepath.Join(base, "runtime")
+	if err := os.Mkdir(stateDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(runtimeRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeRoot, "existing"), []byte("user data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := claimRuntimeRoot(runtimeRoot, stateDirectory, "studio"); err == nil {
+		t.Fatal("non-empty unowned runtime root was claimed")
+	}
+	if _, err := os.Stat(filepath.Join(runtimeRoot, "existing")); err != nil {
+		t.Fatalf("existing runtime data changed: %v", err)
 	}
 }
 

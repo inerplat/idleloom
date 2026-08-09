@@ -21,6 +21,11 @@ idlectl delete host/"${IDLELOOM_HOST}" \
   --context "${IDLELOOM_CONTEXT}"
 ```
 
+Host deletion also removes the Native runtime root recorded during join,
+including its prepared Python runtime, models, and assignment work directories.
+Deletion verifies the ownership marker in that root before removing it and
+refuses to remove an unowned or mismatched directory.
+
 Remove operator-created model catalog entries only after their workloads are
 gone. Keep built-in MLX and Ollama catalog entries.
 

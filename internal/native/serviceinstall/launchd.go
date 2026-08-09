@@ -25,6 +25,8 @@ const receiptFileName = "services.json"
 
 const rootReceiptFileName = "service-owner.json"
 
+const runtimeOwnerFileName = ".idleloom-owner.json"
+
 type Config struct {
 	HostID                     string
 	StateDirectory             string
@@ -42,11 +44,12 @@ type Config struct {
 }
 
 type Receipt struct {
-	Version    int      `json:"version"`
-	HostID     string   `json:"hostID"`
-	UserLabels []string `json:"userLabels"`
-	RootLabel  string   `json:"rootLabel,omitempty"`
-	RootPhase  string   `json:"rootPhase,omitempty"`
+	Version     int      `json:"version"`
+	HostID      string   `json:"hostID"`
+	UserLabels  []string `json:"userLabels"`
+	RootLabel   string   `json:"rootLabel,omitempty"`
+	RootPhase   string   `json:"rootPhase,omitempty"`
+	RuntimeRoot string   `json:"runtimeRoot,omitempty"`
 }
 
 type service struct {
@@ -66,7 +69,13 @@ type rootReceipt struct {
 	StateDirectory string `json:"stateDirectory"`
 }
 
-func Install(ctx context.Context, config Config) (Receipt, error) {
+type runtimeOwner struct {
+	Version        int    `json:"version"`
+	HostID         string `json:"hostID"`
+	StateDirectory string `json:"stateDirectory"`
+}
+
+func Install(ctx context.Context, config Config) (result Receipt, err error) {
 	if runtime.GOOS != "darwin" {
 		return Receipt{}, fmt.Errorf("native services require macOS launchd")
 	}
@@ -140,7 +149,16 @@ func Install(ctx context.Context, config Config) (Receipt, error) {
 		})
 	}
 
-	receipt := Receipt{Version: 1, HostID: config.HostID}
+	runtimeRoot, err := claimRuntimeRoot(config.RuntimeRoot, config.StateDirectory, config.HostID)
+	if err != nil {
+		return Receipt{}, fmt.Errorf("claim native runtime root: %w", err)
+	}
+	receipt := Receipt{Version: 2, HostID: config.HostID, RuntimeRoot: runtimeRoot}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, removeRuntimeRoot(config.StateDirectory, receipt))
+		}
+	}()
 	if config.LinkMode == "wirekube" {
 		rootLabel := "io.idleloom.link." + hostSuffix
 		rootHelper, rootPlist, rootStateDirectory, err := rootArtifacts(rootLabel)
@@ -304,6 +322,9 @@ func Remove(ctx context.Context, stateDirectory string) error {
 	}
 	errs = append(errs, removeRoot(ctx, stateDirectory, receipt))
 	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	if err := removeRuntimeRoot(stateDirectory, receipt); err != nil {
 		return err
 	}
 	return os.Remove(filepath.Join(stateDirectory, receiptFileName))
@@ -541,8 +562,16 @@ func rootArtifacts(label string) (helper, plist, stateDirectory string, err erro
 }
 
 func validateReceipt(receipt Receipt) error {
-	if receipt.Version != 1 {
+	if receipt.Version != 1 && receipt.Version != 2 {
 		return fmt.Errorf("unsupported native service receipt version %d", receipt.Version)
+	}
+	if receipt.Version == 1 && receipt.RuntimeRoot != "" {
+		return fmt.Errorf("legacy native service receipt has a runtime root")
+	}
+	if receipt.Version == 2 {
+		if receipt.RuntimeRoot == "" || !filepath.IsAbs(receipt.RuntimeRoot) || filepath.Clean(receipt.RuntimeRoot) != receipt.RuntimeRoot || receipt.RuntimeRoot == string(filepath.Separator) {
+			return fmt.Errorf("native service receipt runtime root is invalid")
+		}
 	}
 	hostSuffix := labelSuffix(receipt.HostID)
 	if hostSuffix == "" {
@@ -568,6 +597,160 @@ func validateReceipt(receipt Receipt) error {
 		return fmt.Errorf("link service phase has no service label")
 	}
 	return nil
+}
+
+func claimRuntimeRoot(root, stateDirectory, hostID string) (claimed string, err error) {
+	canonicalStateDirectory, err := canonicalPath(stateDirectory)
+	if err != nil {
+		return "", fmt.Errorf("resolve state directory: %w", err)
+	}
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve runtime root: %w", err)
+	}
+	absoluteRoot = filepath.Clean(absoluteRoot)
+	if absoluteRoot == string(filepath.Separator) {
+		return "", fmt.Errorf("refusing to own filesystem root")
+	}
+	created := false
+	if err := os.Mkdir(absoluteRoot, 0o700); err == nil {
+		created = true
+	} else if os.IsNotExist(err) {
+		if err := os.MkdirAll(absoluteRoot, 0o700); err != nil {
+			return "", err
+		}
+		created = true
+	} else if !os.IsExist(err) {
+		return "", err
+	}
+	if created {
+		defer func() {
+			if err != nil {
+				_ = os.Remove(absoluteRoot)
+			}
+		}()
+	}
+	info, err := os.Lstat(absoluteRoot)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("runtime root is not a real directory: %s", absoluteRoot)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return "", err
+	}
+	if pathsOverlap(canonicalRoot, canonicalStateDirectory) {
+		return "", fmt.Errorf("runtime root and state directory overlap")
+	}
+	owner := runtimeOwner{Version: 1, HostID: hostID, StateDirectory: canonicalStateDirectory}
+	marker := filepath.Join(canonicalRoot, runtimeOwnerFileName)
+	if _, err := os.Lstat(marker); err == nil {
+		if err := verifyRuntimeOwner(marker, owner); err != nil {
+			return "", err
+		}
+		return canonicalRoot, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	entries, err := os.ReadDir(canonicalRoot)
+	if err != nil {
+		return "", err
+	}
+	if len(entries) != 0 {
+		return "", fmt.Errorf("refusing to claim non-empty unowned runtime root %s", canonicalRoot)
+	}
+	data, err := json.MarshalIndent(owner, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	file, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return "", errors.Join(err, file.Close(), os.Remove(marker))
+	}
+	if err := file.Close(); err != nil {
+		return "", errors.Join(err, os.Remove(marker))
+	}
+	return canonicalRoot, nil
+}
+
+func removeRuntimeRoot(stateDirectory string, receipt Receipt) error {
+	if receipt.Version < 2 || receipt.RuntimeRoot == "" {
+		return nil
+	}
+	if err := validateReceipt(receipt); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(receipt.RuntimeRoot); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	canonicalStateDirectory, err := canonicalPath(stateDirectory)
+	if err != nil {
+		return fmt.Errorf("resolve state directory: %w", err)
+	}
+	info, err := os.Lstat(receipt.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to remove runtime root that is not a real directory: %s", receipt.RuntimeRoot)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(receipt.RuntimeRoot)
+	if err != nil {
+		return err
+	}
+	if canonicalRoot != receipt.RuntimeRoot || pathsOverlap(canonicalRoot, canonicalStateDirectory) {
+		return fmt.Errorf("refusing to remove unsafe runtime root %s", receipt.RuntimeRoot)
+	}
+	want := runtimeOwner{Version: 1, HostID: receipt.HostID, StateDirectory: canonicalStateDirectory}
+	if err := verifyRuntimeOwner(filepath.Join(canonicalRoot, runtimeOwnerFileName), want); err != nil {
+		return fmt.Errorf("verify runtime ownership: %w", err)
+	}
+	if err := os.RemoveAll(canonicalRoot); err != nil {
+		return fmt.Errorf("remove native runtime root %s: %w", canonicalRoot, err)
+	}
+	return nil
+}
+
+func verifyRuntimeOwner(path string, want runtimeOwner) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("runtime ownership marker is not a regular file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var got runtimeOwner
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&got); err != nil {
+		return err
+	}
+	if decoder.Decode(&struct{}{}) != io.EOF {
+		return fmt.Errorf("runtime ownership marker has trailing data")
+	}
+	if got != want {
+		return fmt.Errorf("runtime ownership does not match local enrollment")
+	}
+	return nil
+}
+
+func pathsOverlap(left, right string) bool {
+	within := func(parent, child string) bool {
+		relative, err := filepath.Rel(parent, child)
+		return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	}
+	return within(left, right) || within(right, left)
 }
 
 func validUserServiceLabel(label, hostSuffix string) bool {
