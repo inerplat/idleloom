@@ -69,8 +69,20 @@ idlectl status
 `idlectl status` reports the local view of both the Native host and the
 Worker; `idlectl get workers` lists enrolled workers cluster-side.
 
-Worker stop and delete refuse active non-DaemonSet Pods unless explicitly
-forced. Remove user workloads before stopping a production Worker.
+Worker stop refuses active non-DaemonSet Pods; drain or remove them first.
+`idlectl delete worker NAME` refuses them too unless `--force` is passed.
+Remove user workloads before stopping a production Worker.
+
+Worker lifecycle verbs reach the cluster with the kubeconfig and context
+recorded at `create worker` time. `--kubeconfig` and `--context` on
+`start worker`, `stop worker`, and `delete worker` override the recorded
+values for that invocation only, kubectl-style; the state file is never
+rewritten. Use them when the recorded kubeconfig moved or its
+current-context changed:
+
+```sh
+idlectl start worker --kubeconfig ~/.kube/config --context my-cluster
+```
 
 ## Resume interrupted enrollment
 

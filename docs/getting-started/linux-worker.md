@@ -184,17 +184,30 @@ and reapplied automatically when a deferred worker is finished with
 ## Load a locally built image
 
 The Worker has its own containerd, so an image built on the Mac is not visible
-to it until you copy it in. `idlectl load image` does that without a registry:
+to it until you copy it in. `idlectl load image` does that without a registry,
+and Pods can then use the image with `imagePullPolicy: IfNotPresent` (or
+`Never`):
 
 ```sh
 docker build --platform linux/arm64 -t my-image:dev .
 idlectl load image my-image:dev
 ```
 
-It accepts several references at once, picks the first of `docker`, `nerdctl`,
-or `podman` on `PATH`, and takes `--archive` for an image tarball you already
-saved. Load before scheduling anything that uses the image, and load again after
-`idlectl delete worker`, because a new VM starts with an empty containerd.
+Multiple references load in one transfer. The image is exported with the first
+of `docker`, `nerdctl`, or `podman` found in `PATH`; pass `--engine` to pick
+one explicitly. A pre-saved archive (docker or OCI tar) loads as-is and needs
+no engine:
+
+```sh
+idlectl load image --archive ./my-app.tar
+```
+
+The worker must be running. Load before scheduling anything that uses the
+image, and load again after `idlectl delete worker`, because a new VM starts
+with an empty containerd. The VM is linux/arm64, so load arm64 images: an
+amd64-only image imports fine but its containers fail with `exec format
+error`. Multi-arch references saved by `docker save` export the platform your
+engine pulled, so pull the arm64 variant first when in doubt.
 
 ## Run an ordinary Pod
 
