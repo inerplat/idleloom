@@ -130,6 +130,14 @@ func runCreateWorker(ctx context.Context, args []string) error {
 		} else {
 			fmt.Printf("Worker: %s (%s network)\n", name, *network)
 		}
+		switch {
+		case *taint == "":
+			fmt.Println("Taint:  none (any Pod can schedule onto this worker)")
+		case strings.HasSuffix(*taint, ":PreferNoSchedule"):
+			fmt.Printf("Taint:  %s (scheduler avoids placing Pods without a matching toleration; disable with --taint \"\")\n", *taint)
+		default:
+			fmt.Printf("Taint:  %s (Pods need a matching toleration; disable with --taint \"\")\n", *taint)
+		}
 		answer, err := prompt(ctx, reader, "Create this worker?", "yes")
 		if err != nil {
 			return err

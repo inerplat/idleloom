@@ -83,6 +83,27 @@ kubectl get node evening-worker -o wide
 The Node must report `Ready` and carry labels `idleloom-worker=true` and
 `idleloom-accelerator=apple-vulkan`.
 
+### Dedicated taint
+
+The worker registers with the taint `idleloom-dedicated=compute:NoSchedule` by
+default, so ordinary cluster Pods do not drift onto a personal Mac. Only Pods
+that opt in with a toleration schedule here:
+
+```yaml
+tolerations:
+  - key: idleloom-dedicated
+    operator: Exists
+    effect: NoSchedule
+```
+
+Every worker example under `examples/worker/` and every worker recipe already
+carries this toleration. Pass `--taint KEY=VALUE:EFFECT` at `create worker`
+time to use a different taint, or `--taint ""` to register an untainted worker
+that accepts any Pod. The shipped tolerations match only the
+`idleloom-dedicated` key with the `NoSchedule` effect, so a taint with a
+different key or effect leaves those Pods Pending until their tolerations are
+edited to match.
+
 ## Managed-cluster deferred readiness
 
 Some managed clusters require an operator to publish CNI images or place a
