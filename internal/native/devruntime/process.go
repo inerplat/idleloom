@@ -83,7 +83,7 @@ func Start(ctx context.Context, config ProcessConfig) (*Process, error) {
 	if _, err := hex.DecodeString(config.Nonce); err != nil || strings.ToLower(config.Nonce) != config.Nonce {
 		return nil, fmt.Errorf("runner nonce must contain 64 lowercase hex characters")
 	}
-	profile, err := sandboxProfile(config.Layout, config.DeniedPaths)
+	profile, err := sandboxProfile(config.Layout, config.DeniedPaths, "")
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +293,7 @@ func (p *Process) readResponses(reader io.Reader) {
 	}
 }
 
-func sandboxProfile(layout Layout, denied []string) (string, error) {
+func sandboxProfile(layout Layout, denied []string, serveAddress string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -366,7 +366,12 @@ func sandboxProfile(layout Layout, denied []string) (string, error) {
 	rules.WriteString("(allow file-issue-extension (require-all (subpath \"")
 	rules.WriteString(escapeSandbox(pythonResources))
 	rules.WriteString("\") (extension-class \"com.apple.app-sandbox.read\")))\n")
-	rules.WriteString("(deny network*)\n")
+	if serveAddress == "" {
+		rules.WriteString("(deny network*)\n")
+	} else {
+		rules.WriteString("(deny network*)\n")
+		fmt.Fprintf(&rules, "(allow network-bind network-inbound (local ip \"%s\"))\n", escapeSandbox(serveAddress))
+	}
 	return rules.String(), nil
 }
 

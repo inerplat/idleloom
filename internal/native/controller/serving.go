@@ -2,8 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -17,7 +15,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
@@ -32,150 +29,6 @@ type servingEndpointResult struct {
 	Ready   bool
 	Reason  string
 	Message string
-}
-
-func (r *Reconciler) ensureServingSecrets(ctx context.Context, workload *nativev1alpha1.IdleloomWorkload, intent *nativev1alpha1.WorkloadSchedulingIntent) error {
-	if workload.Spec.Server == nil {
-		return nil
-	}
-	if r.Kubernetes == nil {
-		return fmt.Errorf("kubernetes client is required for Native serving")
-	}
-	hostObject, err := r.Dynamic.Resource(nativekube.HostsGVR).Namespace(intent.HostRef.Namespace).Get(ctx, intent.HostRef.Name, metav1.GetOptions{})
-	if err != nil {
-		return fmt.Errorf("get serving host: %w", err)
-	}
-	var host nativev1alpha1.IdleloomHost
-	if err := nativekube.FromUnstructured(hostObject, &host); err != nil {
-		return err
-	}
-	if host.UID != intent.HostRef.UID {
-		return fmt.Errorf("serving host identity changed")
-	}
-	labels := map[string]string{
-		"app.kubernetes.io/managed-by": servingManagedBy,
-		servingWorkloadUIDLabel:        string(workload.UID),
-		servingExecutionIDLabel:        intent.ExecutionID,
-		servingServiceLabel:            workload.Spec.Server.ServiceName,
-	}
-	clientSecretName := workload.Spec.Server.ServiceName + "-auth"
-	clientSecrets := r.Kubernetes.CoreV1().Secrets(workload.Namespace)
-	clientSecret, err := clientSecrets.Get(ctx, clientSecretName, metav1.GetOptions{})
-	clientMissing := apierrors.IsNotFound(err)
-	if err != nil && !clientMissing {
-		return fmt.Errorf("get client serving Secret: %w", err)
-	}
-	hostSecrets := r.Kubernetes.CoreV1().Secrets(host.Namespace)
-	hostSecret, err := hostSecrets.Get(ctx, nativev1alpha1.ServingAuthSecretName, metav1.GetOptions{})
-	hostMissing := apierrors.IsNotFound(err)
-	if err != nil && !hostMissing {
-		return fmt.Errorf("get host serving Secret: %w", err)
-	}
-	var key []byte
-	if !clientMissing {
-		key, err = validateServingSecret(clientSecret, workload, intent.ExecutionID, clientSecretName)
-		if err != nil {
-			return err
-		}
-	}
-	if !hostMissing {
-		hostKey, keyErr := validateServingSecret(hostSecret, workload, intent.ExecutionID, nativev1alpha1.ServingAuthSecretName)
-		if keyErr != nil {
-			return keyErr
-		}
-		if key == nil {
-			key = hostKey
-		} else if !reflect.DeepEqual(key, hostKey) {
-			return fmt.Errorf("client and host serving Secrets contain different API keys")
-		}
-	}
-	if key == nil {
-		key, err = generateServingAPIKey()
-		if err != nil {
-			return err
-		}
-	}
-	if clientMissing {
-		clientSecret, err = clientSecrets.Create(ctx, servingClientSecret(workload, labels, clientSecretName, key), metav1.CreateOptions{})
-		if apierrors.IsAlreadyExists(err) {
-			clientSecret, err = clientSecrets.Get(ctx, clientSecretName, metav1.GetOptions{})
-		}
-		if err != nil {
-			return fmt.Errorf("ensure client serving Secret: %w", err)
-		}
-		createdKey, keyErr := validateServingSecret(clientSecret, workload, intent.ExecutionID, clientSecretName)
-		if keyErr != nil || !reflect.DeepEqual(key, createdKey) {
-			return errors.Join(keyErr, fmt.Errorf("client serving Secret key changed during creation"))
-		}
-	}
-	if hostMissing {
-		hostSecret, err = hostSecrets.Create(ctx, servingHostSecret(&host, labels, key), metav1.CreateOptions{})
-		if apierrors.IsAlreadyExists(err) {
-			hostSecret, err = hostSecrets.Get(ctx, nativev1alpha1.ServingAuthSecretName, metav1.GetOptions{})
-		}
-		if err != nil {
-			return fmt.Errorf("ensure host serving Secret: %w", err)
-		}
-		createdKey, keyErr := validateServingSecret(hostSecret, workload, intent.ExecutionID, nativev1alpha1.ServingAuthSecretName)
-		if keyErr != nil || !reflect.DeepEqual(key, createdKey) {
-			return errors.Join(keyErr, fmt.Errorf("host serving Secret key changed during creation"))
-		}
-	}
-	return nil
-}
-
-func servingClientSecret(workload *nativev1alpha1.IdleloomWorkload, labels map[string]string, name string, key []byte) *corev1.Secret {
-	immutable := true
-	controller := true
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: workload.Namespace, Labels: labels,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomWorkload",
-				Name: workload.Name, UID: workload.UID, Controller: &controller,
-			}},
-		},
-		Immutable: &immutable, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{"api-key": append([]byte(nil), key...)},
-	}
-}
-
-func servingHostSecret(host *nativev1alpha1.IdleloomHost, labels map[string]string, key []byte) *corev1.Secret {
-	immutable := true
-	controller := true
-	return &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: nativev1alpha1.ServingAuthSecretName, Namespace: host.Namespace, Labels: labels,
-			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomHost",
-				Name: host.Name, UID: host.UID, Controller: &controller,
-			}},
-		},
-		Immutable: &immutable, Type: corev1.SecretTypeOpaque, Data: map[string][]byte{"api-key": append([]byte(nil), key...)},
-	}
-}
-
-func validateServingSecret(secret *corev1.Secret, workload *nativev1alpha1.IdleloomWorkload, executionID, name string) ([]byte, error) {
-	if secret.Labels["app.kubernetes.io/managed-by"] != servingManagedBy ||
-		secret.Labels[servingWorkloadUIDLabel] != string(workload.UID) ||
-		secret.Labels[servingExecutionIDLabel] != executionID ||
-		secret.Labels[servingServiceLabel] != workload.Spec.Server.ServiceName {
-		return nil, fmt.Errorf("secret %s/%s is not owned by this Native serving execution", secret.Namespace, name)
-	}
-	key := secret.Data["api-key"]
-	if len(key) < 32 || len(key) > 256 {
-		return nil, fmt.Errorf("secret %s/%s has an invalid api-key", secret.Namespace, name)
-	}
-	return append([]byte(nil), key...), nil
-}
-
-func generateServingAPIKey() ([]byte, error) {
-	var value [32]byte
-	if _, err := rand.Read(value[:]); err != nil {
-		return nil, fmt.Errorf("generate Native serving API key: %w", err)
-	}
-	encoded := make([]byte, hex.EncodedLen(len(value)))
-	hex.Encode(encoded, value[:])
-	return encoded, nil
 }
 
 func (r *Reconciler) reconcileServingEndpoint(ctx context.Context, workload *nativev1alpha1.IdleloomWorkload) (servingEndpointResult, error) {
@@ -196,10 +49,6 @@ func (r *Reconciler) reconcileServingEndpoint(ctx context.Context, workload *nat
 		return r.failServingEndpoint(ctx, workload,
 			servingEndpointResult{Reason: "ServingIntentMissing", Message: "the serving assignment has no scheduling intent"},
 			fmt.Errorf("serving workload has an assignment without scheduling intent"))
-	}
-	if err := r.ensureServingSecrets(ctx, workload, workload.Status.SchedulingIntent); err != nil {
-		return r.failServingEndpoint(ctx, workload,
-			servingEndpointResult{Reason: "ServingSecretsUnavailable", Message: "the Native serving credentials are unavailable"}, err)
 	}
 	service, err := r.Kubernetes.CoreV1().Services(workload.Namespace).Get(ctx, workload.Spec.Server.ServiceName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
@@ -392,32 +241,6 @@ func (r *Reconciler) cleanupServingResources(ctx context.Context, workload *nati
 	if workload.Spec.Server == nil || r.Kubernetes == nil {
 		return nil
 	}
-	var errs []error
-	if err := r.deleteServingEndpoint(ctx, workload); err != nil {
-		errs = append(errs, err)
-	}
-	if hostNamespace != "" {
-		if err := r.deleteServingSecret(ctx, hostNamespace, nativev1alpha1.ServingAuthSecretName, workload.UID); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if err := r.deleteServingSecret(ctx, workload.Namespace, workload.Spec.Server.ServiceName+"-auth", workload.UID); err != nil {
-		errs = append(errs, err)
-	}
-	return errors.Join(errs...)
-}
-
-func (r *Reconciler) deleteServingSecret(ctx context.Context, namespace, name string, workloadUID types.UID) error {
-	secrets := r.Kubernetes.CoreV1().Secrets(namespace)
-	secret, err := secrets.Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if secret.Labels["app.kubernetes.io/managed-by"] != servingManagedBy || secret.Labels[servingWorkloadUIDLabel] != string(workloadUID) {
-		return fmt.Errorf("refusing to delete Secret %s/%s outside the Native serving contract", namespace, name)
-	}
-	return secrets.Delete(ctx, name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &secret.UID}})
+	_ = hostNamespace
+	return r.deleteServingEndpoint(ctx, workload)
 }

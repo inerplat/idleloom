@@ -238,7 +238,7 @@ func TestNativeServeRenderProducesWorkloadAndSelectorlessService(t *testing.T) {
 	if workload.Spec.Mode != nativev1alpha1.WorkloadModeServer || workload.Spec.Server == nil || workload.Spec.Server.ServiceName != "native-serve" || workload.Spec.Server.ModelAlias != "qwen3-5-0-8b" {
 		t.Fatalf("Native serving workload = %#v", workload.Spec)
 	}
-	if service.Spec.Type != corev1.ServiceTypeClusterIP || len(service.Spec.Selector) != 0 || service.Annotations["ai.idleloom.io/native-workload"] != workload.Name || service.Annotations["ai.idleloom.io/auth-secret"] != "native-serve-auth" {
+	if service.Spec.Type != corev1.ServiceTypeClusterIP || len(service.Spec.Selector) != 0 || service.Annotations["ai.idleloom.io/native-workload"] != workload.Name {
 		t.Fatalf("Native serving Service = %#v", service)
 	}
 	assertMetadataContract(t, workload.Labels, workload.Annotations, "native-serve", "serve", "native", "mlx", nativeServeID, result.RecipeDigest, result.InputDigest)

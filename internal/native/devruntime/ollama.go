@@ -76,6 +76,12 @@ type OllamaProcessConfig struct {
 	DeniedPaths   []string
 	ReadyTimeout  time.Duration
 	OnSpawn       func(int) error
+	// ServeAddress binds the private Ollama daemon's own API, including its
+	// OpenAI-compatible endpoints, to the given non-loopback IPv4 host:port so
+	// clients reach the runtime directly. Empty keeps the loopback binding
+	// used for batch inference. The endpoint is unauthenticated by design;
+	// callers who need authentication put their own gateway in front.
+	ServeAddress string
 }
 
 type OllamaProcess struct {
@@ -226,7 +232,13 @@ func StartOllama(ctx context.Context, config OllamaProcessConfig) (*OllamaProces
 	if err != nil {
 		return nil, err
 	}
-	profile, err := ollamaSandboxProfile(config.Runtime, config.WorkDirectory, config.DeniedPaths)
+	if config.ServeAddress != "" {
+		if _, _, err := validateServeAddress(config.ServeAddress); err != nil {
+			return nil, err
+		}
+		address = config.ServeAddress
+	}
+	profile, err := ollamaSandboxProfile(config.Runtime, config.WorkDirectory, config.DeniedPaths, config.ServeAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -740,7 +752,7 @@ func unusedLoopbackAddress() (string, error) {
 	return address, nil
 }
 
-func ollamaSandboxProfile(runtime OllamaRuntime, workDirectory string, denied []string) (string, error) {
+func ollamaSandboxProfile(runtime OllamaRuntime, workDirectory string, denied []string, serveAddress string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -783,5 +795,8 @@ func ollamaSandboxProfile(runtime OllamaRuntime, workDirectory string, denied []
 	}
 	rules.WriteString("(allow network-bind network-inbound (local ip \"localhost:*\"))\n")
 	rules.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
+	if serveAddress != "" {
+		fmt.Fprintf(&rules, "(allow network-bind network-inbound (local ip \"%s\"))\n", escapeSandbox(serveAddress))
+	}
 	return rules.String(), nil
 }

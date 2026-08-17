@@ -43,7 +43,6 @@ metadata:
     ai.idleloom.io/recipe-digest: {{ quote .RecipeDigest }}
     ai.idleloom.io/input-digest: {{ quote .InputDigest }}
     ai.idleloom.io/native-workload: {{ quote .Name }}
-    ai.idleloom.io/auth-secret: {{ quote (printf "%s-auth" .Name) }}
 spec:
   type: ClusterIP
   ports:

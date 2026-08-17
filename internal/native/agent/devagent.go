@@ -49,6 +49,7 @@ type DevAgentConfig struct {
 	StartProcess           func(context.Context, devruntime.ProcessConfig) (Process, error)
 	StartOllama            func(context.Context, devruntime.OllamaProcessConfig) (Process, error)
 	StartLlamaCpp          func(context.Context, devruntime.LlamaCppProcessConfig) (Process, error)
+	StartMLXServe          func(context.Context, devruntime.MLXServeConfig) (Process, error)
 	StartShell             func(context.Context, devruntime.ShellConfig) (Process, error)
 	StartTraining          func(context.Context, devruntime.TrainingConfig) (Process, error)
 	ResolveOllama          func() (devruntime.OllamaRuntime, []devruntime.OllamaModel, error)
@@ -167,6 +168,11 @@ func NewDevAgent(config DevAgentConfig) (*DevAgent, error) {
 	if config.StartLlamaCpp == nil {
 		config.StartLlamaCpp = func(ctx context.Context, processConfig devruntime.LlamaCppProcessConfig) (Process, error) {
 			return devruntime.StartLlamaCpp(ctx, processConfig)
+		}
+	}
+	if config.StartMLXServe == nil {
+		config.StartMLXServe = func(ctx context.Context, serveConfig devruntime.MLXServeConfig) (Process, error) {
+			return devruntime.StartMLXServe(ctx, serveConfig)
 		}
 	}
 	if config.StartShell == nil {
@@ -779,6 +785,17 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 				Output:  &agentLogWriter{agent: a, onLine: a.observeRunProtocol}, OnSpawn: onSpawn,
 			})
 		} else {
+			// Serving binds the runtime's own OpenAI-compatible server to the
+			// WireKube address; batch keeps the loopback binding and the
+			// in-process generate call. The endpoint is unauthenticated by
+			// design, matching ordinary cluster-private Services; anyone who
+			// needs authentication fronts it with their own gateway.
+			serveAddress := ""
+			modelAlias := ""
+			if assignment.Spec.Model.Server != nil {
+				serveAddress = a.config.ServeListenAddress
+				modelAlias = assignment.Spec.Model.Server.ModelAlias
+			}
 			switch assignment.Spec.Model.RuntimeProfile {
 			case nativev1alpha1.RuntimeProfileOllamaGGUFV1:
 				process, err = a.config.StartOllama(startupCtx, devruntime.OllamaProcessConfig{
@@ -787,6 +804,7 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 					WorkDirectory: ollamaWorkDirectory(a.config.Layout, assignment.UID),
 					DeniedPaths:   []string{a.config.StateDirectory, a.config.KubeconfigPath},
 					ReadyTimeout:  2 * time.Minute, OnSpawn: onSpawn,
+					ServeAddress: serveAddress,
 				})
 			case nativev1alpha1.RuntimeProfileLlamaCppMetalV1:
 				process, err = a.config.StartLlamaCpp(startupCtx, devruntime.LlamaCppProcessConfig{
@@ -795,29 +813,27 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 					WorkDirectory: llamaCppWorkDirectory(a.config.Layout, assignment.UID),
 					DeniedPaths:   []string{a.config.StateDirectory, a.config.KubeconfigPath},
 					ReadyTimeout:  5 * time.Minute, OnSpawn: onSpawn,
+					ServeAddress: serveAddress, ModelAlias: modelAlias,
 				})
 			default:
-				process, err = a.config.StartProcess(startupCtx, devruntime.ProcessConfig{
-					Layout: a.config.Layout, DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
-					ReadyTimeout: 5 * time.Minute, Nonce: nonce, OnSpawn: onSpawn,
-				})
-			}
-			if err == nil {
-				switch {
-				case assignment.Spec.Model.Batch != nil:
-					batch := assignment.Spec.Model.Batch
-					process = startBatchProcess(process, devruntime.GenerateRequest{
-						Prompt: batch.Prompt, MaxTokens: int(batch.MaxTokens),
-					}, time.Duration(batch.TimeoutSeconds)*time.Second, &agentLogWriter{agent: a})
-				case assignment.Spec.Model.Server != nil:
-					key, keyErr := a.resolveServingKey(startupCtx, assignment)
-					if keyErr != nil {
-						_ = process.Stop()
-						err = keyErr
-						break
-					}
-					process, err = startServeProcess(process, a.config.ServeListenAddress, assignment.Spec.Model.Server.ModelAlias, key, a)
+				if assignment.Spec.Model.Server != nil {
+					process, err = a.config.StartMLXServe(startupCtx, devruntime.MLXServeConfig{
+						Layout: a.config.Layout, ServeAddress: serveAddress,
+						DeniedPaths:  []string{a.config.StateDirectory, a.config.KubeconfigPath},
+						ReadyTimeout: 5 * time.Minute, OnSpawn: onSpawn,
+					})
+				} else {
+					process, err = a.config.StartProcess(startupCtx, devruntime.ProcessConfig{
+						Layout: a.config.Layout, DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
+						ReadyTimeout: 5 * time.Minute, Nonce: nonce, OnSpawn: onSpawn,
+					})
 				}
+			}
+			if err == nil && assignment.Spec.Model.Batch != nil {
+				batch := assignment.Spec.Model.Batch
+				process = startBatchProcess(process, devruntime.GenerateRequest{
+					Prompt: batch.Prompt, MaxTokens: int(batch.MaxTokens),
+				}, time.Duration(batch.TimeoutSeconds)*time.Second, &agentLogWriter{agent: a})
 			}
 		}
 		completed <- result{process: process, err: err}

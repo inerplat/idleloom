@@ -37,10 +37,6 @@ rules:
     resources: ["serviceaccounts/token"]
     resourceNames: ["idleloom-agent"]
     verbs: ["create"]
-  - apiGroups: [""]
-    resources: ["secrets"]
-    resourceNames: ["active-serve-auth"]
-    verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

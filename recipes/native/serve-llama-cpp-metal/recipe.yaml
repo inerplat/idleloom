@@ -1,6 +1,6 @@
 name: serve/llama-cpp-metal
 version: v1
-description: Serve a digest-pinned GGUF file with llama.cpp, full Apple Metal offload, and an authenticated cluster-private Service.
+description: Serve a digest-pinned GGUF file with llama.cpp, full Apple Metal offload, and an unauthenticated cluster-private Service.
 task: serve
 backend: native
 runtime: llama-cpp-metal
@@ -12,4 +12,3 @@ prerequisites:
 - A real schedulable Linux kubelet node on the WireKube mesh for in-cluster clients.
 - llama-server on PATH and the exact GGUF file under the managed models/gguf directory.
 - A cluster-scoped IdleloomModel that pins the GGUF filename, size, and SHA-256 digest.
-- Cluster access to read the controller-generated SERVICE-auth Secret.

@@ -180,3 +180,44 @@ func TestLlamaCppGenerateRejectsErrorAndTrailingJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateServeAddress(t *testing.T) {
+	if _, _, err := validateServeAddress("198.18.18.104:18080"); err != nil {
+		t.Fatalf("mesh address rejected: %v", err)
+	}
+	for name, address := range map[string]string{
+		"loopback":     "127.0.0.1:18080",
+		"unspecified":  "0.0.0.0:18080",
+		"ipv6":         "[fd00::1]:18080",
+		"wrong port":   "198.18.18.104:8080",
+		"missing port": "198.18.18.104",
+		"hostname":     "example.com:18080",
+	} {
+		if _, _, err := validateServeAddress(address); err == nil {
+			t.Fatalf("%s address %q was accepted", name, address)
+		}
+	}
+}
+
+func TestLlamaCppSandboxProfileAllowsServeBind(t *testing.T) {
+	directory := t.TempDir()
+	modelPath := filepath.Join(directory, "model.gguf")
+	if err := os.WriteFile(modelPath, []byte("GGUF"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := LlamaCppRuntime{Executable: "/opt/homebrew/bin/llama-server", ModelsDirectory: directory}
+	confined, err := llamaCppSandboxProfile(runtime, modelPath, directory, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(confined, "198.18.18.104") {
+		t.Fatal("batch profile allows a serve bind")
+	}
+	serving, err := llamaCppSandboxProfile(runtime, modelPath, directory, nil, "198.18.18.104:18080")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(serving, `(allow network-bind network-inbound (local ip "198.18.18.104:18080"))`) {
+		t.Fatal("serving profile does not allow binding the mesh address")
+	}
+}

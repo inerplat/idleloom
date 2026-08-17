@@ -191,7 +191,7 @@ func (p Planner) PlanAssignment(workload *nativev1alpha1.IdleloomWorkload, model
 		if workload.Spec.Server != nil {
 			assignment.Spec.Model.Server = &nativev1alpha1.ResolvedServer{
 				ServiceName: workload.Spec.Server.ServiceName, ModelAlias: workload.Spec.Server.ModelAlias,
-				AuthSecretName: nativev1alpha1.ServingAuthSecretName, Port: nativev1alpha1.NativeServingPort,
+				Port: nativev1alpha1.NativeServingPort,
 			}
 		}
 	} else if workload.Spec.Train != nil {

@@ -30,16 +30,8 @@ spec:
       command: ["/bin/sh", "-ec"]
       args:
         - |
-          STATUS="$(curl --silent --output /dev/null --write-out '%{http_code}' \
-            http://native-mlx-serve.default.svc:8000/v1/chat/completions \
-            -H 'Content-Type: application/json' \
-            -d '{"model":"qwen3-5-0-8b","messages":[{"role":"user","content":"unauthenticated probe"}],"max_tokens":1}')"
-          test "${STATUS}" = 401
-
-          API_KEY="$(cat /var/run/secrets/idleloom/api-key)"
           curl --fail-with-body \
             http://native-mlx-serve.default.svc:8000/v1/chat/completions \
-            -H "Authorization: Bearer ${API_KEY}" \
             -H 'Content-Type: application/json' \
             -d '{"model":"qwen3-5-0-8b","messages":[{"role":"user","content":"Why is idle compute useful?"}],"max_tokens":64}'
       securityContext:
@@ -50,11 +42,3 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
-      volumeMounts:
-        - name: auth
-          mountPath: /var/run/secrets/idleloom
-          readOnly: true
-  volumes:
-    - name: auth
-      secret:
-        secretName: native-mlx-serve-auth

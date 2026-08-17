@@ -551,9 +551,13 @@ kubectl -n "${IDLELOOM_NAMESPACE}" wait --for=condition=Ready \
 kubectl -n "${IDLELOOM_NAMESPACE}" get endpointslice/native-mlx-serve
 ```
 
-The controller generates `Secret/native-mlx-serve-auth` in the workload namespace
-and copies the same API key into a fixed, agent-readable Secret in the selected
-host namespace. Secret values never enter the Workload or Assignment CRs.
+The endpoint is unauthenticated, like an ordinary cluster-private ClusterIP
+Service: reaching it requires being inside the cluster network, and nothing
+more. Put your own gateway in front, such as litellm or an authenticating
+ingress, when tenants beyond the cluster boundary need access or when you want
+per-client keys. Traffic between the cluster and the Mac is encrypted by
+WireGuard either way.
+
 The client must run on a real schedulable Linux kubelet node that participates
 in the WireKube mesh. The example clients tolerate Idleloom's default Worker
 taint and require Pod affinity to a `wirekube-agent` or
@@ -561,8 +565,7 @@ taint and require Pod affinity to a `wirekube-agent` or
 deliberately unschedulable and cannot run these Pods.
 
 The repository provides one complete, digest-pinned client manifest for each
-Native runtime. Each client asserts an unauthenticated HTTP 401 before making
-an authenticated request. Apply the MLX client, wait for completion, and read
+Native runtime. Apply the MLX client, wait for completion, and read
 the response:
 
 ```sh
@@ -581,34 +584,22 @@ alpha path publishes the Mac through a WireKube `EndpointSlice`; `kubectl
 proxy` therefore cannot expose this Service. The logs-only projection also
 does not implement `kubectl port-forward` yet.
 
-The current adapter implements
-non-streaming chat completions, `GET /v1/models`, and a 512-token response
-limit. Three differences from a full OpenAI server matter to clients:
-
-- The request body accepts `model`, `messages`, and `max_tokens` only. Any other
-  field, including ordinary sampling controls such as `temperature`, is rejected
-  with HTTP 400 and a body of `invalid request` that does not name the field.
-  Strip unsupported fields before pointing a general OpenAI client at this
-  Service.
-- Responses carry no `usage` object, so token counts are not observable through
-  the API.
-- A reasoning model can spend the whole `max_tokens` budget inside its thinking
-  block. The adapter returns the visible text only, so the response is an empty
-  `content` with `finish_reason` `stop`, which is indistinguishable from a model
-  that simply had nothing to say. Raise `max_tokens` when a reply comes back
-  empty. One generation may run at a time; concurrent requests receive HTTP 429
-with `Retry-After: 1` instead of waiting in an unbounded queue. A generation
-already accepted by the model finishes even if its client disconnects, so the
-shared model process remains available for later requests. Traffic to the Mac
-is encrypted by WireGuard and authenticated with the generated API key; this
-slice does not add application-layer TLS or expose an Ingress. The first MLX
-request path may require the same approximately 650 MB locked runtime and
-model preparation as Native batch inference.
+The Service fronts the runtime's own OpenAI-compatible server, not an
+Idleloom-specific adapter, so standard clients work as they do against any
+OpenAI endpoint: streaming with `stream: true`, sampling controls such as
+`temperature`, chat templates applied to the full message list, and `usage`
+in responses, each to the extent the runtime implements them. llama.cpp serves
+its complete `llama-server` API, Ollama serves its usual `/v1` endpoints plus
+its native API, and MLX serves `mlx_lm.server` from the locked wheel. Request
+concurrency is whatever the runtime allows; llama.cpp queues on its single
+slot rather than rejecting. This slice does not add application-layer TLS or
+expose an Ingress. The first MLX request path may require the same
+approximately 650 MB locked runtime and model preparation as Native batch
+inference.
 
 To serve the pinned local GGUF model instead, render
-`serve/ollama-gguf@v1`. The Service, generated Secret, authentication,
-concurrency limit, and OpenAI-compatible API are identical; only the private
-model process changes:
+`serve/ollama-gguf@v1`. The Service wiring, concurrency behavior, and
+OpenAI-compatible API are identical; only the private model process changes:
 
 ```sh
 idlectl recipe render serve/ollama-gguf@v1 \
@@ -623,9 +614,9 @@ kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
 kubectl -n default logs pod/native-ollama-serve-client
 ```
 
-The client uses model alias `qwen3-5-9b`, Service
-`native-ollama-serve.default.svc`, and generated Secret
-`native-ollama-serve-auth`. For a custom catalog, create a serving values file
+The client uses model alias `qwen3-5-9b` through Service
+`native-ollama-serve.default.svc`. Ollama's own API also accepts its native
+model tag. For a custom catalog, create a serving values file
 with `model`, `modelAlias`, `servicePort`, `namespace`, and `unifiedMemory`, then
 pass it through `--values` when rendering.
 
@@ -647,15 +638,13 @@ kubectl -n default logs pod/native-llama-serve-client
 ```
 
 The client calls model alias `local-gguf` through Service
-`native-llama-serve.default.svc` with generated Secret
-`native-llama-serve-auth`. Authentication, the one-request concurrency limit,
-restart behavior, and cluster-private WireKube endpoint are identical to MLX
-and Ollama serving. The private llama.cpp server itself remains bound to
-loopback; only Idleloom's authenticated adapter listens on the host mesh
-address.
+`native-llama-serve.default.svc`. Restart behavior and the cluster-private
+WireKube endpoint are identical to MLX and Ollama serving. When serving,
+llama-server itself binds the host's mesh address, so its full API surface,
+streaming included, is what clients see; the loopback binding remains for
+batch inference.
 
-Delete the manifest to stop the process and remove its EndpointSlice and
-managed Secrets:
+Delete the manifest to stop the process and remove its EndpointSlice:
 
 ```sh
 kubectl -n default delete pod/native-mlx-serve-client \

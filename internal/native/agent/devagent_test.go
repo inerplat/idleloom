@@ -1288,3 +1288,136 @@ func (fakeAgentPlatform) FindRunnerPIDs(context.Context, string, string) ([]int,
 	return nil, nil
 }
 func (fakeAgentPlatform) KillProcessGroupAndWait(context.Context, int) error { return nil }
+
+func TestEnsureProcessServesThroughRuntimeOwnServer(t *testing.T) {
+	store, err := execution.Open(filepath.Join(t.TempDir(), "execution.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	model := devruntime.LlamaCppModel{
+		Name: "llama-3.2-3b.gguf", ManifestDigest: "sha256:" + strings.Repeat("e", 64),
+		Family: nativev1alpha1.ModelFamilyGGUF, Format: nativev1alpha1.ArtifactFormatGGUFV1, SizeBytes: 2048,
+	}
+	underlying := &fakeBatchRunner{alive: true, waitForCancellation: true, pid: 125}
+	agent := &DevAgent{
+		store: store, logs: kubeletbridge.NewLogBuffer(1 << 20),
+		config: DevAgentConfig{
+			AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()), StateDirectory: t.TempDir(),
+			Platform: fakeAgentPlatform{}, ServeListenAddress: "198.18.18.104:18080",
+			ResolveLlamaCpp: func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, map[string]devruntime.GGUFMemoryProfile, error) {
+				return devruntime.LlamaCppRuntime{Executable: "/opt/homebrew/bin/llama-server", Version: "9960-a935fbffe", Device: "MTL0"}, []devruntime.LlamaCppModel{model}, nil, nil
+			},
+			StartLlamaCpp: func(_ context.Context, config devruntime.LlamaCppProcessConfig) (Process, error) {
+				if config.ServeAddress != "198.18.18.104:18080" || config.ModelAlias != "local-gguf" {
+					t.Fatalf("serving config = serveAddress %q alias %q", config.ServeAddress, config.ModelAlias)
+				}
+				if err := config.OnSpawn(125); err != nil {
+					return nil, err
+				}
+				return underlying, nil
+			},
+		},
+	}
+	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("llama-serve-assignment"), Generation: 1},
+		Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+			DesiredState: nativev1alpha1.AssignmentDesiredRunning,
+			WorkloadRef:  nativev1alpha1.WorkloadObjectReference{Namespace: "default", Name: "serve", UID: types.UID("workload-uid"), Generation: 1},
+			Model: &nativev1alpha1.ResolvedModel{
+				CatalogRef: nativev1alpha1.ObjectReference{Name: "local-gguf", UID: types.UID("model-uid")},
+				Family:     model.Family, RuntimeProfile: nativev1alpha1.RuntimeProfileLlamaCppMetalV1,
+				Artifact: nativev1alpha1.ModelArtifact{
+					GGUFFile: model.Name, ManifestDigest: model.ManifestDigest,
+					Format: model.Format, SizeBytes: model.SizeBytes,
+				},
+				UnifiedMemoryRequest: resource.MustParse("8Gi"), MaxContextLength: 2048, MaxConcurrentRequests: 1,
+				Server: &nativev1alpha1.ResolvedServer{
+					ServiceName: "qwen-chat", ModelAlias: "local-gguf", Port: nativev1alpha1.NativeServingPort,
+				},
+			},
+			ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 1, LeaseDurationSeconds: 30,
+		},
+	}
+	if err := agent.ensureProcess(context.Background(), assignment); err != nil {
+		t.Fatal(err)
+	}
+	// The runtime process itself is the serving process; nothing wraps it.
+	if agent.process != Process(underlying) {
+		t.Fatalf("serving process = %#v, want the runtime process unwrapped", agent.process)
+	}
+	if err := agent.stopProcess(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEnsureProcessServesMLXThroughOwnServer(t *testing.T) {
+	store, err := execution.Open(filepath.Join(t.TempDir(), "execution.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	descriptor, err := devruntime.LockedModel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	underlying := &fakeBatchRunner{alive: true, waitForCancellation: true, pid: 126}
+	mlxServeCalls := 0
+	agent := &DevAgent{
+		store: store, logs: kubeletbridge.NewLogBuffer(1 << 20),
+		config: DevAgentConfig{
+			AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()), StateDirectory: t.TempDir(),
+			Platform: fakeAgentPlatform{}, ServeListenAddress: "198.18.18.104:18080",
+			PrepareRuntime: func(context.Context, func(string)) (devruntime.Receipt, error) {
+				return devruntime.Receipt{
+					ArtifactIdentity: descriptor.ArtifactIdentity, ManifestDigest: descriptor.ManifestDigest,
+					RuntimeVersion: devruntime.RuntimeVersion,
+				}, nil
+			},
+			StartMLXServe: func(_ context.Context, config devruntime.MLXServeConfig) (Process, error) {
+				mlxServeCalls++
+				if config.ServeAddress != "198.18.18.104:18080" {
+					t.Fatalf("MLX serve address = %q", config.ServeAddress)
+				}
+				if err := config.OnSpawn(126); err != nil {
+					return nil, err
+				}
+				return underlying, nil
+			},
+			StartProcess: func(context.Context, devruntime.ProcessConfig) (Process, error) {
+				t.Fatal("MLX serving must not start the batch runner")
+				return nil, nil
+			},
+		},
+	}
+	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("mlx-serve-assignment"), Generation: 1},
+		Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+			DesiredState: nativev1alpha1.AssignmentDesiredRunning,
+			WorkloadRef:  nativev1alpha1.WorkloadObjectReference{Namespace: "default", Name: "serve", UID: types.UID("workload-uid"), Generation: 1},
+			Model: &nativev1alpha1.ResolvedModel{
+				CatalogRef: nativev1alpha1.ObjectReference{Name: "qwen-approved", UID: types.UID("model-uid")},
+				Family:     nativev1alpha1.ModelFamilyQwen35, RuntimeProfile: nativev1alpha1.RuntimeProfileMLXLMV1,
+				Artifact: nativev1alpha1.ModelArtifact{
+					OCIReference: descriptor.ArtifactIdentity, ManifestDigest: descriptor.ManifestDigest,
+					Format: nativev1alpha1.ArtifactFormatSafetensorsV1, SizeBytes: 1024,
+					Signature: &nativev1alpha1.SignaturePolicy{Issuer: "https://issuer.example", Subject: "publisher"},
+				},
+				UnifiedMemoryRequest: resource.MustParse("8Gi"), MaxContextLength: 2048, MaxConcurrentRequests: 1,
+				Server: &nativev1alpha1.ResolvedServer{
+					ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b", Port: nativev1alpha1.NativeServingPort,
+				},
+			},
+			ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 1, LeaseDurationSeconds: 30,
+		},
+	}
+	if err := agent.ensureProcess(context.Background(), assignment); err != nil {
+		t.Fatal(err)
+	}
+	if mlxServeCalls != 1 {
+		t.Fatalf("StartMLXServe calls = %d, want 1", mlxServeCalls)
+	}
+	if err := agent.stopProcess(); err != nil {
+		t.Fatal(err)
+	}
+}

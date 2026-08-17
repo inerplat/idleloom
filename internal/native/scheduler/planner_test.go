@@ -219,7 +219,7 @@ func TestPlannerCopiesConnectedServerIntent(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := assignment.Spec.Model.Server
-	if server == nil || server.ServiceName != "qwen-chat" || server.ModelAlias != "qwen3-5-0-8b" || server.AuthSecretName != nativev1alpha1.ServingAuthSecretName || server.Port != nativev1alpha1.NativeServingPort {
+	if server == nil || server.ServiceName != "qwen-chat" || server.ModelAlias != "qwen3-5-0-8b" || server.Port != nativev1alpha1.NativeServingPort {
 		t.Fatalf("server assignment = %#v", server)
 	}
 }

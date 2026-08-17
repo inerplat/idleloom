@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -29,6 +30,9 @@ const (
 	LlamaCppRuntimeProfile = "llama-cpp-metal-v1"
 	LlamaCppArtifactFormat = "gguf-v1"
 	LlamaCppFamilyGGUF     = "gguf"
+	// nativeServingPort mirrors the API package's NativeServingPort without
+	// making the runtime layer depend on API types.
+	nativeServingPort = 18080
 )
 
 var (
@@ -76,6 +80,14 @@ type LlamaCppProcessConfig struct {
 	DeniedPaths   []string
 	ReadyTimeout  time.Duration
 	OnSpawn       func(int) error
+	// ServeAddress binds llama-server's own OpenAI-compatible API to the given
+	// non-loopback IPv4 host:port so clients reach the runtime directly, with
+	// nothing rewriting or narrowing its surface. Empty keeps the loopback
+	// binding used for batch inference. The endpoint is unauthenticated by
+	// design; callers who need authentication put their own gateway in front.
+	ServeAddress string
+	// ModelAlias is the stable model name the API advertises when serving.
+	ModelAlias string
 }
 
 type llamaCppCachedModel struct {
@@ -436,8 +448,15 @@ func StartLlamaCpp(ctx context.Context, config LlamaCppProcessConfig) (*LlamaCpp
 	if !found || host != "127.0.0.1" {
 		return nil, fmt.Errorf("allocate llama.cpp loopback address")
 	}
+	if config.ServeAddress != "" {
+		serveHost, servePort, err := validateServeAddress(config.ServeAddress)
+		if err != nil {
+			return nil, err
+		}
+		host, port = serveHost, servePort
+	}
 	modelPath := filepath.Join(config.Runtime.ModelsDirectory, config.Model.Name)
-	profile, err := llamaCppSandboxProfile(config.Runtime, modelPath, config.WorkDirectory, config.DeniedPaths)
+	profile, err := llamaCppSandboxProfile(config.Runtime, modelPath, config.WorkDirectory, config.DeniedPaths, config.ServeAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -451,11 +470,15 @@ func StartLlamaCpp(ctx context.Context, config LlamaCppProcessConfig) (*LlamaCpp
 	// the workload its declared context. With them off, the KV cache is exactly
 	// context-length sized and Metal resident, so a predicted memory budget is
 	// the real one and a shortfall fails the start instead of degrading it.
-	command := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, config.Runtime.Executable,
+	arguments := []string{"-f", profilePath, config.Runtime.Executable,
 		"-lv", "4", "--model", modelPath, "--host", host, "--port", port,
 		"--ctx-size", strconv.Itoa(config.ContextLength), "--parallel", "1",
 		"--n-gpu-layers", "999", "--device", config.Runtime.Device, "--fit", "off",
-		"--cache-ram", "0", "--no-ui")
+		"--cache-ram", "0", "--no-ui"}
+	if config.ModelAlias != "" {
+		arguments = append(arguments, "--alias", config.ModelAlias)
+	}
+	command := exec.Command("/usr/bin/sandbox-exec", arguments...)
 	command.Dir = config.WorkDirectory
 	command.Env = []string{
 		"HOME=" + filepath.Join(config.WorkDirectory, "home"), "TMPDIR=" + filepath.Join(config.WorkDirectory, "tmp"),
@@ -715,7 +738,7 @@ func (probe *llamaCppMetalProbe) FullOffload() bool {
 	return probe.loaded && probe.full
 }
 
-func llamaCppSandboxProfile(runtime LlamaCppRuntime, modelPath, workDirectory string, denied []string) (string, error) {
+func llamaCppSandboxProfile(runtime LlamaCppRuntime, modelPath, workDirectory string, denied []string, serveAddress string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -761,5 +784,22 @@ func llamaCppSandboxProfile(runtime LlamaCppRuntime, modelPath, workDirectory st
 	}
 	rules.WriteString("(allow network-bind network-inbound (local ip \"localhost:*\"))\n")
 	rules.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
+	if serveAddress != "" {
+		fmt.Fprintf(&rules, "(allow network-bind network-inbound (local ip \"%s\"))\n", escapeSandbox(serveAddress))
+	}
 	return rules.String(), nil
+}
+
+// validateServeAddress accepts only a non-loopback IPv4 host:port on the
+// Native serving port, which in practice is the host's WireKube mesh address.
+func validateServeAddress(address string) (string, string, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil || port != fmt.Sprint(nativeServingPort) {
+		return "", "", fmt.Errorf("the serving address must use port %d", nativeServingPort)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.To4() == nil {
+		return "", "", fmt.Errorf("the serving address must be a routable IPv4 address")
+	}
+	return host, port, nil
 }

@@ -204,9 +204,6 @@ func (r *Reconciler) createAssignmentFromIntent(ctx context.Context, workload *n
 			}
 			return r.markWorkloadWaiting(ctx, workload, "HostBusy", fmt.Sprintf("host mailbox is still owned by workload %s/%s", assignment.Spec.WorkloadRef.Namespace, assignment.Spec.WorkloadRef.Name))
 		}
-		if err := r.ensureServingSecrets(ctx, workload, intent); err != nil {
-			return err
-		}
 		return r.persistAssignmentReference(ctx, workload, &assignment)
 	}
 	if !apierrors.IsNotFound(err) {
@@ -222,9 +219,6 @@ func (r *Reconciler) createAssignmentFromIntent(ctx context.Context, workload *n
 	}
 	if host.UID != intent.HostRef.UID {
 		return fmt.Errorf("persisted scheduling intent refers to a replaced host")
-	}
-	if err := r.ensureServingSecrets(ctx, workload, intent); err != nil {
-		return err
 	}
 	planner := r.Planner
 	planner.NewExecutionID = func() (string, error) { return intent.ExecutionID, nil }

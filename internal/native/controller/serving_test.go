@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"reflect"
 	"testing"
 	"time"
 
@@ -18,52 +17,6 @@ import (
 	dynamicfake "k8s.io/client-go/dynamic/fake"
 	kubernetesfake "k8s.io/client-go/kubernetes/fake"
 )
-
-func TestEnsureServingSecretsCreatesMatchingScopedKeys(t *testing.T) {
-	scheme := runtime.NewScheme()
-	if err := nativev1alpha1.AddToScheme(scheme); err != nil {
-		t.Fatal(err)
-	}
-	workload := servingWorkload()
-	host := servingHost(time.Now().UTC())
-	dynamicClient := dynamicfake.NewSimpleDynamicClient(scheme, host)
-	kubernetesClient := kubernetesfake.NewClientset()
-	reconciler := &Reconciler{Dynamic: dynamicClient, Kubernetes: kubernetesClient}
-	intent := &nativev1alpha1.WorkloadSchedulingIntent{
-		HostRef:     nativev1alpha1.NamespacedObjectReference{Namespace: host.Namespace, Name: host.Name, UID: host.UID},
-		ExecutionID: "123e4567-e89b-42d3-a456-426614174000",
-	}
-	if err := reconciler.ensureServingSecrets(context.Background(), workload, intent); err != nil {
-		t.Fatal(err)
-	}
-	clientSecret, err := kubernetesClient.CoreV1().Secrets(workload.Namespace).Get(context.Background(), "qwen-chat-auth", metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hostSecret, err := kubernetesClient.CoreV1().Secrets(host.Namespace).Get(context.Background(), nativev1alpha1.ServingAuthSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(clientSecret.Data["api-key"], hostSecret.Data["api-key"]) || len(clientSecret.Data["api-key"]) != 64 {
-		t.Fatalf("serving Secret keys differ: client=%q host=%q", clientSecret.Data["api-key"], hostSecret.Data["api-key"])
-	}
-	if clientSecret.Immutable == nil || !*clientSecret.Immutable || hostSecret.Immutable == nil || !*hostSecret.Immutable {
-		t.Fatal("serving Secrets are not immutable")
-	}
-	if err := reconciler.ensureServingSecrets(context.Background(), workload, intent); err != nil {
-		t.Fatalf("idempotent ensureServingSecrets: %v", err)
-	}
-	if err := kubernetesClient.CoreV1().Secrets(workload.Namespace).Delete(context.Background(), clientSecret.Name, metav1.DeleteOptions{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := reconciler.ensureServingSecrets(context.Background(), workload, intent); err != nil {
-		t.Fatalf("recover deleted client Secret: %v", err)
-	}
-	recovered, err := kubernetesClient.CoreV1().Secrets(workload.Namespace).Get(context.Background(), clientSecret.Name, metav1.GetOptions{})
-	if err != nil || !reflect.DeepEqual(recovered.Data["api-key"], hostSecret.Data["api-key"]) {
-		t.Fatalf("recovered client Secret = %#v, %v", recovered, err)
-	}
-}
 
 func TestReconcileServingEndpointPublishesOnlyReadyConnectedAssignment(t *testing.T) {
 	workload, _, service, reconciler, _, kubernetesClient := newServingEndpointFixture(t)
@@ -149,19 +102,6 @@ func TestReconcileServingEndpointFailsClosedWhenContractsBecomeInvalid(t *testin
 			name: "missing intent", reason: "ServingIntentMissing",
 			mutate: func(_ *testing.T, workload *nativev1alpha1.IdleloomWorkload, _ *nativev1alpha1.IdleloomWorkloadAssignment, _ *corev1.Service, _ *dynamicfake.FakeDynamicClient, _ *kubernetesfake.Clientset) {
 				workload.Status.SchedulingIntent = nil
-			},
-		},
-		{
-			name: "serving secret ownership", reason: "ServingSecretsUnavailable",
-			mutate: func(t *testing.T, workload *nativev1alpha1.IdleloomWorkload, _ *nativev1alpha1.IdleloomWorkloadAssignment, _ *corev1.Service, _ *dynamicfake.FakeDynamicClient, client *kubernetesfake.Clientset) {
-				secret, err := client.CoreV1().Secrets(workload.Namespace).Get(context.Background(), workload.Spec.Server.ServiceName+"-auth", metav1.GetOptions{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				secret.Labels[servingExecutionIDLabel] = "different-execution"
-				if _, err := client.CoreV1().Secrets(workload.Namespace).Update(context.Background(), secret, metav1.UpdateOptions{}); err != nil {
-					t.Fatal(err)
-				}
 			},
 		},
 	}
@@ -318,7 +258,7 @@ func newServingEndpointFixture(t *testing.T) (*nativev1alpha1.IdleloomWorkload, 
 			HostRef: nativev1alpha1.ObjectReference{Name: host.Name, UID: host.UID},
 			Model: &nativev1alpha1.ResolvedModel{Server: &nativev1alpha1.ResolvedServer{
 				ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b",
-				AuthSecretName: nativev1alpha1.ServingAuthSecretName, Port: nativev1alpha1.NativeServingPort,
+				Port: nativev1alpha1.NativeServingPort,
 			}},
 			ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 1, LeaseDurationSeconds: 30,
 		},

@@ -29,7 +29,6 @@ const (
 	CapabilityNativeServiceV1           = "NativeServiceV1"
 	CapabilityNativeTrainingV1          = "NativeTrainingV1"
 	CapabilityMemoryProfileV1           = "memory-profile-v1"
-	ServingAuthSecretName               = "active-serve-auth"
 	NativeServingPort             int32 = 18080
 
 	KrunkitStateStopped = "Stopped"
@@ -502,8 +501,6 @@ type ResolvedServer struct {
 	// +kubebuilder:validation:MaxLength=253
 	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`
 	ModelAlias string `json:"modelAlias"`
-	// +kubebuilder:validation:Enum=active-serve-auth
-	AuthSecretName string `json:"authSecretName"`
 	// +kubebuilder:validation:Minimum=18080
 	// +kubebuilder:validation:Maximum=18080
 	Port int32 `json:"port"`

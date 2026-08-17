@@ -363,9 +363,6 @@ func validateWorkloadServer(server *WorkloadServer, path *field.Path) field.Erro
 
 func validateResolvedServer(server *ResolvedServer, path *field.Path) field.ErrorList {
 	errs := validateWorkloadServer(&WorkloadServer{ServiceName: server.ServiceName, ModelAlias: server.ModelAlias}, path)
-	if server.AuthSecretName != ServingAuthSecretName {
-		errs = append(errs, field.Invalid(path.Child("authSecretName"), server.AuthSecretName, fmt.Sprintf("must be %q", ServingAuthSecretName)))
-	}
 	if server.Port != NativeServingPort {
 		errs = append(errs, field.Invalid(path.Child("port"), server.Port, fmt.Sprintf("must be %d", NativeServingPort)))
 	}

@@ -209,8 +209,7 @@ func TestValidateAssignment(t *testing.T) {
 	}
 	assignment.Spec.Model.Batch = &WorkloadBatchInference{Prompt: "hello", MaxTokens: 8, TimeoutSeconds: 30}
 	assignment.Spec.Model.Server = &ResolvedServer{
-		ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b",
-		AuthSecretName: ServingAuthSecretName, Port: NativeServingPort,
+		ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b", Port: NativeServingPort,
 	}
 	if err := ValidateAssignment(&assignment); err == nil {
 		t.Fatal("ValidateAssignment accepted both batch and server intents")
@@ -234,8 +233,7 @@ func TestValidateServingAssignment(t *testing.T) {
 			Artifact: model.Spec.Artifact, UnifiedMemoryRequest: resource.MustParse("16Gi"),
 			MaxContextLength: model.Spec.MaxContextLength, MaxConcurrentRequests: model.Spec.MaxConcurrentRequests,
 			Server: &ResolvedServer{
-				ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b",
-				AuthSecretName: ServingAuthSecretName, Port: NativeServingPort,
+				ServiceName: "qwen-chat", ModelAlias: "qwen3-5-0-8b", Port: NativeServingPort,
 			},
 		},
 		ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 1, LeaseDurationSeconds: 30,
@@ -243,9 +241,9 @@ func TestValidateServingAssignment(t *testing.T) {
 	if err := ValidateAssignment(&assignment); err != nil {
 		t.Fatalf("ValidateAssignment: %v", err)
 	}
-	assignment.Spec.Model.Server.AuthSecretName = "user-secret"
+	assignment.Spec.Model.Server.Port = 8080
 	if err := ValidateAssignment(&assignment); err == nil {
-		t.Fatal("ValidateAssignment accepted an untrusted serving Secret name")
+		t.Fatal("ValidateAssignment accepted a serving port outside the contract")
 	}
 }
 

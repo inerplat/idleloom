@@ -169,7 +169,6 @@ func TestAgentRoleCannotReadUserWorkloadsCredentialsOrNodes(t *testing.T) {
 	}
 	expected := map[string]expectedRule{
 		"/serviceaccounts/token":                            {verbs: []string{"create"}, resourceNames: []string{"idleloom-agent"}},
-		"/secrets":                                          {verbs: []string{"get"}, resourceNames: []string{"active-serve-auth"}},
 		"ai.idleloom.io/idleloomhosts":                      {verbs: []string{"get"}, resourceNames: []string{"host"}},
 		"ai.idleloom.io/idleloomhosts/status":               {verbs: []string{"get", "patch", "update"}, resourceNames: []string{"host"}},
 		"ai.idleloom.io/idleloomworkloadassignments":        {verbs: []string{"get", "list", "watch"}},
@@ -251,7 +250,6 @@ func TestControllerLeasePermissionIsFencingOnly(t *testing.T) {
 func TestControllerServingPermissionsAreResourceScoped(t *testing.T) {
 	objects := decodeObjects(t, filepath.Join("..", "..", "deploy", "native", "rbac", "controller.yaml"))
 	want := map[string][]string{
-		"/secrets":                        {"create", "delete", "get"},
 		"/services":                       {"get"},
 		"discovery.k8s.io/endpointslices": {"create", "delete", "get", "update"},
 	}

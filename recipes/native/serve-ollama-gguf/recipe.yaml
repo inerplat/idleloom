@@ -1,6 +1,6 @@
 name: serve/ollama-gguf
 version: v1
-description: Serve a digest-pinned local GGUF model through an authenticated cluster-private Service.
+description: Serve a digest-pinned local GGUF model through an unauthenticated cluster-private Service.
 task: serve
 backend: native
 runtime: ollama
@@ -12,4 +12,3 @@ prerequisites:
 - A real schedulable Linux kubelet node on the WireKube mesh for in-cluster clients.
 - Ollama 0.17.1 or later and the exact qwen3.5:9b GGUF model installed locally.
 - The built-in qwen3-5-9b-ollama model catalog installed by idlectl join.
-- Cluster access to read the controller-generated SERVICE-auth Secret.

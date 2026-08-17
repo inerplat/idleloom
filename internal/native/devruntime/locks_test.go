@@ -89,7 +89,7 @@ func TestSandboxProfileProtectsCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	credential := filepath.Join(root, "..", "agent.kubeconfig")
-	profile, err := sandboxProfile(layout, []string{credential})
+	profile, err := sandboxProfile(layout, []string{credential}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

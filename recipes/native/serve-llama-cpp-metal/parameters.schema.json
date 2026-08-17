@@ -16,7 +16,7 @@
     },
     "namespace": {
       "type": "string",
-      "description": "Namespace for the IdleloomWorkload, Service, and generated client Secret.",
+      "description": "Namespace for the IdleloomWorkload and Service.",
       "default": "default",
       "format": "namespace"
     },
