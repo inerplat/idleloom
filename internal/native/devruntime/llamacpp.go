@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -80,12 +79,6 @@ type LlamaCppProcessConfig struct {
 	DeniedPaths   []string
 	ReadyTimeout  time.Duration
 	OnSpawn       func(int) error
-	// ServeAddress binds llama-server's own OpenAI-compatible API to the given
-	// non-loopback IPv4 host:port so clients reach the runtime directly, with
-	// nothing rewriting or narrowing its surface. Empty keeps the loopback
-	// binding used for batch inference. The endpoint is unauthenticated by
-	// design; callers who need authentication put their own gateway in front.
-	ServeAddress string
 	// ModelAlias is the stable model name the API advertises when serving.
 	ModelAlias string
 }
@@ -448,15 +441,8 @@ func StartLlamaCpp(ctx context.Context, config LlamaCppProcessConfig) (*LlamaCpp
 	if !found || host != "127.0.0.1" {
 		return nil, fmt.Errorf("allocate llama.cpp loopback address")
 	}
-	if config.ServeAddress != "" {
-		serveHost, servePort, err := validateServeAddress(config.ServeAddress)
-		if err != nil {
-			return nil, err
-		}
-		host, port = serveHost, servePort
-	}
 	modelPath := filepath.Join(config.Runtime.ModelsDirectory, config.Model.Name)
-	profile, err := llamaCppSandboxProfile(config.Runtime, modelPath, config.WorkDirectory, config.DeniedPaths, config.ServeAddress)
+	profile, err := llamaCppSandboxProfile(config.Runtime, modelPath, config.WorkDirectory, config.DeniedPaths)
 	if err != nil {
 		return nil, err
 	}
@@ -565,6 +551,16 @@ func (p *LlamaCppProcess) Generate(ctx context.Context, request GenerateRequest)
 		return GenerateResponse{}, fmt.Errorf("llama.cpp returned an invalid generation response")
 	}
 	return GenerateResponse{Text: response.Choices[0].Message.Content, ElapsedMillis: time.Since(started).Milliseconds()}, nil
+}
+
+// Endpoint is the loopback base URL the runtime's own HTTP API answers on.
+// Serving reaches it through the agent's relay rather than by binding a
+// routable address, because a host cannot connect to its own mesh address.
+func (p *LlamaCppProcess) Endpoint() string {
+	if p == nil {
+		return ""
+	}
+	return p.baseURL
 }
 
 func (p *LlamaCppProcess) PID() int {
@@ -738,7 +734,7 @@ func (probe *llamaCppMetalProbe) FullOffload() bool {
 	return probe.loaded && probe.full
 }
 
-func llamaCppSandboxProfile(runtime LlamaCppRuntime, modelPath, workDirectory string, denied []string, serveAddress string) (string, error) {
+func llamaCppSandboxProfile(runtime LlamaCppRuntime, modelPath, workDirectory string, denied []string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -784,22 +780,5 @@ func llamaCppSandboxProfile(runtime LlamaCppRuntime, modelPath, workDirectory st
 	}
 	rules.WriteString("(allow network-bind network-inbound (local ip \"localhost:*\"))\n")
 	rules.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
-	if serveAddress != "" {
-		fmt.Fprintf(&rules, "(allow network-bind network-inbound (local ip \"%s\"))\n", escapeSandbox(serveAddress))
-	}
 	return rules.String(), nil
-}
-
-// validateServeAddress accepts only a non-loopback IPv4 host:port on the
-// Native serving port, which in practice is the host's WireKube mesh address.
-func validateServeAddress(address string) (string, string, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil || port != fmt.Sprint(nativeServingPort) {
-		return "", "", fmt.Errorf("the serving address must use port %d", nativeServingPort)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || ip.IsLoopback() || ip.IsUnspecified() || ip.To4() == nil {
-		return "", "", fmt.Errorf("the serving address must be a routable IPv4 address")
-	}
-	return host, port, nil
 }

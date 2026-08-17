@@ -34,10 +34,11 @@ const (
 	// sanityMemoryOverhead is the least a declaration may add on top of the
 	// artifact before it is plainly wrong.
 	sanityMemoryOverhead = int64(512 << 20)
-	// computeBufferBytes approximates the runtime's Metal compute and graph
-	// buffers in the measured estimate. It varies with batch geometry and
-	// build, so it is padded; measured feedback can tighten it later.
-	computeBufferBytes = int64(1 << 30)
+	// computeBufferBytes approximates the runtime's compute and graph buffers
+	// in the measured estimate. A 27B model at 8192 tokens of context was
+	// measured at 180 MiB of them; this keeps a wide margin over that because
+	// the real figure moves with batch geometry and runtime build.
+	computeBufferBytes = int64(512 << 20)
 	// runtimeFixedOverhead covers the serving process itself in the measured
 	// estimate: server code, tokenizer, residency sets.
 	runtimeFixedOverhead = int64(768 << 20)

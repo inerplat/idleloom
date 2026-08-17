@@ -21,7 +21,6 @@ import (
 // Nothing sits between the client and the runtime's own API.
 type MLXServeConfig struct {
 	Layout       Layout
-	ServeAddress string
 	DeniedPaths  []string
 	ReadyTimeout time.Duration
 	OnSpawn      func(int) error
@@ -46,14 +45,18 @@ func StartMLXServe(ctx context.Context, config MLXServeConfig) (*MLXServeProcess
 	if runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf("sandboxed MLX server requires macOS")
 	}
-	host, port, err := validateServeAddress(config.ServeAddress)
-	if err != nil {
-		return nil, err
-	}
 	if _, err := Verify(config.Layout); err != nil {
 		return nil, err
 	}
-	profile, err := sandboxProfile(config.Layout, config.DeniedPaths, config.ServeAddress)
+	address, err := unusedLoopbackAddress()
+	if err != nil {
+		return nil, err
+	}
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+	profile, err := sandboxProfile(config.Layout, config.DeniedPaths, port)
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +78,7 @@ func StartMLXServe(ctx context.Context, config MLXServeConfig) (*MLXServeProcess
 	}
 	process := &MLXServeProcess{
 		cmd: command, client: &http.Client{Transport: &http.Transport{Proxy: nil}},
-		baseURL: "http://" + net.JoinHostPort(host, port), done: make(chan struct{}), stderr: stderr,
+		baseURL: "http://" + address, done: make(chan struct{}), stderr: stderr,
 	}
 	go func() {
 		err := command.Wait()
@@ -124,6 +127,14 @@ func (p *MLXServeProcess) waitReady(ctx context.Context) error {
 		case <-ticker.C:
 		}
 	}
+}
+
+// Endpoint is the loopback base URL mlx_lm.server answers on.
+func (p *MLXServeProcess) Endpoint() string {
+	if p == nil {
+		return ""
+	}
+	return p.baseURL
 }
 
 func (p *MLXServeProcess) PID() int {

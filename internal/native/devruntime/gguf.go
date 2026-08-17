@@ -11,8 +11,12 @@ import (
 // across all layers, which the runtime allocates exactly because it runs with
 // auto-fitting and the host-RAM cache mirror disabled.
 type GGUFMemoryProfile struct {
-	Architecture         string
-	BlockCount           int32
+	Architecture string
+	BlockCount   int32
+	// KVCacheLayers is how many blocks actually hold a growing KV cache. It
+	// equals BlockCount for plain attention, and a fraction of it for hybrid
+	// architectures that interleave attention with constant-state layers.
+	KVCacheLayers        int32
 	KVBytesPerToken      int64
 	TrainedContextLength int32
 }
@@ -38,6 +42,9 @@ var ggufWantedSuffixes = map[string]bool{
 	"attention.head_count_kv": true,
 	"attention.key_length":    true,
 	"attention.value_length":  true,
+	// Hybrid architectures cache only every nth block; the rest carry
+	// constant-size recurrent state that does not grow with context.
+	"full_attention_interval": true,
 }
 
 const (
@@ -94,6 +101,7 @@ type ggufScanner struct {
 	kvRemaining uint64
 	reason      string
 	arch        string
+	recurrent   bool
 	scalars     map[string]map[string]int64
 	arrays      map[string]map[string][]int64
 
@@ -198,6 +206,24 @@ func (s *ggufScanner) Profile() (GGUFMemoryProfile, bool) {
 			kvHeads = append(kvHeads, uniform)
 		}
 	}
+	// Hybrid models interleave attention with constant-state layers, so only
+	// every nth block holds a growing cache. Without the interval the layout of
+	// a recurrent model is unknown and guessing it would understate the cost.
+	interval, hasInterval := scalars["full_attention_interval"]
+	if s.recurrent && !hasInterval {
+		return GGUFMemoryProfile{}, false
+	}
+	cacheLayers := blockCount
+	if hasInterval {
+		if interval < 1 || interval > blockCount {
+			return GGUFMemoryProfile{}, false
+		}
+		cacheLayers = blockCount / interval
+		if cacheLayers < 1 {
+			return GGUFMemoryProfile{}, false
+		}
+		kvHeads = kvHeads[:cacheLayers]
+	}
 	var bytesPerToken int64
 	for _, heads := range kvHeads {
 		if heads < 0 || heads > ggufMaxHeadCount {
@@ -211,6 +237,7 @@ func (s *ggufScanner) Profile() (GGUFMemoryProfile, bool) {
 	return GGUFMemoryProfile{
 		Architecture:         s.arch,
 		BlockCount:           int32(blockCount),
+		KVCacheLayers:        int32(cacheLayers),
 		KVBytesPerToken:      bytesPerToken,
 		TrainedContextLength: int32(contextLength),
 	}, true
@@ -247,33 +274,11 @@ func (s *ggufScanner) stepHeader(data []byte) {
 
 func (s *ggufScanner) nextKV() {
 	s.kvRemaining--
-	if s.kvRemaining == 0 || s.resolved() {
+	if s.kvRemaining == 0 {
 		s.done = true
 		return
 	}
 	s.expect(8, s.stepKeyLength)
-}
-
-// resolved reports whether every key the profile could use has been seen,
-// which lets the scan stop asking for input before tokenizer payloads. The
-// explicit key and value lengths must be present too: they are optional in the
-// format, so their absence is only knowable at the end of the metadata, and a
-// scan that outlives this check costs nothing since the hashing pass reads the
-// whole file regardless.
-func (s *ggufScanner) resolved() bool {
-	if s.arch == "" {
-		return false
-	}
-	scalars := s.scalars[s.arch]
-	_, perLayer := s.arrays[s.arch]["attention.head_count_kv"]
-	_, uniform := scalars["attention.head_count_kv"]
-	_, blocks := scalars["block_count"]
-	_, context := scalars["context_length"]
-	_, heads := scalars["attention.head_count"]
-	_, embedding := scalars["embedding_length"]
-	_, keyLength := scalars["attention.key_length"]
-	_, valueLength := scalars["attention.value_length"]
-	return blocks && context && (perLayer || uniform) && heads && embedding && keyLength && valueLength
 }
 
 func (s *ggufScanner) stepKeyLength(data []byte) {
@@ -287,6 +292,9 @@ func (s *ggufScanner) stepKeyLength(data []byte) {
 
 func (s *ggufScanner) stepKey(data []byte) {
 	s.currentKey = string(data)
+	if prefix, rest, found := strings.Cut(s.currentKey, "."); found && prefix != "" && strings.HasPrefix(rest, "ssm.") {
+		s.recurrent = true
+	}
 	s.expect(4, s.stepValueType)
 }
 

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1299,18 +1300,18 @@ func TestEnsureProcessServesThroughRuntimeOwnServer(t *testing.T) {
 		Name: "llama-3.2-3b.gguf", ManifestDigest: "sha256:" + strings.Repeat("e", 64),
 		Family: nativev1alpha1.ModelFamilyGGUF, Format: nativev1alpha1.ArtifactFormatGGUFV1, SizeBytes: 2048,
 	}
-	underlying := &fakeBatchRunner{alive: true, waitForCancellation: true, pid: 125}
+	underlying := &fakeServingRuntime{fakeBatchRunner: fakeBatchRunner{alive: true, waitForCancellation: true, pid: 125}}
 	agent := &DevAgent{
 		store: store, logs: kubeletbridge.NewLogBuffer(1 << 20),
 		config: DevAgentConfig{
 			AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()), StateDirectory: t.TempDir(),
-			Platform: fakeAgentPlatform{}, ServeListenAddress: "198.18.18.104:18080",
+			Platform: fakeAgentPlatform{}, ServeListenAddress: "198.18.18.104:18080", ListenServing: listenAnywhere,
 			ResolveLlamaCpp: func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, map[string]devruntime.GGUFMemoryProfile, error) {
 				return devruntime.LlamaCppRuntime{Executable: "/opt/homebrew/bin/llama-server", Version: "9960-a935fbffe", Device: "MTL0"}, []devruntime.LlamaCppModel{model}, nil, nil
 			},
 			StartLlamaCpp: func(_ context.Context, config devruntime.LlamaCppProcessConfig) (Process, error) {
-				if config.ServeAddress != "198.18.18.104:18080" || config.ModelAlias != "local-gguf" {
-					t.Fatalf("serving config = serveAddress %q alias %q", config.ServeAddress, config.ModelAlias)
+				if config.ModelAlias != "local-gguf" {
+					t.Fatalf("serving alias = %q", config.ModelAlias)
 				}
 				if err := config.OnSpawn(125); err != nil {
 					return nil, err
@@ -1342,9 +1343,13 @@ func TestEnsureProcessServesThroughRuntimeOwnServer(t *testing.T) {
 	if err := agent.ensureProcess(context.Background(), assignment); err != nil {
 		t.Fatal(err)
 	}
-	// The runtime process itself is the serving process; nothing wraps it.
-	if agent.process != Process(underlying) {
-		t.Fatalf("serving process = %#v, want the runtime process unwrapped", agent.process)
+	// The relay carries bytes for clients while the runtime keeps loopback.
+	relay, ok := agent.process.(*servingRelay)
+	if !ok {
+		t.Fatalf("serving process = %#v, want a relay", agent.process)
+	}
+	if relay.process != Process(underlying) || relay.upstream != "127.0.0.1:9" {
+		t.Fatalf("relay = process %#v upstream %q", relay.process, relay.upstream)
 	}
 	if err := agent.stopProcess(); err != nil {
 		t.Fatal(err)
@@ -1361,13 +1366,13 @@ func TestEnsureProcessServesMLXThroughOwnServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	underlying := &fakeBatchRunner{alive: true, waitForCancellation: true, pid: 126}
+	underlying := &fakeServingRuntime{fakeBatchRunner: fakeBatchRunner{alive: true, waitForCancellation: true, pid: 126}}
 	mlxServeCalls := 0
 	agent := &DevAgent{
 		store: store, logs: kubeletbridge.NewLogBuffer(1 << 20),
 		config: DevAgentConfig{
 			AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()), StateDirectory: t.TempDir(),
-			Platform: fakeAgentPlatform{}, ServeListenAddress: "198.18.18.104:18080",
+			Platform: fakeAgentPlatform{}, ServeListenAddress: "198.18.18.104:18080", ListenServing: listenAnywhere,
 			PrepareRuntime: func(context.Context, func(string)) (devruntime.Receipt, error) {
 				return devruntime.Receipt{
 					ArtifactIdentity: descriptor.ArtifactIdentity, ManifestDigest: descriptor.ManifestDigest,
@@ -1376,9 +1381,6 @@ func TestEnsureProcessServesMLXThroughOwnServer(t *testing.T) {
 			},
 			StartMLXServe: func(_ context.Context, config devruntime.MLXServeConfig) (Process, error) {
 				mlxServeCalls++
-				if config.ServeAddress != "198.18.18.104:18080" {
-					t.Fatalf("MLX serve address = %q", config.ServeAddress)
-				}
 				if err := config.OnSpawn(126); err != nil {
 					return nil, err
 				}
@@ -1420,4 +1422,18 @@ func TestEnsureProcessServesMLXThroughOwnServer(t *testing.T) {
 	if err := agent.stopProcess(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// fakeServingRuntime is a runtime process that also reports an HTTP endpoint,
+// as every serving runtime does.
+type fakeServingRuntime struct {
+	fakeBatchRunner
+}
+
+func (*fakeServingRuntime) Endpoint() string { return "http://127.0.0.1:9" }
+
+// listenAnywhere accepts the mesh address a test cannot bind and hands back a
+// loopback listener instead.
+func listenAnywhere(network, _ string) (net.Listener, error) {
+	return net.Listen(network, "127.0.0.1:0")
 }

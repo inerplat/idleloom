@@ -293,7 +293,7 @@ func (p *Process) readResponses(reader io.Reader) {
 	}
 }
 
-func sandboxProfile(layout Layout, denied []string, serveAddress string) (string, error) {
+func sandboxProfile(layout Layout, denied []string, servePort string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -366,11 +366,11 @@ func sandboxProfile(layout Layout, denied []string, serveAddress string) (string
 	rules.WriteString("(allow file-issue-extension (require-all (subpath \"")
 	rules.WriteString(escapeSandbox(pythonResources))
 	rules.WriteString("\") (extension-class \"com.apple.app-sandbox.read\")))\n")
-	if serveAddress == "" {
-		rules.WriteString("(deny network*)\n")
-	} else {
-		rules.WriteString("(deny network*)\n")
-		fmt.Fprintf(&rules, "(allow network-bind network-inbound (local ip \"%s\"))\n", escapeSandbox(serveAddress))
+	rules.WriteString("(deny network*)\n")
+	if servePort != "" {
+		// Serving runs an HTTP server on loopback; the agent relays the mesh
+		// address to it. The batch runner keeps network denied outright.
+		fmt.Fprintf(&rules, "(allow network-bind network-inbound (local ip \"localhost:%s\"))\n", servePort)
 	}
 	return rules.String(), nil
 }

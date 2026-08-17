@@ -334,6 +334,12 @@ type ModelMemoryProfile struct {
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=4096
 	BlockCount int32 `json:"blockCount"`
+	// KVCacheLayers is how many blocks hold a growing KV cache. It is below
+	// BlockCount for hybrid architectures whose other blocks keep only
+	// constant-size recurrent state.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4096
+	KVCacheLayers int32 `json:"kvCacheLayers"`
 	// +kubebuilder:validation:Minimum=1024
 	// +kubebuilder:validation:Maximum=8388608
 	KVBytesPerToken int64 `json:"kvBytesPerToken"`

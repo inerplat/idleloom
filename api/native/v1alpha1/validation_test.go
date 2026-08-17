@@ -167,11 +167,14 @@ func TestValidateModelRequiresSanityMemoryReservation(t *testing.T) {
 }
 
 func TestEstimatedUnifiedMemoryForModel(t *testing.T) {
-	profile := &ModelMemoryProfile{Architecture: "qwen35", BlockCount: 65, KVBytesPerToken: 133120, TrainedContextLength: 262144}
+	profile := &ModelMemoryProfile{
+		Architecture: "qwen35", BlockCount: 65, KVCacheLayers: 16,
+		KVBytesPerToken: 65536, TrainedContextLength: 262144,
+	}
 	estimated := EstimatedUnifiedMemoryForModel(12574489568, 8192, profile)
 	// Weights plus an exactly context-sized KV cache plus the padded compute
 	// and process overheads.
-	want := int64(12574489568) + 8192*133120 + (1 << 30) + (768 << 20)
+	want := int64(12574489568) + 8192*65536 + (512 << 20) + (768 << 20)
 	if estimated.Value() != want {
 		t.Fatalf("estimated = %d, want %d", estimated.Value(), want)
 	}

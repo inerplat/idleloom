@@ -175,6 +175,11 @@ spec:
                     maximum: 8388608
                     minimum: 1024
                     type: integer
+                  kvCacheLayers:
+                    format: int32
+                    maximum: 4096
+                    minimum: 1
+                    type: integer
                   trainedContextLength:
                     format: int32
                     maximum: 16777216
@@ -184,6 +189,7 @@ spec:
                 - architecture
                 - blockCount
                 - kvBytesPerToken
+                - kvCacheLayers
                 - trainedContextLength
                 type: object
               observedGeneration:

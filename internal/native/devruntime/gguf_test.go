@@ -83,6 +83,9 @@ func scanGGUF(t *testing.T, payload []byte, chunk int) *ggufScanner {
 	return scanner
 }
 
+// qwen35Builder mirrors the metadata a real Qwen3.8 27B GGUF carries: a
+// hybrid stack where only every fourth block holds a KV cache and the rest
+// keep constant-size recurrent state.
 func qwen35Builder() *ggufBuilder {
 	builder := &ggufBuilder{}
 	builder.addString("general.architecture", "qwen35").
@@ -91,8 +94,11 @@ func qwen35Builder() *ggufBuilder {
 		addUint32("qwen35.embedding_length", 5120).
 		addUint32("qwen35.attention.head_count", 24).
 		addUint32("qwen35.attention.head_count_kv", 4).
-		addUint32("qwen35.attention.key_length", 128).
-		addUint32("qwen35.attention.value_length", 128)
+		addUint32("qwen35.attention.key_length", 256).
+		addUint32("qwen35.attention.value_length", 256).
+		addUint32("qwen35.ssm.state_size", 128).
+		addUint32("qwen35.ssm.inner_size", 6144).
+		addUint32("qwen35.full_attention_interval", 4)
 	return builder
 }
 
@@ -104,7 +110,9 @@ func TestGGUFScannerDerivesQwenKVGeometry(t *testing.T) {
 		if !ok {
 			t.Fatalf("chunk %d: no profile", chunk)
 		}
-		if profile.KVBytesPerToken != 133120 || profile.BlockCount != 65 ||
+		// llama.cpp reports 512 MiB of KV cache for 8192 tokens on this model,
+		// which is exactly 65536 bytes per token across its 16 caching blocks.
+		if profile.KVBytesPerToken != 65536 || profile.BlockCount != 65 || profile.KVCacheLayers != 16 ||
 			profile.TrainedContextLength != 262144 || profile.Architecture != "qwen35" {
 			t.Fatalf("chunk %d: profile = %+v", chunk, profile)
 		}
@@ -180,14 +188,17 @@ func TestGGUFScannerSkipsTokenizerPayloads(t *testing.T) {
 	}
 }
 
-func TestGGUFScannerStopsOnceResolved(t *testing.T) {
+func TestGGUFScannerCompletesTheMetadataBlock(t *testing.T) {
+	// The scan runs to the end of the metadata rather than stopping at the
+	// first sufficient set of keys, because keys that change the answer can
+	// trail the ones that look sufficient.
 	payload := qwen35Builder().addStringArray("tokenizer.ggml.tokens", []string{"a", "b"}).bytes()
 	scanner := scanGGUF(t, payload, 4096)
 	if !scanner.done {
-		t.Fatal("scanner kept reading after every wanted key resolved")
+		t.Fatal("scanner did not consume the whole metadata block")
 	}
 	if _, ok := scanner.Profile(); !ok {
-		t.Fatal("early stop lost the profile")
+		t.Fatal("completed scan lost the profile")
 	}
 }
 
@@ -214,5 +225,45 @@ func TestGGUFScannerRejectsUnusableInputs(t *testing.T) {
 		if _, ok := scanGGUF(t, payload, 9).Profile(); ok {
 			t.Fatalf("%s produced a profile", name)
 		}
+	}
+}
+
+func TestGGUFScannerRefusesRecurrentModelWithoutInterval(t *testing.T) {
+	builder := &ggufBuilder{}
+	builder.addString("general.architecture", "qwen35").
+		addUint32("qwen35.block_count", 48).
+		addUint32("qwen35.context_length", 32768).
+		addUint32("qwen35.embedding_length", 4096).
+		addUint32("qwen35.attention.head_count", 32).
+		addUint32("qwen35.attention.head_count_kv", 8).
+		addUint32("qwen35.ssm.state_size", 128)
+	if _, ok := scanGGUF(t, builder.bytes(), 64).Profile(); ok {
+		t.Fatal("a recurrent model with an unknown cache layout produced a profile")
+	}
+}
+
+func TestGGUFScannerReadsKeysAfterTheAttentionBlock(t *testing.T) {
+	// full_attention_interval trails the attention keys in real files, so the
+	// scan must not stop once the attention keys alone are satisfied.
+	builder := &ggufBuilder{}
+	builder.addString("general.architecture", "qwen3").
+		addUint32("qwen3.block_count", 32).
+		addUint32("qwen3.context_length", 32768).
+		addUint32("qwen3.embedding_length", 4096).
+		addUint32("qwen3.attention.head_count", 32).
+		addUint32("qwen3.attention.head_count_kv", 8).
+		addUint32("qwen3.attention.key_length", 128).
+		addUint32("qwen3.attention.value_length", 128).
+		addStringArray("tokenizer.ggml.tokens", []string{"a", "b", "c"}).
+		addUint32("qwen3.full_attention_interval", 2)
+	profile, ok := scanGGUF(t, builder.bytes(), 16).Profile()
+	if !ok {
+		t.Fatal("no profile")
+	}
+	if profile.KVCacheLayers != 16 {
+		t.Fatalf("cache layers = %d, want 16 after honouring a trailing interval", profile.KVCacheLayers)
+	}
+	if want := int64(16 * 8 * 256 * 2); profile.KVBytesPerToken != want {
+		t.Fatalf("kv bytes per token = %d, want %d", profile.KVBytesPerToken, want)
 	}
 }

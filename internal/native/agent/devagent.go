@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,6 +51,7 @@ type DevAgentConfig struct {
 	StartOllama            func(context.Context, devruntime.OllamaProcessConfig) (Process, error)
 	StartLlamaCpp          func(context.Context, devruntime.LlamaCppProcessConfig) (Process, error)
 	StartMLXServe          func(context.Context, devruntime.MLXServeConfig) (Process, error)
+	ListenServing          func(string, string) (net.Listener, error)
 	StartShell             func(context.Context, devruntime.ShellConfig) (Process, error)
 	StartTraining          func(context.Context, devruntime.TrainingConfig) (Process, error)
 	ResolveOllama          func() (devruntime.OllamaRuntime, []devruntime.OllamaModel, error)
@@ -174,6 +176,9 @@ func NewDevAgent(config DevAgentConfig) (*DevAgent, error) {
 		config.StartMLXServe = func(ctx context.Context, serveConfig devruntime.MLXServeConfig) (Process, error) {
 			return devruntime.StartMLXServe(ctx, serveConfig)
 		}
+	}
+	if config.ListenServing == nil {
+		config.ListenServing = net.Listen
 	}
 	if config.StartShell == nil {
 		config.StartShell = func(ctx context.Context, shellConfig devruntime.ShellConfig) (Process, error) {
@@ -785,15 +790,13 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 				Output:  &agentLogWriter{agent: a, onLine: a.observeRunProtocol}, OnSpawn: onSpawn,
 			})
 		} else {
-			// Serving binds the runtime's own OpenAI-compatible server to the
-			// WireKube address; batch keeps the loopback binding and the
-			// in-process generate call. The endpoint is unauthenticated by
+			// Serving publishes the runtime's own OpenAI-compatible server
+			// through a byte-level relay on the WireKube address; batch keeps
+			// the in-process generate call. The endpoint is unauthenticated by
 			// design, matching ordinary cluster-private Services; anyone who
 			// needs authentication fronts it with their own gateway.
-			serveAddress := ""
 			modelAlias := ""
 			if assignment.Spec.Model.Server != nil {
-				serveAddress = a.config.ServeListenAddress
 				modelAlias = assignment.Spec.Model.Server.ModelAlias
 			}
 			switch assignment.Spec.Model.RuntimeProfile {
@@ -804,7 +807,6 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 					WorkDirectory: ollamaWorkDirectory(a.config.Layout, assignment.UID),
 					DeniedPaths:   []string{a.config.StateDirectory, a.config.KubeconfigPath},
 					ReadyTimeout:  2 * time.Minute, OnSpawn: onSpawn,
-					ServeAddress: serveAddress,
 				})
 			case nativev1alpha1.RuntimeProfileLlamaCppMetalV1:
 				process, err = a.config.StartLlamaCpp(startupCtx, devruntime.LlamaCppProcessConfig{
@@ -813,12 +815,12 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 					WorkDirectory: llamaCppWorkDirectory(a.config.Layout, assignment.UID),
 					DeniedPaths:   []string{a.config.StateDirectory, a.config.KubeconfigPath},
 					ReadyTimeout:  5 * time.Minute, OnSpawn: onSpawn,
-					ServeAddress: serveAddress, ModelAlias: modelAlias,
+					ModelAlias: modelAlias,
 				})
 			default:
 				if assignment.Spec.Model.Server != nil {
 					process, err = a.config.StartMLXServe(startupCtx, devruntime.MLXServeConfig{
-						Layout: a.config.Layout, ServeAddress: serveAddress,
+						Layout:       a.config.Layout,
 						DeniedPaths:  []string{a.config.StateDirectory, a.config.KubeconfigPath},
 						ReadyTimeout: 5 * time.Minute, OnSpawn: onSpawn,
 					})
@@ -834,6 +836,9 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 				process = startBatchProcess(process, devruntime.GenerateRequest{
 					Prompt: batch.Prompt, MaxTokens: int(batch.MaxTokens),
 				}, time.Duration(batch.TimeoutSeconds)*time.Second, &agentLogWriter{agent: a})
+			}
+			if err == nil && assignment.Spec.Model.Server != nil {
+				process, err = startServingRelay(process, a.config.ServeListenAddress, a.listenServing())
 			}
 		}
 		completed <- result{process: process, err: err}
@@ -1166,6 +1171,7 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 					entry.Memory = &nativev1alpha1.ModelMemoryProfile{
 						Architecture:         profile.Architecture,
 						BlockCount:           profile.BlockCount,
+						KVCacheLayers:        profile.KVCacheLayers,
 						KVBytesPerToken:      profile.KVBytesPerToken,
 						TrainedContextLength: profile.TrainedContextLength,
 					}
