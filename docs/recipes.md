@@ -430,9 +430,25 @@ kubectl apply --dry-run=server -f llama-cpp-model.yaml
 kubectl apply -f llama-cpp-model.yaml
 ```
 
-Increase `minimumUnifiedMemory` for larger files or context windows. It is a
-conservative scheduling reservation rather than an enforced macOS memory
-limit. The agent advertises the model only after hashing the complete file,
+`minimumUnifiedMemory` has a validated floor:
+
+```text
+artifact bytes + 4 GiB runtime + maxContextLength * 1 MiB
+```
+
+A model below the floor is rejected at reconcile time, and one above the host's
+`status.allocatableUnifiedMemory` never schedules. Context is the term that
+surprises: at 1 MiB per token it costs more than the weights long before the
+8192-token ceiling, so a large GGUF on a small Mac is limited by context rather
+than by file size. Solve for the context a host can carry:
+
+```text
+maxContextLength = (allocatableUnifiedMemory - artifact bytes - 4 GiB) / 1 MiB
+```
+
+The reservation is deliberately conservative. It is a scheduling figure rather
+than an enforced macOS memory limit, and it is far larger than the KV cache the
+runtime actually allocates. The agent advertises the model only after hashing the complete file,
 and it repeats that strong verification immediately before every execution.
 
 Render and run the batch recipe:
@@ -552,7 +568,20 @@ does not implement `kubectl port-forward` yet.
 
 The current adapter implements
 non-streaming chat completions, `GET /v1/models`, and a 512-token response
-limit. One generation may run at a time; concurrent requests receive HTTP 429
+limit. Three differences from a full OpenAI server matter to clients:
+
+- The request body accepts `model`, `messages`, and `max_tokens` only. Any other
+  field, including ordinary sampling controls such as `temperature`, is rejected
+  with HTTP 400 and a body of `invalid request` that does not name the field.
+  Strip unsupported fields before pointing a general OpenAI client at this
+  Service.
+- Responses carry no `usage` object, so token counts are not observable through
+  the API.
+- A reasoning model can spend the whole `max_tokens` budget inside its thinking
+  block. The adapter returns the visible text only, so the response is an empty
+  `content` with `finish_reason` `stop`, which is indistinguishable from a model
+  that simply had nothing to say. Raise `max_tokens` when a reply comes back
+  empty. One generation may run at a time; concurrent requests receive HTTP 429
 with `Retry-After: 1` instead of waiting in an unbounded queue. A generation
 already accepted by the model finishes even if its client disconnects, so the
 shared model process remains available for later requests. Traffic to the Mac

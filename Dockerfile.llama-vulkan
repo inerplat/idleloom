@@ -1,15 +1,12 @@
-# llama.cpp binaries on a mesa userspace that this krunkit's Venus renderer
-# actually works with.
+# llama.cpp binaries on a mesa userspace the host's Venus renderer supports.
 #
-# Both images ship a virtio ICD, so the split is not about which one has the
-# file. Measured on a krunkit 1.3.2 worker with the same node, DRA claim, and
-# /dev/dri/renderD128: ramalama's mesa (ICD api_version 1.4.328) enumerates
-# `Virtio-GPU Venus`, while the llama.cpp image's newer mesa (1.4.335) returns
-# no physical device at all, with no error from the loader or the driver. So
-# take mesa from ramalama and only the binaries from llama.cpp.
+# Both images ship a virtio ICD, so the choice is not about which one has the
+# file. A mesa newer than the host renderer enumerates no Vulkan device at all,
+# and neither the loader nor the driver reports why. Take mesa from ramalama and
+# only the binaries from llama.cpp.
 #
 # Bumping the llama.cpp pin is safe because mesa does not move with it. Bumping
-# the ramalama pin moves mesa, so re-run the Venus check on a real worker.
+# the ramalama pin moves mesa, so re-check Venus on a real worker first.
 FROM ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:4bba991a7ec5aa1ce73c1b1b06154589169f93e49f730836a6a2d25bd6d017e0 AS llama
 
 FROM quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4

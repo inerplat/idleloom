@@ -11,7 +11,7 @@ served with every layer offloaded is therefore charged to the Mac twice over if
 the guest also holds it:
 
 - Vulkan device memory, allocated on the host by krunkit on the guest's behalf.
-  A 12.5 GB GGUF shows up as roughly 12 GB of `IOAccelerator (graphics)` in
+  It appears as `IOAccelerator (graphics)` in
   `footprint -p "$(pgrep -f krunkit)"`. This copy is unavoidable.
 - Guest RAM, if the loader keeps the file resident after uploading it. This copy
   is avoidable and the recipes pass `--no-mmap` to avoid it.
