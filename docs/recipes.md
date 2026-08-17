@@ -584,16 +584,24 @@ alpha path publishes the Mac through a WireKube `EndpointSlice`; `kubectl
 proxy` therefore cannot expose this Service. The logs-only projection also
 does not implement `kubectl port-forward` yet.
 
-The Service fronts the runtime's own OpenAI-compatible server, not an
-Idleloom-specific adapter, so standard clients work as they do against any
-OpenAI endpoint: streaming with `stream: true`, sampling controls such as
+The Service fronts the runtime's own OpenAI-compatible server rather than an
+Idleloom-specific API, so standard clients work as they do against any OpenAI
+endpoint: streaming with `stream: true`, sampling controls such as
 `temperature`, chat templates applied to the full message list, and `usage`
 in responses, each to the extent the runtime implements them. llama.cpp serves
 its complete `llama-server` API, Ollama serves its usual `/v1` endpoints plus
 its native API, and MLX serves `mlx_lm.server` from the locked wheel. Request
 concurrency is whatever the runtime allows; llama.cpp queues on its single
-slot rather than rejecting. This slice does not add application-layer TLS or
-expose an Ingress. The first MLX request path may require the same
+slot rather than rejecting.
+
+The runtime listens on loopback and the agent relays the host's WireKube
+address to it, copying bytes without reading them. Two things make that the
+arrangement rather than binding the runtime to the mesh address directly: a
+host cannot open a connection to its own WireKube address, so the agent could
+not health check a runtime bound there, and loopback keeps the model server
+off every other interface the Mac is attached to. Because the relay never
+parses the traffic, anything the runtime supports reaches clients unchanged.
+This slice does not add application-layer TLS or expose an Ingress. The first MLX request path may require the same
 approximately 650 MB locked runtime and model preparation as Native batch
 inference.
 
@@ -639,10 +647,8 @@ kubectl -n default logs pod/native-llama-serve-client
 
 The client calls model alias `local-gguf` through Service
 `native-llama-serve.default.svc`. Restart behavior and the cluster-private
-WireKube endpoint are identical to MLX and Ollama serving. When serving,
-llama-server itself binds the host's mesh address, so its full API surface,
-streaming included, is what clients see; the loopback binding remains for
-batch inference.
+WireKube endpoint are identical to MLX and Ollama serving, and llama-server's
+full API surface, streaming included, is what clients see.
 
 Delete the manifest to stop the process and remove its EndpointSlice:
 
