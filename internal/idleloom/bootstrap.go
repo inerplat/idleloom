@@ -6,9 +6,11 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"net"
 	"reflect"
 	"sort"
 	"strings"
@@ -26,6 +28,11 @@ import (
 const (
 	bootstrapGroup = "system:bootstrappers:idleloom:default-node-token"
 )
+
+// Port the worker kubelet serves HTTPS on, reachable from the Mac over the
+// runtime's private guest network. A variable so tests can point the probe at a
+// listener on an ephemeral port.
+var kubeletServingPort = "10250"
 
 type BootstrapToken struct {
 	Value      string
@@ -112,6 +119,15 @@ func ApproveKubeletServingCSR(ctx context.Context, client kubernetes.Interface, 
 		if !wait {
 			return nil
 		}
+		// A resumed enrollment finds nothing to approve: the kubelet already
+		// holds a serving certificate from the first attempt so it files no new
+		// request, and the original CSR has since been garbage collected. Ask
+		// the kubelet what it is actually serving before deciding to wait, or
+		// the resume blocks until the timeout on a node that is already fine.
+		address := net.JoinHostPort(guestIP, kubeletServingPort)
+		if served, err := kubeletServingCertificateReady(ctx, address, nodeName, net.ParseIP(guestIP)); err == nil && served {
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -120,6 +136,43 @@ func ApproveKubeletServingCSR(ctx context.Context, client kubernetes.Interface, 
 		case <-ticker.C:
 		}
 	}
+}
+
+// kubeletServingCertificateReady reports whether the kubelet already presents a
+// serving certificate that ApproveKubeletServingCSR would have accepted. The
+// chain is deliberately not verified here: the caller only needs to know that a
+// usable certificate exists, and the kubelet-serving signer does not have to
+// share a CA with the API server.
+func kubeletServingCertificateReady(ctx context.Context, address, nodeName string, expected net.IP) (bool, error) {
+	if address == "" || nodeName == "" || expected == nil {
+		return false, fmt.Errorf("address, node name, and guest IP are required to inspect the serving certificate")
+	}
+	dialer := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}}
+	probe, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	conn, err := dialer.DialContext(probe, "tcp", address)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = conn.Close() }()
+	peers := conn.(*tls.Conn).ConnectionState().PeerCertificates
+	if len(peers) == 0 {
+		return false, nil
+	}
+	leaf := peers[0]
+	now := time.Now()
+	if now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) {
+		return false, nil
+	}
+	if leaf.Subject.CommonName != "system:node:"+nodeName {
+		return false, nil
+	}
+	for _, candidate := range leaf.IPAddresses {
+		if candidate.Equal(expected) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func waitForIssuedServingCertificate(ctx context.Context, client kubernetes.Interface, csrName string, timeout time.Duration) error {

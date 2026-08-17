@@ -1,8 +1,31 @@
-FROM ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:5c9c880045f1d6131aa7c90bf2695dbb3e9c9bf2e3f4513eb0672f1500318e02 AS llama
+# llama.cpp binaries on a mesa userspace that this krunkit's Venus renderer
+# actually works with.
+#
+# Both images ship a virtio ICD, so the split is not about which one has the
+# file. Measured on a krunkit 1.3.2 worker with the same node, DRA claim, and
+# /dev/dri/renderD128: ramalama's mesa (ICD api_version 1.4.328) enumerates
+# `Virtio-GPU Venus`, while the llama.cpp image's newer mesa (1.4.335) returns
+# no physical device at all, with no error from the loader or the driver. So
+# take mesa from ramalama and only the binaries from llama.cpp.
+#
+# Bumping the llama.cpp pin is safe because mesa does not move with it. Bumping
+# the ramalama pin moves mesa, so re-run the Venus check on a real worker.
+FROM ghcr.io/ggml-org/llama.cpp:server-vulkan@sha256:4bba991a7ec5aa1ce73c1b1b06154589169f93e49f730836a6a2d25bd6d017e0 AS llama
 
 FROM quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4
 
 COPY --from=llama /app /app
+
+# ramalama releases far less often than llama.cpp, so its bundled binaries fall
+# behind the models people want to serve. Drop the stale ones and publish the
+# overlaid binaries under the paths the recipes call, so nothing resolves to a
+# mixed pair of builds.
+RUN rm -f /usr/bin/llama /usr/bin/llama-* \
+    && for binary in /app/llama /app/llama-*; do \
+         [ -x "${binary}" ] || continue; \
+         ln -s "${binary}" "/usr/bin/$(basename "${binary}")"; \
+       done \
+    && /usr/bin/llama-server --version
 
 ENV LLAMA_ARG_HOST=0.0.0.0
 

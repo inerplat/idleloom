@@ -687,10 +687,29 @@ curl --fail-with-body http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"qwen3-0.6b","messages":[{"role":"user","content":"Why is idle compute useful?"}],"max_tokens":64}'
 ```
 
-The default model is downloaded and checksum-verified into Pod-local
-`emptyDir` storage on each replacement Pod. Use an operator-managed persistent
-model cache in a future recipe before treating restarts as a fast path. The
-Pod also mounts a writable runtime cache for Vulkan shader compilation while
+The model is downloaded and checksum-verified into a cache on the worker's own
+disk, `modelCacheDir` (default `/var/lib/idleloom/volumes/llama-models`). Each
+file is named after its SHA-256, so a replacement Pod re-verifies the cached
+copy and starts without downloading, while a changed `modelURL` or quantisation
+lands beside the old entry rather than silently reusing it. An interrupted fetch
+is written under a scratch name and renamed only after verification, so a
+partial download can never be mistaken for a warm cache.
+
+The cache is bounded by the worker disk (`idlectl create worker --disk`) and is
+never pruned automatically. Reclaim space by deleting digests you no longer
+serve:
+
+```sh
+kubectl -n "${IDLELOOM_NAMESPACE}" exec deploy/worker-serve -c server -- ls -la /models
+```
+
+Because the worker is a dedicated single-tenant Node, the cache is a `hostPath`
+rather than a PersistentVolume: a cluster PVC would pull every gigabyte back
+across the WireKube tunnel. kubelet does not apply `fsGroup` to `hostPath`, so a
+short init container takes `CHOWN`, and no other capability, to hand the
+directory to UID 65532 before the unprivileged fetch runs.
+
+The Pod also mounts a writable runtime cache for Vulkan shader compilation while
 keeping the image root filesystem read-only. The Service is cluster-private
 and does not configure Ingress, external TLS, or
 tenant authorization. Remove the generated resources and Secret explicitly:

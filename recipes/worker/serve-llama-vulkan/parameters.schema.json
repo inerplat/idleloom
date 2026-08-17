@@ -1,7 +1,9 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["apiKeySecret"],
+  "required": [
+    "apiKeySecret"
+  ],
   "properties": {
     "apiKeySecret": {
       "type": "string",
@@ -29,7 +31,7 @@
     },
     "memory": {
       "type": "string",
-      "description": "Memory request and limit for llama.cpp.",
+      "description": "Memory request and limit for llama.cpp. Size it for what the server keeps resident, which is staging and per-slot buffers and grows with parallel. Do not size it for the model: every layer is offloaded, so the weights live in Vulkan device memory, charged to the worker VM rather than to this cgroup. Oversizing does active harm because the limit also caps the Pod's page cache, so a generous value lets the whole GGUF linger in cache after the upload and the host pays for the model twice. Measure the real requirement with the anon line of /sys/fs/cgroup/memory.stat. The file line beside it is reclaimable cache that grows to fill whatever you allow.",
       "default": "2Gi",
       "format": "positiveQuantity"
     },
@@ -39,17 +41,18 @@
       "default": "qwen3-0.6b",
       "format": "dnsSubdomain"
     },
+    "modelCacheDir": {
+      "type": "string",
+      "description": "Directory on the worker's own disk holding downloaded GGUF files, one per digest. Restarts reuse it instead of re-downloading; it is bounded by the worker disk (idlectl create worker --disk) and is never pruned automatically.",
+      "default": "/var/lib/idleloom/volumes/llama-models",
+      "minLength": 1,
+      "pattern": "^/var/lib/idleloom/volumes(/[A-Za-z0-9._-]+)+$"
+    },
     "modelSHA256": {
       "type": "string",
       "description": "SHA-256 of the GGUF model file.",
       "default": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
       "format": "sha256Hex"
-    },
-    "modelStorage": {
-      "type": "string",
-      "description": "Ephemeral disk capacity reserved for the downloaded GGUF file.",
-      "default": "2Gi",
-      "format": "positiveQuantity"
     },
     "modelURL": {
       "type": "string",
@@ -65,10 +68,17 @@
     },
     "parallel": {
       "type": "integer",
-      "description": "Number of concurrent llama.cpp server slots.",
+      "description": "Number of concurrent llama.cpp server slots. contextSize is the total across slots, so each slot gets contextSize/parallel. Raise memory alongside it: per-slot batch and logit buffers are host-side and scale with the slot count, so a value tuned for one slot will OOM at four. On the Venus backend the throughput payoff is small because decode is limited by command submission rather than by weight reads. Prefer 1 unless a measurement on your worker says otherwise.",
       "default": 1,
       "minimum": 1,
       "maximum": 4
+    },
+    "serverImage": {
+      "type": "string",
+      "description": "Image carrying llama.cpp built against the worker's Venus Vulkan ICD. Override it with a locally built Dockerfile.llama-vulkan image when the model postdates the default pin.",
+      "default": "quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*(@sha256:[a-f0-9]{64})?$"
     },
     "servicePort": {
       "type": "integer",

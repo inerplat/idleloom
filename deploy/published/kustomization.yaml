@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Installs the Vulkan DRA driver from the published image instead of one built
+# and loaded by hand. Use deploy/base with `idlectl load image` when developing
+# the driver itself.
+#
+# `latest` tracks the most recent non-prerelease tag. Pin a release before
+# relying on it:
+#
+#   kustomize edit set image \
+#     idleloom-vulkan-dra:dev=docker.io/inerplat/idleloom-vulkan-dra:vX.Y.Z
+resources:
+  - ../base
+images:
+  - name: idleloom-vulkan-dra
+    newName: docker.io/inerplat/idleloom-vulkan-dra
+    newTag: latest

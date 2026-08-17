@@ -7,9 +7,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"net"
 	"regexp"
 	"testing"
@@ -264,5 +266,108 @@ func newRSAKey(t *testing.T) *rsa.PrivateKey {
 func TestCreateBootstrapTokenRejectsNonPositiveTTL(t *testing.T) {
 	if _, err := CreateBootstrapToken(context.Background(), fake.NewClientset(), 0); err == nil {
 		t.Fatal("expected an error")
+	}
+}
+
+func servingTLSListener(t *testing.T, commonName string, ips []net.IP, notBefore, notAfter time.Time) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate serving key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: commonName, Organization: []string{"system:nodes"}},
+		NotBefore:    notBefore,
+		NotAfter:     notAfter,
+		IPAddresses:  ips,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create serving certificate: %v", err)
+	}
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: key}},
+	})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				_ = conn.(*tls.Conn).Handshake()
+				_ = conn.Close()
+			}()
+		}
+	}()
+	return listener.Addr().String()
+}
+
+func TestKubeletServingCertificateReadyAcceptsMatchingCertificate(t *testing.T) {
+	now := time.Now()
+	address := servingTLSListener(t, "system:node:worker-a", []net.IP{net.ParseIP("127.0.0.1")}, now.Add(-time.Hour), now.Add(time.Hour))
+	ready, err := kubeletServingCertificateReady(context.Background(), address, "worker-a", net.ParseIP("127.0.0.1"))
+	if err != nil {
+		t.Fatalf("kubeletServingCertificateReady: %v", err)
+	}
+	if !ready {
+		t.Fatal("a live serving certificate for this node and address was not accepted")
+	}
+}
+
+func TestKubeletServingCertificateReadyRejectsMismatchedOrExpired(t *testing.T) {
+	now := time.Now()
+	for _, testCase := range []struct {
+		name       string
+		commonName string
+		ips        []net.IP
+		notBefore  time.Time
+		notAfter   time.Time
+	}{
+		{"another node", "system:node:worker-b", []net.IP{net.ParseIP("127.0.0.1")}, now.Add(-time.Hour), now.Add(time.Hour)},
+		{"another address", "system:node:worker-a", []net.IP{net.ParseIP("10.0.0.9")}, now.Add(-time.Hour), now.Add(time.Hour)},
+		{"expired", "system:node:worker-a", []net.IP{net.ParseIP("127.0.0.1")}, now.Add(-2 * time.Hour), now.Add(-time.Hour)},
+		{"not yet valid", "system:node:worker-a", []net.IP{net.ParseIP("127.0.0.1")}, now.Add(time.Hour), now.Add(2 * time.Hour)},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			address := servingTLSListener(t, testCase.commonName, testCase.ips, testCase.notBefore, testCase.notAfter)
+			ready, err := kubeletServingCertificateReady(context.Background(), address, "worker-a", net.ParseIP("127.0.0.1"))
+			if err != nil {
+				t.Fatalf("kubeletServingCertificateReady: %v", err)
+			}
+			if ready {
+				t.Fatal("an unusable serving certificate was treated as ready")
+			}
+		})
+	}
+}
+
+func TestApproveKubeletServingCSRStopsWaitingWhenKubeletAlreadyServes(t *testing.T) {
+	now := time.Now()
+	address := servingTLSListener(t, "system:node:worker-a", []net.IP{net.ParseIP("127.0.0.1")}, now.Add(-time.Hour), now.Add(time.Hour))
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		t.Fatalf("split listener address: %v", err)
+	}
+	original := kubeletServingPort
+	kubeletServingPort = port
+	t.Cleanup(func() { kubeletServingPort = original })
+
+	// No CSR exists: the first enrollment's request was garbage collected and
+	// the kubelet will not file another while its certificate is still valid.
+	client := fake.NewClientset()
+	start := time.Now()
+	if err := ApproveKubeletServingCSR(context.Background(), client, "worker-a", host, now, true, 30*time.Second); err != nil {
+		t.Fatalf("resumed enrollment did not accept the existing serving certificate: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("resumed enrollment waited %s instead of using the existing certificate", elapsed)
 	}
 }

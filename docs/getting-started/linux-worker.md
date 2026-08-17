@@ -181,6 +181,21 @@ All of these settings are validated before any host or cluster change, so
 and reapplied automatically when a deferred worker is finished with
 `idlectl start worker`.
 
+## Load a locally built image
+
+The Worker has its own containerd, so an image built on the Mac is not visible
+to it until you copy it in. `idlectl load image` does that without a registry:
+
+```sh
+docker build --platform linux/arm64 -t my-image:dev .
+idlectl load image my-image:dev
+```
+
+It accepts several references at once, picks the first of `docker`, `nerdctl`,
+or `podman` on `PATH`, and takes `--archive` for an image tarball you already
+saved. Load before scheduling anything that uses the image, and load again after
+`idlectl delete worker`, because a new VM starts with an empty containerd.
+
 ## Run an ordinary Pod
 
 ```sh

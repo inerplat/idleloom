@@ -85,6 +85,13 @@ An intentional `create worker --wait=false` records phase `registered`, not
 cluster-side CNI and WireKube path are ready, `idlectl start worker` performs
 strict readiness checks, records phase `ready`, and uncordons the Node.
 
+A resume no longer stalls when the kubelet already holds a valid serving
+certificate. The kubelet does not file a new request while its current one is
+usable, and the original request is garbage collected within the hour, so there
+is nothing left to approve. `idlectl start worker` inspects what the kubelet is
+actually serving on the guest address and continues when that certificate names
+this node and address and has not expired.
+
 Pass a custom state path to every lifecycle command:
 
 ```sh
@@ -92,6 +99,41 @@ idlectl status --state /absolute/path/state.json
 idlectl start worker --state /absolute/path/state.json --timeout 10m
 idlectl delete worker WORKER --state /absolute/path/state.json
 ```
+
+## Mac sleep stops the Worker clock
+
+krunkit does not run while the Mac is asleep, so the guest kernel stops ticking
+with it. On wake the VM resumes with a clock that is behind by however long the
+Mac slept, and `systemd-timesyncd` does not step it back immediately. The Node
+then flaps between `Ready` and `NotReady`: the kubelet renews its lease with a
+timestamp the node controller reads as long expired, while the kubelet itself
+still reports `Ready=True`.
+
+The signature is a lease that advances in real time but trails wall clock:
+
+```sh
+date -u +%Y-%m-%dT%H:%M:%SZ
+kubectl get lease -n kube-node-lease WORKER -o jsonpath='{.spec.renewTime}{"\n"}'
+```
+
+Compare guest uptime against how long the VM process has been running. A guest
+that reports far less uptime than the VM has existed for was suspended:
+
+```sh
+ssh -i ~/.idleloom/runtimes/WORKER/id_ed25519 -p PORT idleloom@127.0.0.1 uptime
+```
+
+Step the clock back on the worker:
+
+```sh
+ssh -i ~/.idleloom/runtimes/WORKER/id_ed25519 -p PORT idleloom@127.0.0.1 \
+  sudo systemctl restart systemd-timesyncd
+```
+
+Keep the Mac awake for the lifetime of a Worker that must stay schedulable.
+`caffeinate -ims` for a bounded session, or disable idle sleep in System
+Settings for a machine dedicated to this. Serving workloads are affected twice
+over, because requests fail while the Node is marked `NotReady`.
 
 ## Worker logs
 
