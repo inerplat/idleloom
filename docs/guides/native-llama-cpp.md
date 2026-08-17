@@ -45,8 +45,8 @@ spec:
     manifestDigest: sha256:${GGUF_SHA256}
     format: gguf-v1
     sizeBytes: ${GGUF_SIZE}
-  minimumUnifiedMemory: 16Gi
-  maxContextLength: 2048
+  minimumUnifiedMemory: $((GGUF_SIZE / 1073741824 + 1))Gi
+  maxContextLength: 8192
   maxConcurrentRequests: 1
 EOF
 
@@ -54,7 +54,13 @@ kubectl apply --dry-run=server -f llama-cpp-model.yaml
 kubectl apply -f llama-cpp-model.yaml
 ```
 
-Increase the memory reservation for larger models or context windows.
+`minimumUnifiedMemory` only needs to clear the artifact size plus 512 MiB.
+Once a host's agent has hashed the file, the catalog entry's
+`status.memoryProfile` carries the measured per-token KV cost and scheduling
+uses that instead of the declaration; see the memory admission section of the
+[recipe reference](../recipes.md#native-metal-llamacpp-gguf-batch-inference)
+for the full contract. Set `maxContextLength` to what your clients need, up to 131072 and no
+more than the artifact's trained context length.
 
 ## Batch inference
 

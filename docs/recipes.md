@@ -331,9 +331,10 @@ kubectl apply -f custom-ollama-model.yaml
 
 Pass `--values custom-ollama-values.yaml` to `recipe render`. The admission
 policy rejects malformed sources, and scheduling remains blocked until a host
-advertises the exact local model. `minimumUnifiedMemory` must cover the model,
-runtime overhead, and context; use a conservative value above the local model
-size rather than treating it as an enforced memory limit.
+advertises the exact local model. Ollama artifacts have no measured memory
+profile, so the conservative estimate governs their admission; declare a
+`minimumUnifiedMemory` that covers the model, runtime overhead, and context
+rather than treating it as an enforced memory limit.
 
 Render, apply, and read the result:
 
@@ -430,26 +431,40 @@ kubectl apply --dry-run=server -f llama-cpp-model.yaml
 kubectl apply -f llama-cpp-model.yaml
 ```
 
-`minimumUnifiedMemory` has a validated floor:
+Memory admission is measurement first. While hashing the file, the agent also
+reads the GGUF header and publishes the model's real per-token KV cache cost;
+the controller aggregates it into the catalog entry's
+`status.memoryProfile`, visible as the `MemoryProfileMeasured` condition. When
+a profile exists and the host runs a measuring agent, scheduling charges the
+model what it actually costs:
+
+```text
+artifact bytes + maxContextLength * measured KV bytes per token
+              + padded compute and process overhead
+```
+
+and the declared `minimumUnifiedMemory` is bypassed. Grouped-query attention
+models cost a small fraction of the conservative default per token, so a
+measured model typically schedules with several times more context on the same
+Mac. `maxContextLength` may go up to 131072, bounded by the artifact's own
+trained context length once measured.
+
+`minimumUnifiedMemory` itself only needs to clear a sanity floor of the
+artifact size plus 512 MiB. It matters when no profile exists, which is the
+case for architectures whose KV cache the scanner does not model, for Ollama
+artifacts, and for hosts running older agents. There the conservative estimate
+applies instead:
 
 ```text
 artifact bytes + 4 GiB runtime + maxContextLength * 1 MiB
 ```
 
-A model below the floor is rejected at reconcile time, and one above the host's
-`status.allocatableUnifiedMemory` never schedules. Context is the term that
-surprises: at 1 MiB per token it costs more than the weights long before the
-8192-token ceiling, so a large GGUF on a small Mac is limited by context rather
-than by file size. Solve for the context a host can carry:
-
-```text
-maxContextLength = (allocatableUnifiedMemory - artifact bytes - 4 GiB) / 1 MiB
-```
-
-The reservation is deliberately conservative. It is a scheduling figure rather
-than an enforced macOS memory limit, and it is far larger than the KV cache the
-runtime actually allocates. The agent advertises the model only after hashing the complete file,
-and it repeats that strong verification immediately before every execution.
+Either figure is a scheduling reservation rather than an enforced macOS memory
+limit. The agent measures the host's actually available memory on every
+heartbeat, so a busy or swapping Mac stops accepting placements by itself, and
+it re-checks availability immediately before starting the process. The agent
+advertises the model only after hashing the complete file, and it repeats that
+strong verification immediately before every execution.
 
 Render and run the batch recipe:
 

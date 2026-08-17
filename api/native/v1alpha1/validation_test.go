@@ -146,16 +146,42 @@ func TestValidateLlamaCppGGUFModel(t *testing.T) {
 	}
 }
 
-func TestValidateModelRequiresConservativeMemoryReservation(t *testing.T) {
+func TestValidateModelRequiresSanityMemoryReservation(t *testing.T) {
 	model := validModel()
-	model.Spec.MinimumUnifiedMemory = resource.MustParse("4Gi")
+	model.Spec.Artifact.SizeBytes = 8 << 30
+	model.Spec.MinimumUnifiedMemory = resource.MustParse("8Gi")
 	if err := ValidateModel(&model); err == nil {
-		t.Fatal("ValidateModel accepted memory that excludes runtime and context overhead")
+		t.Fatal("ValidateModel accepted a reservation with no room beyond the artifact")
 	}
 	model = validModel()
-	model.Spec.MaxContextLength = 16384
+	model.Spec.Artifact.SizeBytes = 8 << 30
+	model.Spec.MinimumUnifiedMemory = resource.MustParse("9Gi")
+	if err := ValidateModel(&model); err != nil {
+		t.Fatalf("ValidateModel rejected a sane reservation above the artifact: %v", err)
+	}
+	model = validModel()
+	model.Spec.MaxContextLength = 262144
 	if err := ValidateModel(&model); err == nil {
 		t.Fatal("ValidateModel accepted an unbounded context length")
+	}
+}
+
+func TestEstimatedUnifiedMemoryForModel(t *testing.T) {
+	profile := &ModelMemoryProfile{Architecture: "qwen35", BlockCount: 65, KVBytesPerToken: 133120, TrainedContextLength: 262144}
+	estimated := EstimatedUnifiedMemoryForModel(12574489568, 8192, profile)
+	// Weights plus an exactly context-sized KV cache plus the padded compute
+	// and process overheads.
+	want := int64(12574489568) + 8192*133120 + (1 << 30) + (768 << 20)
+	if estimated.Value() != want {
+		t.Fatalf("estimated = %d, want %d", estimated.Value(), want)
+	}
+	fallback := EstimatedUnifiedMemoryForModel(12574489568, 8192, nil)
+	legacy := MinimumUnifiedMemoryForModel(12574489568, 8192)
+	if fallback.Value() != legacy.Value() {
+		t.Fatalf("estimate without a profile = %d, want the conservative %d", fallback.Value(), legacy.Value())
+	}
+	if estimated.Value() >= legacy.Value() {
+		t.Fatal("the measured estimate should undercut the conservative formula for a GQA model")
 	}
 }
 

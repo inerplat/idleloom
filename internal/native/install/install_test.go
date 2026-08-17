@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
+	"github.com/inerplat/idleloom/internal/native/devruntime"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
@@ -105,5 +107,25 @@ func assertApplyForce(t *testing.T, force bool) {
 	}
 	if patches == 0 {
 		t.Fatal("no embedded manifests were applied")
+	}
+}
+
+// TestLockedCatalogMemoryLiteralsMatchFrozenFormula pins the frozen catalog
+// reservations to the formula output they replaced. Catalog specs are
+// immutable and re-applied by every join, so if either side of this equality
+// moves, joining an existing cluster breaks; the literal is the side that must
+// stay put.
+func TestLockedCatalogMemoryLiteralsMatchFrozenFormula(t *testing.T) {
+	descriptor, err := devruntime.LockedModel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mlx := nativev1alpha1.MinimumUnifiedMemoryForModel(descriptor.SizeBytes, lockedModelContextLength)
+	if mlx.Value() != lockedMLXModelMinimumMemory {
+		t.Fatalf("frozen MLX reservation %d no longer matches the formula output %d", lockedMLXModelMinimumMemory, mlx.Value())
+	}
+	ollama := nativev1alpha1.MinimumUnifiedMemoryForModel(lockedOllamaModelSize, lockedModelContextLength)
+	if ollama.Value() != lockedOllamaModelMinimumMemory {
+		t.Fatalf("frozen Ollama reservation %d no longer matches the formula output %d", lockedOllamaModelMinimumMemory, ollama.Value())
 	}
 }

@@ -19,7 +19,7 @@ func TestLlamaCppDiscoveryPinsStableGGUFFile(t *testing.T) {
 	}
 	discovery := &LlamaCppDiscovery{}
 	runtime := LlamaCppRuntime{ModelsDirectory: directory}
-	models, err := discovery.Discover(context.Background(), runtime)
+	models, _, err := discovery.Discover(context.Background(), runtime)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,7 +56,7 @@ func TestLlamaCppDiscoveryRejectsSymlinksAndNonGGUFData(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, "invalid.gguf"), []byte("nope"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	models, err := (&LlamaCppDiscovery{}).Discover(context.Background(), LlamaCppRuntime{ModelsDirectory: directory})
+	models, _, err := (&LlamaCppDiscovery{}).Discover(context.Background(), LlamaCppRuntime{ModelsDirectory: directory})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestLlamaCppDiscoveryAndVerificationRejectHardLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := LlamaCppRuntime{ModelsDirectory: directory}
-	models, err := (&LlamaCppDiscovery{}).Discover(context.Background(), runtime)
+	models, _, err := (&LlamaCppDiscovery{}).Discover(context.Background(), runtime)
 	if err != nil {
 		t.Fatal(err)
 	}

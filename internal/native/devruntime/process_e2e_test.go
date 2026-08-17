@@ -156,7 +156,7 @@ func TestSandboxedLlamaCppGGUFInference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	models, err := (&LlamaCppDiscovery{}).Discover(context.Background(), runtime)
+	models, _, err := (&LlamaCppDiscovery{}).Discover(context.Background(), runtime)
 	if err != nil {
 		t.Fatal(err)
 	}

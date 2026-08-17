@@ -98,7 +98,7 @@ spec:
                 type: integer
               maxContextLength:
                 format: int32
-                maximum: 8192
+                maximum: 131072
                 minimum: 128
                 type: integer
               minimumUnifiedMemory:
@@ -159,6 +159,33 @@ spec:
                   - type
                   type: object
                 type: array
+              memoryProfile:
+                properties:
+                  architecture:
+                    maxLength: 64
+                    minLength: 1
+                    type: string
+                  blockCount:
+                    format: int32
+                    maximum: 4096
+                    minimum: 1
+                    type: integer
+                  kvBytesPerToken:
+                    format: int64
+                    maximum: 8388608
+                    minimum: 1024
+                    type: integer
+                  trainedContextLength:
+                    format: int32
+                    maximum: 16777216
+                    minimum: 128
+                    type: integer
+                required:
+                - architecture
+                - blockCount
+                - kvBytesPerToken
+                - trainedContextLength
+                type: object
               observedGeneration:
                 format: int64
                 type: integer

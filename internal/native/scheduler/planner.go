@@ -35,22 +35,39 @@ func (e *NoEligibleHostsError) Error() string {
 	return "no eligible Idleloom host: " + strings.Join(e.Reasons, "; ")
 }
 
+// SpecValidationError marks a deterministic spec-level rejection. Retrying
+// without a spec change cannot succeed, so callers surface it on the workload
+// instead of retrying silently.
+type SpecValidationError struct {
+	Reason string
+	Err    error
+}
+
+func (e *SpecValidationError) Error() string { return e.Err.Error() }
+
+func (e *SpecValidationError) Unwrap() error { return e.Err }
+
 func (p Planner) SelectHost(workload *nativev1alpha1.IdleloomWorkload, model *nativev1alpha1.IdleloomModel, hosts []nativev1alpha1.IdleloomHost) (*nativev1alpha1.IdleloomHost, error) {
 	if err := nativev1alpha1.ValidateWorkload(workload); err != nil {
-		return nil, fmt.Errorf("validate workload: %w", err)
+		return nil, &SpecValidationError{Reason: "WorkloadValidationFailed", Err: fmt.Errorf("validate workload: %w", err)}
 	}
 	if workload.Spec.Mode == nativev1alpha1.WorkloadModeServer || workload.Spec.Mode == nativev1alpha1.WorkloadModeBatch {
 		if model == nil {
-			return nil, fmt.Errorf("model workload requires a resolved model")
+			return nil, &SpecValidationError{Reason: "ModelValidationFailed", Err: fmt.Errorf("model workload requires a resolved model")}
 		}
 		if err := nativev1alpha1.ValidateModel(model); err != nil {
-			return nil, fmt.Errorf("validate model: %w", err)
+			return nil, &SpecValidationError{Reason: "ModelValidationFailed", Err: fmt.Errorf("validate model: %w", err)}
 		}
 		if workload.Spec.Model.CatalogRef != model.Name {
-			return nil, fmt.Errorf("workload requested model %q but controller resolved %q", workload.Spec.Model.CatalogRef, model.Name)
+			return nil, &SpecValidationError{Reason: "ModelValidationFailed", Err: fmt.Errorf("workload requested model %q but controller resolved %q", workload.Spec.Model.CatalogRef, model.Name)}
 		}
 	} else if model != nil {
-		return nil, fmt.Errorf("non-model workload must not resolve a model")
+		return nil, &SpecValidationError{Reason: "WorkloadValidationFailed", Err: fmt.Errorf("non-model workload must not resolve a model")}
+	}
+	if model != nil && model.Status.MemoryProfile != nil && model.Spec.MaxContextLength > model.Status.MemoryProfile.TrainedContextLength {
+		return nil, &SpecValidationError{Reason: "ModelValidationFailed", Err: fmt.Errorf(
+			"maxContextLength %d exceeds the artifact's measured trained context length %d",
+			model.Spec.MaxContextLength, model.Status.MemoryProfile.TrainedContextLength)}
 	}
 	now := time.Now()
 	if p.Now != nil {
@@ -60,10 +77,6 @@ func (p Planner) SelectHost(workload *nativev1alpha1.IdleloomWorkload, model *na
 	if heartbeatTimeout <= 0 {
 		heartbeatTimeout = nativev1alpha1.DefaultAgentHeartbeatTimeout
 	}
-	request := workload.Spec.Resources.UnifiedMemoryRequest.DeepCopy()
-	if model != nil {
-		request = nativev1alpha1.EffectiveUnifiedMemoryRequest(request, model.Spec.MinimumUnifiedMemory)
-	}
 
 	type candidate struct {
 		host nativev1alpha1.IdleloomHost
@@ -71,6 +84,7 @@ func (p Planner) SelectHost(workload *nativev1alpha1.IdleloomWorkload, model *na
 	var candidates []candidate
 	var reasons []string
 	for _, host := range hosts {
+		request := effectiveMemoryRequest(workload, model, host)
 		if reason := hostIneligible(host, workload, model, request, now, heartbeatTimeout); reason != "" {
 			reasons = append(reasons, fmt.Sprintf("%s/%s: %s", host.Namespace, host.Name, reason))
 			continue
@@ -126,10 +140,7 @@ func (p Planner) PlanAssignment(workload *nativev1alpha1.IdleloomWorkload, model
 	if leaseDuration < 10*time.Second || leaseDuration > 300*time.Second || leaseDuration%time.Second != 0 {
 		return nil, fmt.Errorf("lease duration must be a whole number of seconds between 10s and 5m")
 	}
-	memoryRequest := workload.Spec.Resources.UnifiedMemoryRequest.DeepCopy()
-	if model != nil {
-		memoryRequest = nativev1alpha1.EffectiveUnifiedMemoryRequest(memoryRequest, model.Spec.MinimumUnifiedMemory)
-	}
+	memoryRequest := effectiveMemoryRequest(workload, model, *host)
 	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{
 		TypeMeta: metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomWorkloadAssignment"},
 		ObjectMeta: metav1.ObjectMeta{
@@ -327,6 +338,25 @@ func cloneMap(values map[string]nativev1alpha1.WorkloadRunParameter) map[string]
 		result[key] = value
 	}
 	return result
+}
+
+// effectiveMemoryRequest is the memory figure a placement on this host is
+// admitted and recorded with. When the model's geometry has been measured and
+// the host runs a binary that both measures and accepts measurement-derived
+// requests, the estimate replaces the declared spec minimum, which is frozen
+// at the conservative formula's output and cannot be corrected in place. The
+// workload's own request still raises the figure; nothing lowers it below the
+// estimate.
+func effectiveMemoryRequest(workload *nativev1alpha1.IdleloomWorkload, model *nativev1alpha1.IdleloomModel, host nativev1alpha1.IdleloomHost) resource.Quantity {
+	request := workload.Spec.Resources.UnifiedMemoryRequest.DeepCopy()
+	if model == nil {
+		return request
+	}
+	if model.Status.MemoryProfile != nil && contains(host.Status.Capabilities, nativev1alpha1.CapabilityMemoryProfileV1) {
+		estimated := nativev1alpha1.EstimatedUnifiedMemoryForModel(model.Spec.Artifact.SizeBytes, model.Spec.MaxContextLength, model.Status.MemoryProfile)
+		return nativev1alpha1.EffectiveUnifiedMemoryRequest(request, estimated)
+	}
+	return nativev1alpha1.EffectiveUnifiedMemoryRequest(request, model.Spec.MinimumUnifiedMemory)
 }
 
 func contains(values []string, expected string) bool {

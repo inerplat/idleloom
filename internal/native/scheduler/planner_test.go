@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -424,4 +425,129 @@ func testHost(name, memory string, now time.Time) nativev1alpha1.IdleloomHost {
 func microTime(value time.Time) *metav1.MicroTime {
 	time := metav1.NewMicroTime(value)
 	return &time
+}
+
+func measuredGGUFModel() nativev1alpha1.IdleloomModel {
+	digest := "sha256:" + strings.Repeat("c", 64)
+	return nativev1alpha1.IdleloomModel{
+		ObjectMeta: metav1.ObjectMeta{Name: "qwen-gguf", UID: types.UID("gguf-model-uid")},
+		Spec: nativev1alpha1.IdleloomModelSpec{
+			Family:         nativev1alpha1.ModelFamilyGGUF,
+			RuntimeProfile: nativev1alpha1.RuntimeProfileLlamaCppMetalV1,
+			Artifact: nativev1alpha1.ModelArtifact{
+				GGUFFile: "qwen.gguf", ManifestDigest: digest,
+				Format: nativev1alpha1.ArtifactFormatGGUFV1, SizeBytes: 12 << 30,
+			},
+			// Frozen at the conservative formula's output: 12GiB + 4GiB + 8GiB.
+			MinimumUnifiedMemory:  resource.MustParse("24Gi"),
+			MaxContextLength:      8192,
+			MaxConcurrentRequests: 1,
+		},
+		Status: nativev1alpha1.IdleloomModelStatus{
+			MemoryProfile: &nativev1alpha1.ModelMemoryProfile{
+				Architecture: "qwen35", BlockCount: 65, KVBytesPerToken: 133120, TrainedContextLength: 262144,
+			},
+		},
+	}
+}
+
+func measuredGGUFHost(name, memory string, now time.Time, measuring bool) nativev1alpha1.IdleloomHost {
+	host := testHost(name, memory, now)
+	host.Status.RuntimeProfiles = []string{nativev1alpha1.RuntimeProfileLlamaCppMetalV1}
+	host.Status.ModelFamilies = []string{nativev1alpha1.ModelFamilyGGUF}
+	model := measuredGGUFModel()
+	entry := nativev1alpha1.HostModelStatus{
+		RuntimeProfile: nativev1alpha1.RuntimeProfileLlamaCppMetalV1,
+		Name:           model.Spec.Artifact.GGUFFile, ManifestDigest: model.Spec.Artifact.ManifestDigest,
+		Family: model.Spec.Family, Format: model.Spec.Artifact.Format, SizeBytes: model.Spec.Artifact.SizeBytes,
+	}
+	if measuring {
+		host.Status.Capabilities = append(host.Status.Capabilities, nativev1alpha1.CapabilityMemoryProfileV1)
+		entry.Memory = &nativev1alpha1.ModelMemoryProfile{
+			Architecture: "qwen35", BlockCount: 65, KVBytesPerToken: 133120, TrainedContextLength: 262144,
+		}
+	}
+	host.Status.AvailableModels = []nativev1alpha1.HostModelStatus{entry}
+	return host
+}
+
+func TestSelectHostUsesMeasuredEstimateOnCapableHosts(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	model := measuredGGUFModel()
+	workload := testWorkload()
+	workload.Spec.Model.CatalogRef = model.Name
+	workload.Spec.Resources.UnifiedMemoryRequest = resource.MustParse("8Gi")
+	// 16Gi cannot hold the frozen 24Gi declaration but easily holds the
+	// measured estimate of about 14.8Gi.
+	host := measuredGGUFHost("studio", "16Gi", now, true)
+	selected, err := Planner{Now: func() time.Time { return now }}.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host})
+	if err != nil {
+		t.Fatalf("measured estimate did not admit the workload: %v", err)
+	}
+	if selected.Namespace != host.Namespace {
+		t.Fatalf("selected %s, want %s", selected.Namespace, host.Namespace)
+	}
+}
+
+func TestSelectHostKeepsLegacyRequestWithoutCapability(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	model := measuredGGUFModel()
+	workload := testWorkload()
+	workload.Spec.Model.CatalogRef = model.Name
+	workload.Spec.Resources.UnifiedMemoryRequest = resource.MustParse("8Gi")
+	// Without the capability the frozen 24Gi declaration stays authoritative,
+	// so a 16Gi host must not be selected even though it fits the estimate.
+	host := measuredGGUFHost("studio", "16Gi", now, false)
+	_, err := Planner{Now: func() time.Time { return now }}.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host})
+	var noEligible *NoEligibleHostsError
+	if !errors.As(err, &noEligible) {
+		t.Fatalf("legacy request unexpectedly admitted on a non-measuring host: %v", err)
+	}
+}
+
+func TestSelectHostRejectsContextBeyondTrainedLength(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	model := measuredGGUFModel()
+	model.Status.MemoryProfile.TrainedContextLength = 4096
+	workload := testWorkload()
+	workload.Spec.Model.CatalogRef = model.Name
+	host := measuredGGUFHost("studio", "32Gi", now, true)
+	_, err := Planner{Now: func() time.Time { return now }}.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host})
+	var invalid *SpecValidationError
+	if !errors.As(err, &invalid) || invalid.Reason != "ModelValidationFailed" {
+		t.Fatalf("context beyond trained length was not rejected: %v", err)
+	}
+}
+
+func TestPlanAssignmentStampsMeasuredRequest(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0).UTC()
+	model := measuredGGUFModel()
+	workload := testWorkload()
+	workload.Spec.Model.CatalogRef = model.Name
+	workload.Spec.Resources.UnifiedMemoryRequest = resource.MustParse("8Gi")
+	host := measuredGGUFHost("studio", "16Gi", now, true)
+	planner := Planner{Now: func() time.Time { return now }, NewExecutionID: func() (string, error) {
+		return "11111111-1111-4111-8111-111111111111", nil
+	}}
+	planned, err := planner.PlanAssignment(&workload, &model, &host, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := nativev1alpha1.EstimatedUnifiedMemoryForModel(model.Spec.Artifact.SizeBytes, model.Spec.MaxContextLength, model.Status.MemoryProfile)
+	if planned.Spec.Model.UnifiedMemoryRequest.Value() != want.Value() {
+		t.Fatalf("assignment request = %s, want the measured estimate %s", planned.Spec.Model.UnifiedMemoryRequest.String(), want.String())
+	}
+}
+
+func TestPinnedLocalModelMatchIgnoresMeasuredMemory(t *testing.T) {
+	model := measuredGGUFModel()
+	entry := nativev1alpha1.HostModelStatus{
+		RuntimeProfile: nativev1alpha1.RuntimeProfileLlamaCppMetalV1,
+		Name:           model.Spec.Artifact.GGUFFile, ManifestDigest: model.Spec.Artifact.ManifestDigest,
+		Family: model.Spec.Family, Format: model.Spec.Artifact.Format, SizeBytes: model.Spec.Artifact.SizeBytes,
+		Memory: &nativev1alpha1.ModelMemoryProfile{Architecture: "qwen35", BlockCount: 65, KVBytesPerToken: 133120, TrainedContextLength: 262144},
+	}
+	if !containsPinnedLocalModel([]nativev1alpha1.HostModelStatus{entry}, model.Spec) {
+		t.Fatal("measured memory data leaked into the pinned model identity match")
+	}
 }

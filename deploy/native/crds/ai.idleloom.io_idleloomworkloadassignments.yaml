@@ -162,7 +162,7 @@ spec:
                     type: integer
                   maxContextLength:
                     format: int32
-                    maximum: 8192
+                    maximum: 131072
                     minimum: 128
                     type: integer
                   runtimeProfile:

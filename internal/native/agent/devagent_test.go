@@ -20,6 +20,7 @@ import (
 	"github.com/inerplat/idleloom/internal/native/execution"
 	nativekube "github.com/inerplat/idleloom/internal/native/kube"
 	"github.com/inerplat/idleloom/internal/native/kubeletbridge"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -510,8 +511,8 @@ func TestHostAdvertisesExactLocalLlamaCppModel(t *testing.T) {
 	}
 	agent := &DevAgent{config: DevAgentConfig{
 		Dynamic: client, AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()), Platform: fakeAgentPlatform{},
-		ResolveLlamaCpp: func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, error) {
-			return devruntime.LlamaCppRuntime{Version: "9960-a935fbffe", Device: "MTL0"}, []devruntime.LlamaCppModel{model}, nil
+		ResolveLlamaCpp: func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, map[string]devruntime.GGUFMemoryProfile, error) {
+			return devruntime.LlamaCppRuntime{Version: "9960-a935fbffe", Device: "MTL0"}, []devruntime.LlamaCppModel{model}, nil, nil
 		},
 	}}
 	if err := agent.updateHostStatus(context.Background(), host, false, ""); err != nil {
@@ -527,6 +528,77 @@ func TestHostAdvertisesExactLocalLlamaCppModel(t *testing.T) {
 	}
 	if !slices.Contains(updated.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileLlamaCppMetalV1) || len(updated.Status.AvailableModels) != 1 || updated.Status.AvailableModels[0].Name != model.Name {
 		t.Fatalf("llama.cpp capabilities = %#v", updated.Status)
+	}
+}
+
+func TestHostStatusPublishesMeasuredAvailableMemory(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := nativev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	host := &nativev1alpha1.IdleloomHost{
+		TypeMeta:   metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomHost"},
+		ObjectMeta: metav1.ObjectMeta{Name: "host", Namespace: "idleloom-host-studio", Generation: 1},
+		Spec:       nativev1alpha1.IdleloomHostSpec{AgentID: "studio.native"},
+	}
+	client := dynamicfake.NewSimpleDynamicClient(scheme, host)
+	agent := &DevAgent{config: DevAgentConfig{
+		Dynamic: client, AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()),
+		Platform: fakeAgentPlatform{availableBytes: 6 << 30},
+	}}
+	if err := agent.updateHostStatus(context.Background(), host, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	object, err := client.Resource(nativekube.HostsGVR).Namespace(host.Namespace).Get(context.Background(), host.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated nativev1alpha1.IdleloomHost
+	if err := nativekube.FromUnstructured(object, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.AllocatableUnifiedMemory.Value() != 16<<30 || updated.Status.AvailableUnifiedMemory.Value() != 6<<30 {
+		t.Fatalf("memory status = allocatable %s available %s, want measured available below allocatable",
+			updated.Status.AllocatableUnifiedMemory.String(), updated.Status.AvailableUnifiedMemory.String())
+	}
+	condition := apiMeta.FindStatusCondition(updated.Status.Conditions, nativev1alpha1.HostConditionMemoryVerified)
+	if condition == nil || condition.Status != metav1.ConditionTrue || condition.Reason != "Measured" {
+		t.Fatalf("MemoryVerified condition = %#v", condition)
+	}
+}
+
+func TestHostStatusDegradesWhenMeasurementFails(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := nativev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	host := &nativev1alpha1.IdleloomHost{
+		TypeMeta:   metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomHost"},
+		ObjectMeta: metav1.ObjectMeta{Name: "host", Namespace: "idleloom-host-studio", Generation: 1},
+		Spec:       nativev1alpha1.IdleloomHostSpec{AgentID: "studio.native"},
+	}
+	client := dynamicfake.NewSimpleDynamicClient(scheme, host)
+	agent := &DevAgent{config: DevAgentConfig{
+		Dynamic: client, AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()),
+		Platform: fakeAgentPlatform{snapshotErr: fmt.Errorf("vm_stat unavailable")},
+	}}
+	if err := agent.updateHostStatus(context.Background(), host, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	object, err := client.Resource(nativekube.HostsGVR).Namespace(host.Namespace).Get(context.Background(), host.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated nativev1alpha1.IdleloomHost
+	if err := nativekube.FromUnstructured(object, &updated); err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.AvailableUnifiedMemory.Value() != 8<<30 {
+		t.Fatalf("degraded available = %s, want half of allocatable", updated.Status.AvailableUnifiedMemory.String())
+	}
+	condition := apiMeta.FindStatusCondition(updated.Status.Conditions, nativev1alpha1.HostConditionMemoryVerified)
+	if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "MeasurementDegraded" {
+		t.Fatalf("MemoryVerified condition = %#v", condition)
 	}
 }
 
@@ -558,8 +630,8 @@ func TestHostCapsCombinedLocalModelAdvertisement(t *testing.T) {
 		ResolveOllama: func() (devruntime.OllamaRuntime, []devruntime.OllamaModel, error) {
 			return devruntime.OllamaRuntime{Version: "0.21.2"}, ollamaModels, nil
 		},
-		ResolveLlamaCpp: func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, error) {
-			return devruntime.LlamaCppRuntime{Version: "9960-a935fbffe", Device: "MTL0"}, llamaModels, nil
+		ResolveLlamaCpp: func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, map[string]devruntime.GGUFMemoryProfile, error) {
+			return devruntime.LlamaCppRuntime{Version: "9960-a935fbffe", Device: "MTL0"}, llamaModels, nil, nil
 		},
 	}}
 	if err := agent.updateHostStatus(context.Background(), host, false, ""); err != nil {
@@ -660,8 +732,8 @@ func TestEnsureProcessStartsOwnedLlamaCppRuntime(t *testing.T) {
 		store: store, logs: kubeletbridge.NewLogBuffer(1 << 20),
 		config: DevAgentConfig{
 			AgentID: "studio.native", Layout: devruntime.NewLayout(t.TempDir()), StateDirectory: t.TempDir(), Platform: fakeAgentPlatform{},
-			ResolveLlamaCpp: func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, error) {
-				return devruntime.LlamaCppRuntime{Executable: "/opt/homebrew/bin/llama-server", Version: "9960-a935fbffe", Device: "MTL0"}, []devruntime.LlamaCppModel{model}, nil
+			ResolveLlamaCpp: func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, map[string]devruntime.GGUFMemoryProfile, error) {
+				return devruntime.LlamaCppRuntime{Executable: "/opt/homebrew/bin/llama-server", Version: "9960-a935fbffe", Device: "MTL0"}, []devruntime.LlamaCppModel{model}, nil, nil
 			},
 			StartLlamaCpp: func(_ context.Context, config devruntime.LlamaCppProcessConfig) (Process, error) {
 				startCalls++
@@ -1185,11 +1257,30 @@ func (p *fakeProcess) Stderr() string { return "" }
 
 func (p *fakeProcess) WaitError() error { return nil }
 
-type fakeAgentPlatform struct{}
+type fakeAgentPlatform struct {
+	availableBytes int64
+	snapshotErr    error
+}
 
 func (fakeAgentPlatform) KrunkitRunning(context.Context) (bool, error) { return false, nil }
 func (fakeAgentPlatform) AllocatableMemory(context.Context) (resource.Quantity, error) {
 	return resource.MustParse("16Gi"), nil
+}
+func (p fakeAgentPlatform) MemorySnapshot(context.Context) (MemorySnapshot, error) {
+	if p.snapshotErr != nil {
+		return MemorySnapshot{}, p.snapshotErr
+	}
+	available := p.availableBytes
+	if available == 0 {
+		available = 12 << 30
+	}
+	return MemorySnapshot{
+		Total:         resource.MustParse("24Gi"),
+		Allocatable:   resource.MustParse("16Gi"),
+		Available:     *resource.NewQuantity(available, resource.BinarySI),
+		PressureLevel: memoryPressureNormal,
+		MeasuredAt:    time.Now(),
+	}, nil
 }
 func (fakeAgentPlatform) ProcessStartToken(int) (string, error) { return "start", nil }
 func (fakeAgentPlatform) ProcessAlive(int) (bool, error)        { return false, nil }

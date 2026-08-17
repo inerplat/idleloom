@@ -77,6 +77,33 @@ spec:
                     manifestDigest:
                       pattern: ^sha256:[a-f0-9]{64}$
                       type: string
+                    memory:
+                      properties:
+                        architecture:
+                          maxLength: 64
+                          minLength: 1
+                          type: string
+                        blockCount:
+                          format: int32
+                          maximum: 4096
+                          minimum: 1
+                          type: integer
+                        kvBytesPerToken:
+                          format: int64
+                          maximum: 8388608
+                          minimum: 1024
+                          type: integer
+                        trainedContextLength:
+                          format: int32
+                          maximum: 16777216
+                          minimum: 128
+                          type: integer
+                      required:
+                      - architecture
+                      - blockCount
+                      - kvBytesPerToken
+                      - trainedContextLength
+                      type: object
                     name:
                       pattern: ^([a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}|[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf)$
                       type: string

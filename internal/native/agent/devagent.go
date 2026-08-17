@@ -24,6 +24,7 @@ import (
 	"github.com/inerplat/idleloom/internal/native/kubeletbridge"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -51,7 +52,7 @@ type DevAgentConfig struct {
 	StartShell             func(context.Context, devruntime.ShellConfig) (Process, error)
 	StartTraining          func(context.Context, devruntime.TrainingConfig) (Process, error)
 	ResolveOllama          func() (devruntime.OllamaRuntime, []devruntime.OllamaModel, error)
-	ResolveLlamaCpp        func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, error)
+	ResolveLlamaCpp        func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, map[string]devruntime.GGUFMemoryProfile, error)
 	PrepareRuntime         func(context.Context, func(string)) (devruntime.Receipt, error)
 	PrepareTrainingRuntime func(context.Context, func(string)) (devruntime.RuntimeReceipt, error)
 	KubeletBridge          *KubeletBridgeConfig
@@ -87,6 +88,7 @@ type DevAgent struct {
 	bridgeErrors   chan error
 	runStatus      *nativev1alpha1.WorkloadRunStatus
 	runProtocolErr error
+	memory         memoryTracker
 }
 
 type agentLogWriter struct {
@@ -208,24 +210,24 @@ func NewDevAgent(config DevAgentConfig) (*DevAgent, error) {
 		var lastLlamaAttempt time.Time
 		var lastLlamaErr error
 		discovery := &devruntime.LlamaCppDiscovery{}
-		config.ResolveLlamaCpp = func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, error) {
+		config.ResolveLlamaCpp = func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, map[string]devruntime.GGUFMemoryProfile, error) {
 			llamaMu.Lock()
 			defer llamaMu.Unlock()
 			if llamaRuntime.Executable == "" {
 				if lastLlamaErr != nil && time.Since(lastLlamaAttempt) < 30*time.Second {
-					return devruntime.LlamaCppRuntime{}, nil, lastLlamaErr
+					return devruntime.LlamaCppRuntime{}, nil, nil, lastLlamaErr
 				}
 				lastLlamaAttempt = time.Now()
 				resolved, err := devruntime.FindLlamaCpp(context.Background(), "", filepath.Join(config.Layout.Root, "models", "gguf"))
 				if err != nil {
 					lastLlamaErr = err
-					return devruntime.LlamaCppRuntime{}, nil, err
+					return devruntime.LlamaCppRuntime{}, nil, nil, err
 				}
 				llamaRuntime = resolved
 				lastLlamaErr = nil
 			}
-			models, err := discovery.Discover(context.Background(), llamaRuntime)
-			return llamaRuntime, models, err
+			models, profiles, err := discovery.Discover(context.Background(), llamaRuntime)
+			return llamaRuntime, models, profiles, err
 		}
 	}
 	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && (config.PrepareRuntime == nil || config.PrepareTrainingRuntime == nil) {
@@ -559,7 +561,7 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 			executable = ollamaRuntime.Executable
 		case nativev1alpha1.RuntimeProfileLlamaCppMetalV1:
 			var models []devruntime.LlamaCppModel
-			llamaRuntime, models, err = a.config.ResolveLlamaCpp()
+			llamaRuntime, models, _, err = a.config.ResolveLlamaCpp()
 			if err != nil {
 				return fmt.Errorf("resolve local llama.cpp runtime: %w", err)
 			}
@@ -594,6 +596,9 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 			return fmt.Errorf("training source digest does not match the resolved assignment")
 		}
 		runtimeVersion = runtimeReceipt.RuntimeVersion
+	}
+	if err := a.preStartMemoryGate(ctx, assignment); err != nil {
+		return err
 	}
 	nonce, err := secureToken()
 	if err != nil {
@@ -1073,8 +1078,6 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 	copy.Status.ModelFamilies = nil
 	copy.Status.AvailableModels = nil
 	copy.Status.Capabilities = nil
-	copy.Status.AllocatableUnifiedMemory = memory
-	copy.Status.AvailableUnifiedMemory = memory
 	copy.Status.KrunkitState = nativev1alpha1.KrunkitStateStopped
 	if krunkit {
 		copy.Status.KrunkitState = nativev1alpha1.KrunkitStateRunning
@@ -1122,20 +1125,36 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 			}
 		}
 	}
+	var llamaMetalTotalBytes int64
 	if a.config.ResolveLlamaCpp != nil {
-		_, models, err := a.config.ResolveLlamaCpp()
+		llamaRuntime, models, profiles, err := a.config.ResolveLlamaCpp()
+		if err == nil {
+			llamaMetalTotalBytes = llamaRuntime.MetalTotalMiB << 20
+		}
 		if err == nil && len(models) > 0 {
 			copy.Status.RuntimeProfiles = appendUnique(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileLlamaCppMetalV1)
+			// The capability tells the scheduler this binary both measures
+			// model geometry and accepts the smaller requests derived from it.
+			copy.Status.Capabilities = appendUnique(copy.Status.Capabilities, nativev1alpha1.CapabilityMemoryProfileV1)
 			for _, model := range models {
 				if model.Family != nativev1alpha1.ModelFamilyGGUF || model.Format != nativev1alpha1.ArtifactFormatGGUFV1 {
 					continue
 				}
 				copy.Status.ModelFamilies = appendUnique(copy.Status.ModelFamilies, model.Family)
-				copy.Status.AvailableModels = appendAvailableModel(copy.Status.AvailableModels, nativev1alpha1.HostModelStatus{
+				entry := nativev1alpha1.HostModelStatus{
 					RuntimeProfile: nativev1alpha1.RuntimeProfileLlamaCppMetalV1,
 					Name:           model.Name, ManifestDigest: model.ManifestDigest,
 					Family: model.Family, Format: model.Format, SizeBytes: model.SizeBytes,
-				})
+				}
+				if profile, measured := profiles[model.Name]; measured {
+					entry.Memory = &nativev1alpha1.ModelMemoryProfile{
+						Architecture:         profile.Architecture,
+						BlockCount:           profile.BlockCount,
+						KVBytesPerToken:      profile.KVBytesPerToken,
+						TrainedContextLength: profile.TrainedContextLength,
+					}
+				}
+				copy.Status.AvailableModels = appendAvailableModel(copy.Status.AvailableModels, entry)
 			}
 			if len(copy.Status.AvailableModels) > 0 {
 				readyStatus = metav1.ConditionTrue
@@ -1174,6 +1193,32 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 	if readyStatus == metav1.ConditionTrue && len(copy.Status.RuntimeProfiles) > 0 {
 		readyMessage = "Native host advertises runtime profiles: " + strings.Join(copy.Status.RuntimeProfiles, ", ")
 	}
+	allocatableBytes := memory.Value()
+	if llamaMetalTotalBytes > 0 && llamaMetalTotalBytes < allocatableBytes {
+		// The Metal working-set window is the real GPU budget when it is
+		// smaller than the static allocatable share.
+		allocatableBytes = llamaMetalTotalBytes
+	}
+	snapshot, snapshotErr := a.config.Platform.MemorySnapshot(ctx)
+	availableBytes, degraded := a.memory.observe(a.now(), allocatableBytes, snapshot.Available.Value(), snapshotErr)
+	copy.Status.AllocatableUnifiedMemory = *resource.NewQuantity(allocatableBytes, resource.BinarySI)
+	copy.Status.AvailableUnifiedMemory = *resource.NewQuantity(availableBytes, resource.BinarySI)
+	memoryStatus := metav1.ConditionTrue
+	memoryReason := "Measured"
+	memoryMessage := "available unified memory is measured on each heartbeat"
+	if degraded {
+		memoryStatus = metav1.ConditionFalse
+		memoryReason = "MeasurementDegraded"
+		memoryMessage = "memory measurement is unavailable; advertising half of allocatable until it recovers"
+	}
+	apiMeta.SetStatusCondition(&copy.Status.Conditions, metav1.Condition{
+		Type:               nativev1alpha1.HostConditionMemoryVerified,
+		Status:             memoryStatus,
+		ObservedGeneration: host.Generation,
+		LastTransitionTime: metav1.NewTime(a.now()),
+		Reason:             memoryReason,
+		Message:            memoryMessage,
+	})
 	apiMeta.SetStatusCondition(&copy.Status.Conditions, metav1.Condition{
 		Type:               nativev1alpha1.HostConditionReady,
 		Status:             readyStatus,

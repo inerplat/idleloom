@@ -7,6 +7,7 @@ import (
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
 	"github.com/inerplat/idleloom/internal/native/devruntime"
 	nativekube "github.com/inerplat/idleloom/internal/native/kube"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
@@ -18,6 +19,15 @@ const (
 	lockedOllamaModelName   = "qwen3.5:9b"
 	lockedOllamaModelDigest = "sha256:6488c96fa5faab64bb65cbd30d4289e20e6130ef535a93ef9a49f42eda893ea7"
 	lockedOllamaModelSize   = int64(6594474711)
+)
+
+// The locked catalog's memory reservations are frozen literals, not formula
+// calls. Catalog specs are immutable and re-applied on every join, so a value
+// that moved with a formula would make joining an existing cluster fail. A
+// golden test pins each literal to the formula output it froze.
+const (
+	lockedMLXModelMinimumMemory    = int64(7094470332)
+	lockedOllamaModelMinimumMemory = int64(13036925655)
 )
 
 func ApplyCatalog(ctx context.Context, client dynamic.Interface, forceConflicts bool) error {
@@ -40,7 +50,7 @@ func ApplyCatalog(ctx context.Context, client dynamic.Interface, forceConflicts 
 					Issuer: "idleloom-development-lock", Subject: descriptor.Repository + "@" + descriptor.Revision,
 				},
 			},
-			MinimumUnifiedMemory: nativev1alpha1.MinimumUnifiedMemoryForModel(descriptor.SizeBytes, lockedModelContextLength),
+			MinimumUnifiedMemory: *resource.NewQuantity(lockedMLXModelMinimumMemory, resource.BinarySI),
 			MaxContextLength:     lockedModelContextLength, MaxConcurrentRequests: 1,
 		},
 	}
@@ -56,7 +66,7 @@ func ApplyCatalog(ctx context.Context, client dynamic.Interface, forceConflicts 
 				OllamaModel: lockedOllamaModelName, ManifestDigest: lockedOllamaModelDigest,
 				Format: nativev1alpha1.ArtifactFormatGGUFV1, SizeBytes: lockedOllamaModelSize,
 			},
-			MinimumUnifiedMemory: nativev1alpha1.MinimumUnifiedMemoryForModel(lockedOllamaModelSize, lockedModelContextLength),
+			MinimumUnifiedMemory: *resource.NewQuantity(lockedOllamaModelMinimumMemory, resource.BinarySI),
 			MaxContextLength:     lockedModelContextLength, MaxConcurrentRequests: 1,
 		},
 	}

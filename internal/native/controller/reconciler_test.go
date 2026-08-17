@@ -211,8 +211,22 @@ func TestReconcileOnceReusesModelAndHostSnapshot(t *testing.T) {
 	}
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds, model, workload("one"), workload("two"))
 	reconciler := &Reconciler{Dynamic: client, Coordination: kubernetesfake.NewClientset().CoordinationV1()}
-	if err := reconciler.ReconcileOnce(context.Background()); err == nil {
-		t.Fatal("reconcile unexpectedly found an eligible host")
+	if err := reconciler.ReconcileOnce(context.Background()); err != nil {
+		t.Fatalf("reconcile surfaced a spec rejection as an error: %v", err)
+	}
+	for _, name := range []string{"one", "two"} {
+		rejectedObject, err := client.Resource(nativekube.WorkloadsGVR).Namespace("tenant").Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rejected nativev1alpha1.IdleloomWorkload
+		if err := nativekube.FromUnstructured(rejectedObject, &rejected); err != nil {
+			t.Fatal(err)
+		}
+		condition := apiMeta.FindStatusCondition(rejected.Status.Conditions, nativev1alpha1.WorkloadConditionReady)
+		if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "WorkloadValidationFailed" {
+			t.Fatalf("workload %s condition = %#v, want Ready=False with WorkloadValidationFailed", name, condition)
+		}
 	}
 	var modelGets, hostLists int
 	for _, action := range client.Actions() {
@@ -223,8 +237,70 @@ func TestReconcileOnceReusesModelAndHostSnapshot(t *testing.T) {
 			hostLists++
 		}
 	}
-	if modelGets != 1 || hostLists != 1 {
-		t.Fatalf("model gets/host lists = %d/%d, want 1/1 per reconciliation cycle", modelGets, hostLists)
+	// One host list belongs to the model status aggregation, the other to the
+	// shared per-cycle snapshot both workloads reuse.
+	if modelGets != 1 || hostLists != 2 {
+		t.Fatalf("model gets/host lists = %d/%d, want 1/2 per reconciliation cycle", modelGets, hostLists)
+	}
+}
+
+func TestInvalidModelSurfacesOnWorkloadStatus(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := nativev1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	digest := "sha256:" + strings.Repeat("b", 64)
+	model := &nativev1alpha1.IdleloomModel{
+		TypeMeta:   metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomModel"},
+		ObjectMeta: metav1.ObjectMeta{Name: "broken-model", UID: types.UID("model-uid")},
+		Spec: nativev1alpha1.IdleloomModelSpec{
+			Family: nativev1alpha1.ModelFamilyQwen35, RuntimeProfile: nativev1alpha1.RuntimeProfileMLXLMV1,
+			Artifact: nativev1alpha1.ModelArtifact{
+				OCIReference: "oci://registry.example/model@" + digest, ManifestDigest: digest,
+				Format: nativev1alpha1.ArtifactFormatSafetensorsV1, SizeBytes: 1024,
+				Signature: &nativev1alpha1.SignaturePolicy{Issuer: "https://issuer.example", Subject: "publisher"},
+			},
+			// MaxConcurrentRequests above the supported single slot makes this
+			// model deterministically invalid, independent of memory formulas.
+			MinimumUnifiedMemory: resource.MustParse("8Gi"), MaxContextLength: 2048, MaxConcurrentRequests: 2,
+		},
+	}
+	workload := &nativev1alpha1.IdleloomWorkload{
+		TypeMeta: metav1.TypeMeta{APIVersion: nativev1alpha1.GroupVersion.String(), Kind: "IdleloomWorkload"},
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "batch", Namespace: "tenant", UID: types.UID("workload-uid"), Generation: 1,
+			Finalizers: []string{nativev1alpha1.WorkloadFinalizer},
+		},
+		Spec: nativev1alpha1.IdleloomWorkloadSpec{
+			Mode:      nativev1alpha1.WorkloadModeBatch,
+			Model:     &nativev1alpha1.WorkloadModelReference{CatalogRef: model.Name},
+			Batch:     &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: 32},
+			Resources: nativev1alpha1.WorkloadResources{UnifiedMemoryRequest: resource.MustParse("8Gi")},
+		},
+	}
+	listKinds := map[schema.GroupVersionResource]string{
+		nativekube.ModelsGVR: "IdleloomModelList", nativekube.HostsGVR: "IdleloomHostList",
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, listKinds, model, workload)
+	reconciler := &Reconciler{Dynamic: client, Coordination: kubernetesfake.NewClientset().CoordinationV1()}
+	if err := reconciler.reconcileWorkload(context.Background(), workload.DeepCopy()); err != nil {
+		t.Fatalf("invalid model surfaced as an error instead of workload status: %v", err)
+	}
+	updatedObject, err := client.Resource(nativekube.WorkloadsGVR).Namespace(workload.Namespace).Get(context.Background(), workload.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var updated nativev1alpha1.IdleloomWorkload
+	if err := nativekube.FromUnstructured(updatedObject, &updated); err != nil {
+		t.Fatal(err)
+	}
+	condition := apiMeta.FindStatusCondition(updated.Status.Conditions, nativev1alpha1.WorkloadConditionReady)
+	if updated.Status.Phase != nativev1alpha1.PhaseScheduling || condition == nil ||
+		condition.Status != metav1.ConditionFalse || condition.Reason != "ModelValidationFailed" {
+		t.Fatalf("workload status = phase %q condition %#v, want Scheduling with Ready=False/ModelValidationFailed", updated.Status.Phase, condition)
+	}
+	if !strings.Contains(condition.Message, "validate model") {
+		t.Fatalf("condition message %q does not carry the validation detail", condition.Message)
 	}
 }
 

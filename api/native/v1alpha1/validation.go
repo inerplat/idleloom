@@ -22,10 +22,25 @@ var (
 )
 
 const (
-	maxArtifactBytes      = int64(64 << 30)
-	maxContextLength      = int32(8192)
+	maxArtifactBytes = int64(64 << 30)
+	maxContextLength = int32(131072)
+	// runtimeMemoryOverhead and contextMemoryPerToken feed the conservative
+	// estimate only. They are frozen: the locked catalog bakes their output
+	// into immutable specs. contextMemoryPerToken is sized for models without
+	// grouped-query attention; GQA models cost far less per token, which the
+	// measured profile captures instead.
 	runtimeMemoryOverhead = int64(4 << 30)
 	contextMemoryPerToken = int64(1 << 20)
+	// sanityMemoryOverhead is the least a declaration may add on top of the
+	// artifact before it is plainly wrong.
+	sanityMemoryOverhead = int64(512 << 20)
+	// computeBufferBytes approximates the runtime's Metal compute and graph
+	// buffers in the measured estimate. It varies with batch geometry and
+	// build, so it is padded; measured feedback can tighten it later.
+	computeBufferBytes = int64(1 << 30)
+	// runtimeFixedOverhead covers the serving process itself in the measured
+	// estimate: server code, tokenizer, residency sets.
+	runtimeFixedOverhead = int64(768 << 20)
 )
 
 func ValidateWorkload(workload *IdleloomWorkload) error {
@@ -130,9 +145,12 @@ func ValidateModel(model *IdleloomModel) error {
 	if model.Spec.MaxConcurrentRequests != 1 {
 		errs = append(errs, field.NotSupported(specPath.Child("maxConcurrentRequests"), model.Spec.MaxConcurrentRequests, []string{"1"}))
 	}
-	minimum := MinimumUnifiedMemoryForModel(model.Spec.Artifact.SizeBytes, model.Spec.MaxContextLength)
-	if model.Spec.MinimumUnifiedMemory.Cmp(minimum) < 0 {
-		errs = append(errs, field.Invalid(specPath.Child("minimumUnifiedMemory"), model.Spec.MinimumUnifiedMemory.String(), fmt.Sprintf("must be at least %s for artifact, runtime, and context overhead", minimum.String())))
+	// This is a sanity floor, not the admission estimate. Admission compares
+	// the effective request against measured host memory in the scheduler;
+	// validation only refuses declarations too small to ever hold the weights.
+	sanityFloor := *resource.NewQuantity(model.Spec.Artifact.SizeBytes+sanityMemoryOverhead, resource.BinarySI)
+	if model.Spec.MinimumUnifiedMemory.Cmp(sanityFloor) < 0 {
+		errs = append(errs, field.Invalid(specPath.Child("minimumUnifiedMemory"), model.Spec.MinimumUnifiedMemory.String(), fmt.Sprintf("must be at least %s to hold the artifact itself", sanityFloor.String())))
 	}
 	return errs.ToAggregate()
 }
@@ -462,8 +480,26 @@ func validateArtifact(artifact ModelArtifact, runtimeProfile string, path *field
 	return errs
 }
 
+// MinimumUnifiedMemoryForModel is the conservative estimate used when no
+// measured memory profile exists. Its output is frozen into the immutable
+// specs of the locked catalog and re-applied on every join, so the formula
+// must never change; measured admission improvements go through
+// EstimatedUnifiedMemoryForModel instead.
 func MinimumUnifiedMemoryForModel(artifactBytes int64, contextLength int32) resource.Quantity {
 	bytes := artifactBytes + runtimeMemoryOverhead + int64(contextLength)*contextMemoryPerToken
+	return *resource.NewQuantity(bytes, resource.BinarySI)
+}
+
+// EstimatedUnifiedMemoryForModel estimates a serving process's resident cost
+// from the artifact's measured geometry: fully offloaded weights, an exactly
+// context-sized KV cache, the runtime's compute buffers, and the fixed process
+// overhead. It exists so admission can charge a model what it actually costs
+// rather than the conservative default.
+func EstimatedUnifiedMemoryForModel(artifactBytes int64, contextLength int32, profile *ModelMemoryProfile) resource.Quantity {
+	if profile == nil || profile.KVBytesPerToken <= 0 {
+		return MinimumUnifiedMemoryForModel(artifactBytes, contextLength)
+	}
+	bytes := artifactBytes + int64(contextLength)*profile.KVBytesPerToken + computeBufferBytes + runtimeFixedOverhead
 	return *resource.NewQuantity(bytes, resource.BinarySI)
 }
 

@@ -44,6 +44,9 @@ func (r *Reconciler) ReconcileOnce(ctx context.Context) error {
 	}
 	cycle := &reconcileCycle{reconciler: r, models: make(map[string]*nativev1alpha1.IdleloomModel)}
 	var errs []error
+	if err := r.reconcileModelStatuses(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("aggregate model memory profiles: %w", err))
+	}
 	var servingWorkloads []*nativev1alpha1.IdleloomWorkload
 	for i := range list.Items {
 		var workload nativev1alpha1.IdleloomWorkload
@@ -136,6 +139,9 @@ func (r *Reconciler) persistSchedulingIntent(ctx context.Context, workload *nati
 		if errors.As(err, &noEligibleHosts) {
 			return r.markWorkloadWaiting(ctx, workload, "Queued", noEligibleHosts.Error())
 		}
+		if handled, waitErr := r.surfaceSpecRejection(ctx, workload, err); handled || waitErr != nil {
+			return waitErr
+		}
 		return err
 	}
 	epoch, err := fencing.Allocate(ctx, r.Coordination.Leases(host.Namespace), host.UID)
@@ -144,6 +150,9 @@ func (r *Reconciler) persistSchedulingIntent(ctx context.Context, workload *nati
 	}
 	planned, err := r.Planner.PlanAssignment(workload, model, host, epoch)
 	if err != nil {
+		if handled, waitErr := r.surfaceSpecRejection(ctx, workload, err); handled || waitErr != nil {
+			return waitErr
+		}
 		return err
 	}
 	copy := workload.DeepCopy()
@@ -221,6 +230,9 @@ func (r *Reconciler) createAssignmentFromIntent(ctx context.Context, workload *n
 	planner.NewExecutionID = func() (string, error) { return intent.ExecutionID, nil }
 	planned, err := planner.PlanAssignment(workload, model, &host, intent.FencingEpoch)
 	if err != nil {
+		if handled, waitErr := r.surfaceSpecRejection(ctx, workload, err); handled || waitErr != nil {
+			return waitErr
+		}
 		return err
 	}
 	unstructured, err := nativekube.ToUnstructured(planned)
@@ -319,6 +331,23 @@ func (r *Reconciler) reflectAssignment(ctx context.Context, workload *nativev1al
 	}
 	apiMeta.SetStatusCondition(&copy.Status.Conditions, condition)
 	return r.updateWorkload(ctx, copy, true)
+}
+
+// surfaceSpecRejection publishes a deterministic spec-level rejection on the
+// workload so the failure is visible without reading controller logs. It
+// reports handled=true for rejections it wrote, in which case the caller must
+// not return the original error: the status carries it, and the periodic
+// reconcile keeps re-evaluating without a hot error loop.
+func (r *Reconciler) surfaceSpecRejection(ctx context.Context, workload *nativev1alpha1.IdleloomWorkload, err error) (bool, error) {
+	var invalid *scheduler.SpecValidationError
+	if !errors.As(err, &invalid) {
+		return false, nil
+	}
+	message := invalid.Error()
+	if len(message) > 2048 {
+		message = message[:2048]
+	}
+	return true, r.markWorkloadWaiting(ctx, workload, invalid.Reason, message)
 }
 
 func (r *Reconciler) markWorkloadWaiting(ctx context.Context, workload *nativev1alpha1.IdleloomWorkload, reason, message string) error {

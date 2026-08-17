@@ -28,6 +28,7 @@ const (
 	CapabilityBatchInferenceV1          = "BatchInferenceV1"
 	CapabilityNativeServiceV1           = "NativeServiceV1"
 	CapabilityNativeTrainingV1          = "NativeTrainingV1"
+	CapabilityMemoryProfileV1           = "memory-profile-v1"
 	ServingAuthSecretName               = "active-serve-auth"
 	NativeServingPort             int32 = 18080
 
@@ -40,10 +41,12 @@ const (
 	AssignmentMailboxName    = "active"
 	WorkloadFinalizer        = "native.ai.idleloom.io/stop"
 
-	HostConditionReady           = "Ready"
-	HostConditionDevelopmentOnly = "DevelopmentOnly"
-	HostConditionConnected       = "Connected"
-	WorkloadConditionReady       = "Ready"
+	HostConditionReady                  = "Ready"
+	HostConditionDevelopmentOnly        = "DevelopmentOnly"
+	HostConditionConnected              = "Connected"
+	HostConditionMemoryVerified         = "MemoryVerified"
+	WorkloadConditionReady              = "Ready"
+	ModelConditionMemoryProfileMeasured = "MemoryProfileMeasured"
 
 	ConnectivityModeAPIOnly      = "APIOnly"
 	ConnectivityModeWireKubeLeaf = "WireKubeLeaf"
@@ -273,7 +276,7 @@ type IdleloomModelSpec struct {
 	Artifact             ModelArtifact     `json:"artifact"`
 	MinimumUnifiedMemory resource.Quantity `json:"minimumUnifiedMemory"`
 	// +kubebuilder:validation:Minimum=128
-	// +kubebuilder:validation:Maximum=8192
+	// +kubebuilder:validation:Maximum=131072
 	MaxContextLength int32 `json:"maxContextLength"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1
@@ -312,8 +315,32 @@ type SignaturePolicy struct {
 }
 
 type IdleloomModelStatus struct {
-	ObservedGeneration int64              `json:"observedGeneration,omitempty"`
-	Conditions         []metav1.Condition `json:"conditions,omitempty"`
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+	// MemoryProfile is the controller's aggregation of agent-measured header
+	// geometry for the artifact this spec pins. It exists so admission can use
+	// the artifact's real per-token KV cost instead of a conservative default.
+	// +optional
+	MemoryProfile *ModelMemoryProfile `json:"memoryProfile,omitempty"`
+	Conditions    []metav1.Condition  `json:"conditions,omitempty"`
+}
+
+// ModelMemoryProfile is memory-relevant geometry measured from a model
+// artifact's own metadata. Every field is a measured fact, never a
+// declaration, so producers must leave the whole profile out rather than
+// publish a guess.
+type ModelMemoryProfile struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=64
+	Architecture string `json:"architecture"`
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4096
+	BlockCount int32 `json:"blockCount"`
+	// +kubebuilder:validation:Minimum=1024
+	// +kubebuilder:validation:Maximum=8388608
+	KVBytesPerToken int64 `json:"kvBytesPerToken"`
+	// +kubebuilder:validation:Minimum=128
+	// +kubebuilder:validation:Maximum=16777216
+	TrainedContextLength int32 `json:"trainedContextLength"`
 }
 
 // +kubebuilder:object:root=true
@@ -380,6 +407,13 @@ type HostModelStatus struct {
 	Format string `json:"format"`
 	// +kubebuilder:validation:Minimum=1
 	SizeBytes int64 `json:"sizeBytes"`
+	// Memory carries the agent-measured geometry for this artifact, absent
+	// when its header could not be read. It lives in its own sub-struct so the
+	// scheduler's pinned-model identity match, which compares the named fields
+	// above, can never absorb it. Keep identity fields out of here and
+	// measured fields out of the identity set.
+	// +optional
+	Memory *ModelMemoryProfile `json:"memory,omitempty"`
 }
 
 type HostConnectivityStatus struct {
@@ -450,7 +484,7 @@ type ResolvedModel struct {
 	Artifact             ModelArtifact     `json:"artifact"`
 	UnifiedMemoryRequest resource.Quantity `json:"unifiedMemoryRequest"`
 	// +kubebuilder:validation:Minimum=128
-	// +kubebuilder:validation:Maximum=8192
+	// +kubebuilder:validation:Maximum=131072
 	MaxContextLength int32 `json:"maxContextLength"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=1

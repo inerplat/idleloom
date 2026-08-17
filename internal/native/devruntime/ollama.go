@@ -208,8 +208,8 @@ func StartOllama(ctx context.Context, config OllamaProcessConfig) (*OllamaProces
 	if config.Runtime.Executable == "" || config.Runtime.ModelsDirectory == "" {
 		return nil, fmt.Errorf("resolved Ollama runtime is required")
 	}
-	if config.ContextLength < 128 || config.ContextLength > 8192 {
-		return nil, fmt.Errorf("ollama context length must be between 128 and 8192")
+	if config.ContextLength < 128 || config.ContextLength > 131072 {
+		return nil, fmt.Errorf("ollama context length must be between 128 and 131072")
 	}
 	if err := VerifyOllamaModel(ctx, config.Runtime, config.Model); err != nil {
 		return nil, fmt.Errorf("verify local Ollama model: %s", redactPaths(err.Error(), config.Runtime.ModelsDirectory, config.WorkDirectory))

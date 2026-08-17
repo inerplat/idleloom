@@ -34,9 +34,14 @@ const (
 var (
 	llamaCppVersionPattern = regexp.MustCompile(`(?m)^version: ([0-9]+) \(([0-9A-Za-z._-]+)\)$`)
 	llamaCppDevicePattern  = regexp.MustCompile(`(?m)^\s*(MTL[0-9]+):\s+.+$`)
-	ggufFileNamePattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf$`)
-	fullGPUOffloadPattern  = regexp.MustCompile(`offloaded ([0-9]+)/([0-9]+) layers to GPU`)
-	llamaCppRequiredFlags  = []string{
+	// llamaCppDeviceMemoryPattern reads the Metal working-set figures from a
+	// device line such as "MTL0: Apple M4 (18186 MiB, 18185 MiB free)". The
+	// format is not a stable llama.cpp interface, so a mismatch simply leaves
+	// the figures at zero and nothing downstream may treat them as required.
+	llamaCppDeviceMemoryPattern = regexp.MustCompile(`(?m)^\s*(MTL[0-9]+):\s+.+\(([0-9]+) MiB, ([0-9]+) MiB free\)`)
+	ggufFileNamePattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf$`)
+	fullGPUOffloadPattern       = regexp.MustCompile(`offloaded ([0-9]+)/([0-9]+) layers to GPU`)
+	llamaCppRequiredFlags       = []string{
 		"--model", "--host", "--port", "--ctx-size", "--parallel",
 		"--n-gpu-layers", "--device", "--fit", "--cache-ram", "--no-ui",
 	}
@@ -48,6 +53,11 @@ type LlamaCppRuntime struct {
 	Build           int
 	Device          string
 	ModelsDirectory string
+	// MetalTotalMiB and MetalFreeMiB are the working-set figures the device
+	// probe reported, or zero when the output did not carry them. Best effort:
+	// they may only ever tighten a budget, never satisfy a requirement.
+	MetalTotalMiB int64
+	MetalFreeMiB  int64
 }
 
 type LlamaCppModel struct {
@@ -69,8 +79,9 @@ type LlamaCppProcessConfig struct {
 }
 
 type llamaCppCachedModel struct {
-	info  os.FileInfo
-	model LlamaCppModel
+	info    os.FileInfo
+	model   LlamaCppModel
+	profile *GGUFMemoryProfile
 }
 
 type LlamaCppDiscovery struct {
@@ -166,10 +177,19 @@ func FindLlamaCpp(ctx context.Context, explicit, modelsDirectory string) (LlamaC
 	if err != nil {
 		return LlamaCppRuntime{}, err
 	}
-	return LlamaCppRuntime{
+	resolved := LlamaCppRuntime{
 		Executable: canonicalExecutable, Version: string(match[1]) + "-" + string(match[2]), Build: build,
 		Device: string(deviceMatch[1]), ModelsDirectory: canonicalModels,
-	}, nil
+	}
+	if memoryMatch := llamaCppDeviceMemoryPattern.FindSubmatch(deviceOutput); len(memoryMatch) == 4 && string(memoryMatch[1]) == resolved.Device {
+		if total, err := strconv.ParseInt(string(memoryMatch[2]), 10, 64); err == nil && total > 0 {
+			resolved.MetalTotalMiB = total
+		}
+		if free, err := strconv.ParseInt(string(memoryMatch[3]), 10, 64); err == nil && free > 0 {
+			resolved.MetalFreeMiB = free
+		}
+	}
+	return resolved, nil
 }
 
 func runLlamaCppProbe(ctx context.Context, executable string, arguments ...string) ([]byte, error) {
@@ -195,9 +215,13 @@ func missingLlamaCppFlags(help string) []string {
 	return missing
 }
 
-func (discovery *LlamaCppDiscovery) Discover(ctx context.Context, runtime LlamaCppRuntime) ([]LlamaCppModel, error) {
+// Discover lists the pinned GGUF models in the runtime's model directory. The
+// second return maps a model name to its memory profile for the models whose
+// header the scanner understood; absence from the map only means the profile
+// is unknown, never that the model is unusable.
+func (discovery *LlamaCppDiscovery) Discover(ctx context.Context, runtime LlamaCppRuntime) ([]LlamaCppModel, map[string]GGUFMemoryProfile, error) {
 	if runtime.ModelsDirectory == "" {
-		return nil, fmt.Errorf("llama.cpp model directory is required")
+		return nil, nil, fmt.Errorf("llama.cpp model directory is required")
 	}
 	discovery.mu.Lock()
 	defer discovery.mu.Unlock()
@@ -206,15 +230,16 @@ func (discovery *LlamaCppDiscovery) Discover(ctx context.Context, runtime LlamaC
 	}
 	entries, err := os.ReadDir(runtime.ModelsDirectory)
 	if err != nil {
-		return nil, fmt.Errorf("read llama.cpp model directory: %w", err)
+		return nil, nil, fmt.Errorf("read llama.cpp model directory: %w", err)
 	}
 	root, err := os.OpenRoot(runtime.ModelsDirectory)
 	if err != nil {
-		return nil, fmt.Errorf("open llama.cpp model directory: %w", err)
+		return nil, nil, fmt.Errorf("open llama.cpp model directory: %w", err)
 	}
 	defer func() { _ = root.Close() }()
 	seen := make(map[string]struct{})
 	models := make([]LlamaCppModel, 0, len(entries))
+	profiles := make(map[string]GGUFMemoryProfile)
 	for _, entry := range entries {
 		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || !ggufFileNamePattern.MatchString(entry.Name()) {
 			continue
@@ -237,10 +262,13 @@ func (discovery *LlamaCppDiscovery) Discover(ctx context.Context, runtime LlamaC
 		if cachedOK && sameStableFileInfo(cached.info, info) {
 			_ = file.Close()
 			models = append(models, cached.model)
+			if cached.profile != nil {
+				profiles[cached.model.Name] = *cached.profile
+			}
 			seen[entry.Name()] = struct{}{}
 			continue
 		}
-		model, inspectErr := inspectLlamaCppFile(ctx, file, entry.Name(), info)
+		model, profile, inspectErr := inspectLlamaCppFile(ctx, file, entry.Name(), info)
 		_ = file.Close()
 		if inspectErr != nil {
 			continue
@@ -249,8 +277,11 @@ func (discovery *LlamaCppDiscovery) Discover(ctx context.Context, runtime LlamaC
 		if err != nil || !sameStableFileInfo(info, after) {
 			continue
 		}
-		discovery.models[entry.Name()] = llamaCppCachedModel{info: info, model: model}
+		discovery.models[entry.Name()] = llamaCppCachedModel{info: info, model: model, profile: profile}
 		models = append(models, model)
+		if profile != nil {
+			profiles[model.Name] = *profile
+		}
 		seen[entry.Name()] = struct{}{}
 	}
 	for name := range discovery.models {
@@ -262,7 +293,19 @@ func (discovery *LlamaCppDiscovery) Discover(ctx context.Context, runtime LlamaC
 	if len(models) > 64 {
 		models = models[:64]
 	}
-	return models, nil
+	for name := range profiles {
+		found := false
+		for _, model := range models {
+			if model.Name == name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			delete(profiles, name)
+		}
+	}
+	return models, profiles, nil
 }
 
 func VerifyLlamaCppModel(ctx context.Context, runtime LlamaCppRuntime, expected LlamaCppModel) error {
@@ -294,7 +337,7 @@ func VerifyLlamaCppModel(ctx context.Context, runtime LlamaCppRuntime, expected 
 	if !os.SameFile(initial, info) || validateLockedRegularInfo(modelPath, info, 0) != nil {
 		return fmt.Errorf("llama.cpp GGUF model changed while it was opened")
 	}
-	actual, err := inspectLlamaCppFile(ctx, file, expected.Name, info)
+	actual, _, err := inspectLlamaCppFile(ctx, file, expected.Name, info)
 	if err != nil {
 		return err
 	}
@@ -308,17 +351,22 @@ func VerifyLlamaCppModel(ctx context.Context, runtime LlamaCppRuntime, expected 
 	return nil
 }
 
-func inspectLlamaCppFile(ctx context.Context, file *os.File, name string, initial os.FileInfo) (LlamaCppModel, error) {
+// inspectLlamaCppFile hashes the whole file for identity and reads the header
+// metadata for the memory profile in the same pass. The profile is nil when
+// the header is not one the scanner understands; only the GGUF magic itself is
+// load-bearing for discovery.
+func inspectLlamaCppFile(ctx context.Context, file *os.File, name string, initial os.FileInfo) (LlamaCppModel, *GGUFMemoryProfile, error) {
 	if file == nil || initial == nil || validateLockedRegularInfo(name, initial, 0) != nil || initial.Size() < 4 || initial.Size() > 64<<30 {
-		return LlamaCppModel{}, fmt.Errorf("llama.cpp model must be a regular GGUF file no larger than 64 GiB")
+		return LlamaCppModel{}, nil, fmt.Errorf("llama.cpp model must be a regular GGUF file no larger than 64 GiB")
 	}
 	hash := sha256.New()
+	scanner := newGGUFScanner()
 	buffer := make([]byte, 4<<20)
 	var first [4]byte
 	written := 0
 	for {
 		if err := ctx.Err(); err != nil {
-			return LlamaCppModel{}, err
+			return LlamaCppModel{}, nil, err
 		}
 		count, readErr := file.Read(buffer)
 		if count > 0 {
@@ -326,28 +374,33 @@ func inspectLlamaCppFile(ctx context.Context, file *os.File, name string, initia
 				written += copy(first[written:], buffer[:count])
 			}
 			_, _ = hash.Write(buffer[:count])
+			scanner.Feed(buffer[:count])
 		}
 		if readErr == io.EOF {
 			break
 		}
 		if readErr != nil {
-			return LlamaCppModel{}, readErr
+			return LlamaCppModel{}, nil, readErr
 		}
 	}
 	if string(first[:]) != "GGUF" {
-		return LlamaCppModel{}, fmt.Errorf("%s does not contain a GGUF header", name)
+		return LlamaCppModel{}, nil, fmt.Errorf("%s does not contain a GGUF header", name)
 	}
 	after, err := file.Stat()
 	if err != nil {
-		return LlamaCppModel{}, err
+		return LlamaCppModel{}, nil, err
 	}
 	if !sameStableFileInfo(initial, after) {
-		return LlamaCppModel{}, fmt.Errorf("llama.cpp GGUF model changed while it was being verified")
+		return LlamaCppModel{}, nil, fmt.Errorf("llama.cpp GGUF model changed while it was being verified")
 	}
-	return LlamaCppModel{
+	model := LlamaCppModel{
 		Name: name, ManifestDigest: "sha256:" + hex.EncodeToString(hash.Sum(nil)),
 		Family: LlamaCppFamilyGGUF, Format: LlamaCppArtifactFormat, SizeBytes: initial.Size(),
-	}, nil
+	}
+	if profile, ok := scanner.Profile(); ok {
+		return model, &profile, nil
+	}
+	return model, nil, nil
 }
 
 func sameStableFileInfo(left, right os.FileInfo) bool {
@@ -361,8 +414,8 @@ func StartLlamaCpp(ctx context.Context, config LlamaCppProcessConfig) (*LlamaCpp
 	if config.Runtime.Executable == "" || config.Runtime.ModelsDirectory == "" || config.Runtime.Device == "" {
 		return nil, fmt.Errorf("resolved llama.cpp runtime is required")
 	}
-	if config.ContextLength < 128 || config.ContextLength > 8192 {
-		return nil, fmt.Errorf("llama.cpp context length must be between 128 and 8192")
+	if config.ContextLength < 128 || config.ContextLength > 131072 {
+		return nil, fmt.Errorf("llama.cpp context length must be between 128 and 131072")
 	}
 	if err := VerifyLlamaCppModel(ctx, config.Runtime, config.Model); err != nil {
 		return nil, fmt.Errorf("verify local llama.cpp model: %s", redactPaths(err.Error(), config.Runtime.ModelsDirectory, config.WorkDirectory))
@@ -392,6 +445,12 @@ func StartLlamaCpp(ctx context.Context, config LlamaCppProcessConfig) (*LlamaCpp
 	if err := atomicWrite(profilePath, []byte(profile), 0o600); err != nil {
 		return nil, err
 	}
+	// --fit off and --cache-ram 0 are deliberate. Auto-fitting would let
+	// llama.cpp silently shrink the context or spill layers off the GPU, which
+	// contradicts both the full-offload gate below and admission that promised
+	// the workload its declared context. With them off, the KV cache is exactly
+	// context-length sized and Metal resident, so a predicted memory budget is
+	// the real one and a shortfall fails the start instead of degrading it.
 	command := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, config.Runtime.Executable,
 		"-lv", "4", "--model", modelPath, "--host", host, "--port", port,
 		"--ctx-size", strconv.Itoa(config.ContextLength), "--parallel", "1",
