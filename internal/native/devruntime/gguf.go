@@ -28,7 +28,7 @@ type GGUFMemoryProfile struct {
 var ggufKVArchitectures = map[string]bool{
 	"llama": true, "llama4": true,
 	"qwen2": true, "qwen2moe": true,
-	"qwen3": true, "qwen3moe": true, "qwen35": true,
+	"qwen3": true, "qwen3moe": true, "qwen35": true, "qwen35moe": true,
 	"gemma2": true, "gemma3": true,
 	"phi3": true, "mistral": true, "mixtral": true,
 }

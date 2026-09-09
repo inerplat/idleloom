@@ -102,6 +102,38 @@ func qwen35Builder() *ggufBuilder {
 	return builder
 }
 
+// qwen35moeBuilder mirrors the metadata a real Ornith 1.5 35B A3B GGUF
+// carries. The expert layers change nothing about the KV layout, so the
+// scanner reads it the same way it reads the dense qwen35 stack.
+func qwen35moeBuilder() *ggufBuilder {
+	builder := &ggufBuilder{}
+	builder.addString("general.architecture", "qwen35moe").
+		addUint32("qwen35moe.block_count", 40).
+		addUint32("qwen35moe.context_length", 262144).
+		addUint32("qwen35moe.embedding_length", 2048).
+		addUint32("qwen35moe.attention.head_count", 16).
+		addUint32("qwen35moe.attention.head_count_kv", 2).
+		addUint32("qwen35moe.attention.key_length", 256).
+		addUint32("qwen35moe.attention.value_length", 256).
+		addUint32("qwen35moe.ssm.state_size", 128).
+		addUint32("qwen35moe.ssm.inner_size", 6144).
+		addUint32("qwen35moe.full_attention_interval", 4)
+	return builder
+}
+
+func TestGGUFScannerDerivesQwenMoEKVGeometry(t *testing.T) {
+	profile, ok := scanGGUF(t, qwen35moeBuilder().bytes(), 9).Profile()
+	if !ok {
+		t.Fatal("no profile from the qwen35moe stack")
+	}
+	// 10 of the 40 blocks cache, each holding 2 kv heads of a 256 byte key
+	// and a 256 byte value at two bytes per element.
+	if profile.KVBytesPerToken != 20480 || profile.BlockCount != 40 || profile.KVCacheLayers != 10 ||
+		profile.TrainedContextLength != 262144 || profile.Architecture != "qwen35moe" {
+		t.Fatalf("profile = %+v", profile)
+	}
+}
+
 func TestGGUFScannerDerivesQwenKVGeometry(t *testing.T) {
 	payload := qwen35Builder().bytes()
 	// Byte-at-a-time feeding proves every state survives chunk boundaries.
