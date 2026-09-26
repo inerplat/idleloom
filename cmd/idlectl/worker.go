@@ -197,7 +197,7 @@ func runStopWorker(ctx context.Context, args []string) error {
 	statePath := flags.String("state", "", workerStateHelp)
 	kubeconfig := flags.String("kubeconfig", "", "kubeconfig used to reach the worker's cluster (defaults to the one recorded at create)")
 	contextName := flags.String("context", "", "kubeconfig context (defaults to the one recorded at create)")
-	localOnly := flags.Bool("local-only", false, "stop the local VM without contacting Kubernetes")
+	localOnly := flags.Bool("local-only", false, "stop the local worker without contacting Kubernetes")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -214,7 +214,7 @@ func runStopWorker(ctx context.Context, args []string) error {
 	return idleloom.NewApp(os.Stdout, os.Stderr, workerOptionsFromState(*statePath)).Stop(ctx, *statePath, override, *localOnly)
 }
 
-// runLoadImage loads local container image(s) into the worker VM's containerd
+// runLoadImage loads local container image(s) into the worker's containerd
 // so Pods with imagePullPolicy IfNotPresent or Never can use them without a
 // registry. The first positional token must be the "image" resource.
 func runLoadImage(ctx context.Context, args []string) error {
