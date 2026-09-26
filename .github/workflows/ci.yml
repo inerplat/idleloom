@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # idlectl runs on all three host platforms now: krunkit on macOS, the host
+  # itself on Linux, and a WSL2 distribution on Windows. Each one has code the
+  # others never compile, so all three are built and tested rather than
+  # cross-compiled from one.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macOS (Apple Silicon)
+          - os: ubuntu-24.04
+            name: Linux
+          - os: windows-2025
+            name: Windows
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./... -count=1
+
+  # The release builds linux/arm64 and windows/amd64 without a runner of that
+  # shape, so prove they still compile before a tag depends on it.
+  cross-compile:
+    name: Cross-compile
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build every release target
+        run: |
+          set -euo pipefail
+          for target in linux/amd64 linux/arm64 windows/amd64 windows/arm64; do
+            echo "::group::${target}"
+            GOOS="${target%/*}" GOARCH="${target#*/}" CGO_ENABLED=0 \
+              go build -o /dev/null ./cmd/idlectl
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+            echo "::endgroup::"
+          done
