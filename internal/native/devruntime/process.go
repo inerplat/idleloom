@@ -16,10 +16,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/procgroup"
 )
 
 const (
@@ -95,7 +94,7 @@ func Start(ctx context.Context, config ProcessConfig) (*Process, error) {
 	cmd := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, python, "-I", "-B", config.Layout.Runner, config.Layout.Model, config.Nonce)
 	cmd.Dir = config.Layout.Work
 	cmd.Env = runnerEnv(config.Layout.Work)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.SetGroup(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -225,7 +224,7 @@ func (p *Process) stopLocked() error {
 		return nil
 	}
 	pid := p.cmd.Process.Pid
-	if err := unix.Kill(-pid, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := procgroup.Kill(pid); err != nil {
 		return fmt.Errorf("kill MLX runner process group: %w", err)
 	}
 	timer := time.NewTimer(10 * time.Second)
@@ -244,12 +243,12 @@ func (p *Process) stopLocked() error {
 func waitProcessGroupGone(pid int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for {
-		err := unix.Kill(-pid, 0)
-		if errors.Is(err, unix.ESRCH) {
-			return nil
+		gone, err := procgroup.Gone(pid)
+		if err != nil {
+			return err
 		}
-		if err != nil && !errors.Is(err, unix.EPERM) {
-			return fmt.Errorf("inspect process group %d: %w", pid, err)
+		if gone {
+			return nil
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("process group %d is still alive", pid)

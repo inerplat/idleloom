@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,10 +18,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/procgroup"
 )
 
 const (
@@ -470,7 +468,7 @@ func StartLlamaCpp(ctx context.Context, config LlamaCppProcessConfig) (*LlamaCpp
 		"HOME=" + filepath.Join(config.WorkDirectory, "home"), "TMPDIR=" + filepath.Join(config.WorkDirectory, "tmp"),
 		"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
 	}
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.SetGroup(command)
 	stderr := &boundedBuffer{limit: maxStderrBytes}
 	metal := &llamaCppMetalProbe{device: config.Runtime.Device}
 	command.Stdout = io.MultiWriter(stderr, metal)
@@ -600,7 +598,7 @@ func (p *LlamaCppProcess) Stop() error {
 	if pid == 0 {
 		return nil
 	}
-	if err := unix.Kill(-pid, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := procgroup.Kill(pid); err != nil {
 		return fmt.Errorf("kill llama.cpp process group: %w", err)
 	}
 	select {

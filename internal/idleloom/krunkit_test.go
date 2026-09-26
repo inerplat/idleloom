@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -100,13 +99,6 @@ func TestGVProxyConfigUsesStaticGuestIdentity(t *testing.T) {
 		if !strings.Contains(config, expected) {
 			t.Errorf("gvproxy configuration is missing %q:\n%s", expected, config)
 		}
-	}
-}
-
-func TestRuntimeProcessesStartInTheirOwnSession(t *testing.T) {
-	command := detachedCommand("true")
-	if command.SysProcAttr == nil || !command.SysProcAttr.Setsid {
-		t.Fatal("runtime process is not detached into its own session")
 	}
 }
 
@@ -253,8 +245,7 @@ func TestTerminatePIDWaitsForProcessExit(t *testing.T) {
 	if err := terminatePID(pid, "sleep", 2*time.Second); err != nil {
 		t.Fatalf("terminatePID: %v", err)
 	}
-	process, _ := os.FindProcess(pid)
-	if process != nil && process.Signal(syscall.Signal(0)) == nil && !processIsZombie(pid) {
+	if !processHasExited(pid) {
 		t.Fatalf("process %d is still running after terminatePID", pid)
 	}
 }

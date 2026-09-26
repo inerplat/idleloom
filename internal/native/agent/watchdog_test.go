@@ -2,18 +2,23 @@ package agent
 
 import (
 	"os/exec"
-	"syscall"
+	"runtime"
 	"testing"
 	"time"
 
 	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
 	"github.com/inerplat/idleloom/internal/native/execution"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"github.com/inerplat/idleloom/internal/procgroup"
 )
 
 func TestExpiredAPIDeadlineKillsJournaledProcess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process groups are Unix-specific")
+	}
 	cmd := exec.Command("/bin/sh", "-c", "sleep 60")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.SetGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

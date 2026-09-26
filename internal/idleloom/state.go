@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/filelock"
 )
 
 type State struct {
@@ -51,12 +51,12 @@ func AcquireStateLock(ctx context.Context, statePath string) (*stateLock, error)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return &stateLock{file: file}, nil
-		}
-		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
+		locked, err := filelock.TryLock(file)
+		if err != nil {
 			return nil, errors.Join(fmt.Errorf("lock Idleloom state: %w", err), file.Close())
+		}
+		if locked {
+			return &stateLock{file: file}, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -70,7 +70,7 @@ func (l *stateLock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
+	unlockErr := filelock.Unlock(l.file)
 	closeErr := l.file.Close()
 	if unlockErr != nil {
 		return unlockErr

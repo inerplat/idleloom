@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -184,13 +185,16 @@ func TestLlamaCppGenerateRejectsErrorAndTrailingJSON(t *testing.T) {
 func TestLlamaCppSandboxProfileKeepsNetworkOnLoopback(t *testing.T) {
 	// The runtime never binds a routable address; the agent relays to it, so
 	// the sandbox must not grant anything beyond loopback.
+	if runtime.GOOS != "darwin" {
+		t.Skip("the sandbox profile resolves the Darwin user cache directory")
+	}
 	directory := t.TempDir()
 	modelPath := filepath.Join(directory, "model.gguf")
 	if err := os.WriteFile(modelPath, []byte("GGUF"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runtime := LlamaCppRuntime{Executable: "/opt/homebrew/bin/llama-server", ModelsDirectory: directory}
-	profile, err := llamaCppSandboxProfile(runtime, modelPath, directory, nil)
+	llamaCpp := LlamaCppRuntime{Executable: "/opt/homebrew/bin/llama-server", ModelsDirectory: directory}
+	profile, err := llamaCppSandboxProfile(llamaCpp, modelPath, directory, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
