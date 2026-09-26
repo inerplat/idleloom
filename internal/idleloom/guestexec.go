@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"strings"
 )
 
@@ -85,12 +84,14 @@ func (l linuxExec) Script(ctx context.Context, stdout, stderr io.Writer, script 
 }
 
 func (l linuxExec) Send(ctx context.Context, localPath, guestPath string) error {
-	// install(1) creates the parent, sets the mode, and replaces the target in
-	// one step, so a partially written file is never left behind.
-	if err := l.Run(ctx, io.Discard, io.Discard, "install", "-d", "-m", "0700", filepath.Dir(guestPath)); err != nil {
-		return fmt.Errorf("create %s on %s: %w", filepath.Dir(guestPath), l.Describe(), err)
-	}
-	if err := l.Run(ctx, io.Discard, io.Discard, "install", "-m", "0600", localPath, guestPath); err != nil {
+	// "install -D" creates any missing parent directories and replaces the
+	// target atomically, so a partially written file is never left behind.
+	//
+	// The mode applies to the file only. Creating the parent separately with
+	// "install -d -m" would also apply it to a directory that already exists,
+	// which silently re-permissions shared paths — pointing this at /tmp on a
+	// Linux host turned it into a root-owned 0700 directory.
+	if err := l.Run(ctx, io.Discard, io.Discard, "install", "-D", "-m", "0600", localPath, guestPath); err != nil {
 		return fmt.Errorf("copy %s to %s on %s: %w", localPath, guestPath, l.Describe(), err)
 	}
 	return nil

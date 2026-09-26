@@ -62,6 +62,46 @@ func (r InPlaceRuntime) Preflight(ctx context.Context) error {
 			return fmt.Errorf("%s has no running systemd, which kubelet requires; %s", r.Exec.Describe(), r.systemdHint())
 		}
 	}
+	if err := r.checkCgroupV2(ctx); err != nil {
+		return err
+	}
+	return r.checkDummyInterface(ctx)
+}
+
+// checkCgroupV2 refuses a host still exposing the cgroup v1 hierarchy.
+//
+// kubelet's systemd cgroup driver needs a unified hierarchy, and a hybrid one
+// breaks in a way that surfaces far from the cause: on a Cilium cluster the
+// socket load balancer cannot attach, and every ClusterIP call from a Pod
+// times out long after enrollment reported success.
+func (r InPlaceRuntime) checkCgroupV2(ctx context.Context) error {
+	if err := r.Exec.Run(ctx, io.Discard, io.Discard, "test", "-e", "/sys/fs/cgroup/cgroup.controllers"); err != nil {
+		return fmt.Errorf("%s does not expose the unified cgroup v2 hierarchy, which kubelet's systemd cgroup driver requires; %s", r.Exec.Describe(), r.cgroupHint())
+	}
+	return nil
+}
+
+func (r InPlaceRuntime) cgroupHint() string {
+	if r.Kind == RuntimeWSL2 {
+		return `add "kernelCommandLine=cgroup_no_v1=all" under [wsl2] in %UserProfile%\.wslconfig and run "wsl --shutdown"`
+	}
+	return `boot the host with "systemd.unified_cgroup_hierarchy=1 cgroup_no_v1=all"`
+}
+
+// checkDummyInterface confirms the worker can hold its node address.
+//
+// The mesh address is assigned to a dummy link before kubelet starts, so a
+// kernel without that driver cannot enrol. Checking here turns what would be
+// a mid-enrollment failure into a preflight one. Loopback is deliberately not
+// used as a fallback: Cilium treats addresses on lo as NodePort-capable and
+// would SNAT service traffic to an address no peer can route back to.
+func (r InPlaceRuntime) checkDummyInterface(ctx context.Context) error {
+	const probe = "idleloom-probe0"
+	script := "set -e\nip link add " + probe + " type dummy\nip link delete " + probe + "\n"
+	var out bytes.Buffer
+	if err := r.Exec.Script(ctx, &out, &out, script); err != nil {
+		return fmt.Errorf("%s cannot create a dummy network interface, which the worker node address needs: %w; %s. Load the kernel's dummy module and retry", r.Exec.Describe(), err, strings.TrimSpace(out.String()))
+	}
 	return nil
 }
 
