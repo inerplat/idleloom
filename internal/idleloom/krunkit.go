@@ -629,6 +629,11 @@ func krunkitArgs(state RuntimeState) []string {
 	}
 }
 
+// renderCloudInit builds the first-boot configuration for a krunkit worker
+// VM. The base system is brought up by the same script the in-place backends
+// run directly, so a worker is prepared identically whichever backend built
+// it; cloud-init only adds what is specific to a fresh VM — the hostname, the
+// login Idleloom uses to reach it, and growing the root filesystem.
 func renderCloudInit(nodeName, publicKey string) string {
 	return fmt.Sprintf(`#cloud-config
 hostname: %s
@@ -649,46 +654,15 @@ users:
     ssh_authorized_keys:
       - %s
 write_files:
-  - path: /etc/modules-load.d/idleloom.conf
-    permissions: '0644'
-    content: |
-      overlay
-      br_netfilter
-  - path: /etc/sysctl.d/99-idleloom-kubernetes.conf
-    permissions: '0644'
-    content: |
-      net.ipv4.ip_forward = 1
-      net.bridge.bridge-nf-call-iptables = 1
-      net.bridge.bridge-nf-call-ip6tables = 1
   - path: /usr/local/sbin/idleloom-prepare
     permissions: '0755'
     content: |
-      #!/bin/bash
-      set -euo pipefail
-      swapoff -a
-      sed -i.bak '/[[:space:]]swap[[:space:]]/d' /etc/fstab
-      modprobe overlay
-      modprobe br_netfilter
-      sysctl --system >/dev/null
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update
-      apt-get install -y --no-install-recommends containerd containernetworking-plugins conntrack ebtables ethtool ipset iptables nfs-common open-iscsi socat
-      apt-get clean
-      install -d -m 0755 /opt/cni/bin
-      for plugin in /usr/lib/cni/*; do
-        [ -f "$plugin" ] || continue
-        ln -sf "$plugin" "/opt/cni/bin/${plugin##*/}"
-      done
-      install -d -m 0755 /etc/containerd
-      containerd config default > /etc/containerd/config.toml
-      sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-      systemctl enable --now containerd.service iscsid.service
-      install -d -m 0755 /var/lib/idleloom
-      touch /var/lib/idleloom/.prepared
+      #!/bin/sh
+%s
 runcmd:
   - [/usr/local/sbin/idleloom-prepare]
 final_message: "Idleloom base system is ready"
-`, nodeName, publicKey)
+`, nodeName, publicKey, indentScript(renderPrepareScript(), "      "))
 }
 
 func downloadUbuntuImage(ctx context.Context) (string, error) {
