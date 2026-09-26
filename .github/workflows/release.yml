@@ -92,13 +92,58 @@ jobs:
             dist/idleloom-checksums.txt
           if-no-files-found: error
 
+  # The Linux and Windows workers enrol in place, so their idlectl is an
+  # ordinary static binary — no code signing, and no runner of the target
+  # shape needed.
+  package-portable:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build the Linux and Windows CLIs
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          ldflags="-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildDate=${build_date}"
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            package="dist/idleloom-${VERSION}-${goos}-${goarch}"
+            binary="idlectl"
+            if [ "$goos" = windows ]; then binary="idlectl.exe"; fi
+            mkdir -p "$package"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch"               go build -trimpath -ldflags "$ldflags" -o "$package/$binary" ./cmd/idlectl
+            cp LICENSE "$package/LICENSE"
+            tar -C "$package" -czf "${PWD}/dist/idleloom-${VERSION}-${goos}-${goarch}.tar.gz" .
+          done
+          cd dist
+          sha256sum idleloom-*-linux-*.tar.gz idleloom-*-windows-*.tar.gz > idleloom-portable-checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: idleloom-release-portable
+          path: |
+            dist/idleloom-*.tar.gz
+            dist/idleloom-portable-checksums.txt
+          if-no-files-found: error
+
   release:
-    needs: package
+    needs: [package, package-portable]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: idleloom-release
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: idleloom-release-portable
           path: dist
       - name: Publish GitHub release
         env:
