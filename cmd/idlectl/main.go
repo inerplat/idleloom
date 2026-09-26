@@ -267,7 +267,7 @@ func runMaintain(ctx context.Context, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	return idleloom.NewApp(os.Stdout, os.Stderr).Maintain(ctx, *statePath)
+	return idleloom.NewApp(os.Stdout, os.Stderr, workerOptionsFromState(*statePath)).Maintain(ctx, *statePath)
 }
 
 func runJoin(ctx context.Context, args []string) error {

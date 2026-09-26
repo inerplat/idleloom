@@ -68,6 +68,7 @@ func runCreateWorker(ctx context.Context, args []string) error {
 	waitForReady := flags.Bool("wait", true, "wait for WireKube and Kubernetes Node readiness")
 	statePath := flags.String("state", "", workerStateHelp)
 	runtimeDir := flags.String("runtime-dir", "", "worker runtime directory (advanced)")
+	distribution := flags.String("distribution", "", "WSL2 distribution to enroll on a Windows host (defaults to the default distribution)")
 	registryMirrors := flags.StringArray("registry-mirror", nil, "redirect image pulls for a registry to a mirror, as HOST=URL (advanced, repeatable)")
 	credentialProviderBins := flags.StringArray("credential-provider-bin", nil, "host path to a linux/arm64 kubelet image credential provider binary (advanced, repeatable)")
 	credentialProviderConfig := flags.String("credential-provider-config", "", "host path to a kubelet CredentialProviderConfig YAML (advanced)")
@@ -144,7 +145,7 @@ func runCreateWorker(ctx context.Context, args []string) error {
 			return usagef("at least one --credential-provider-bin is required when configuring credential providers; usage: %s", createWorkerUsage)
 		}
 	}
-	app := idleloom.NewApp(os.Stdout, os.Stderr)
+	app := idleloom.NewApp(os.Stdout, os.Stderr, idleloom.WorkerOptions{Distribution: *distribution})
 	return app.Init(ctx, idleloom.InitOptions{
 		KubeconfigPath: *kubeconfig,
 		Context:        *contextName,
@@ -159,6 +160,7 @@ func runCreateWorker(ctx context.Context, args []string) error {
 		SkipWait:       !*waitForReady,
 		StatePath:      *statePath,
 		RuntimeDir:     *runtimeDir,
+		Distribution:   *distribution,
 		DryRun:         *dryRun,
 
 		RegistryMirrors:          *registryMirrors,
@@ -187,7 +189,7 @@ func runStartWorker(ctx context.Context, args []string) error {
 		}
 	}
 	override := idleloom.ClusterOverride{KubeconfigPath: *kubeconfig, Context: *contextName}
-	return idleloom.NewApp(os.Stdout, os.Stderr).Start(ctx, *statePath, override, *timeout)
+	return idleloom.NewApp(os.Stdout, os.Stderr, workerOptionsFromState(*statePath)).Start(ctx, *statePath, override, *timeout)
 }
 
 func runStopWorker(ctx context.Context, args []string) error {
@@ -209,7 +211,7 @@ func runStopWorker(ctx context.Context, args []string) error {
 		}
 	}
 	override := idleloom.ClusterOverride{KubeconfigPath: *kubeconfig, Context: *contextName}
-	return idleloom.NewApp(os.Stdout, os.Stderr).Stop(ctx, *statePath, override, *localOnly)
+	return idleloom.NewApp(os.Stdout, os.Stderr, workerOptionsFromState(*statePath)).Stop(ctx, *statePath, override, *localOnly)
 }
 
 // runLoadImage loads local container image(s) into the worker VM's containerd
@@ -231,7 +233,7 @@ func runLoadImage(ctx context.Context, args []string) error {
 	if len(refs) == 0 && *archive == "" {
 		return usagef("at least one image REF is required unless --archive is set; usage: %s", loadImageUsage)
 	}
-	return idleloom.NewApp(os.Stdout, os.Stderr).LoadImage(ctx, *statePath, refs, *archive, *engine)
+	return idleloom.NewApp(os.Stdout, os.Stderr, workerOptionsFromState(*statePath)).LoadImage(ctx, *statePath, refs, *archive, *engine)
 }
 
 // isImageResource reports whether the positional token names the "image"
@@ -254,7 +256,7 @@ func deleteWorker(ctx context.Context, statePath, name string, override idleloom
 	if err := ensureLocalWorkerNamed(statePath, name); err != nil {
 		return err
 	}
-	return idleloom.NewApp(os.Stdout, os.Stderr).Delete(ctx, statePath, override, force, localOnly)
+	return idleloom.NewApp(os.Stdout, os.Stderr, workerOptionsFromState(statePath)).Delete(ctx, statePath, override, force, localOnly)
 }
 
 // runStatus prints a local overview of this Mac: the Native Metal enrollment
@@ -371,6 +373,22 @@ func workerNodeReadyStatus(node *corev1.Node) string {
 		}
 	}
 	return "Unknown"
+}
+
+// workerOptionsFromState recovers the host settings recorded at enrollment so
+// a lifecycle command acts on the environment the worker actually lives in.
+// A missing or unreadable state file yields zero options; the command that
+// follows reports the problem with far more context than this could.
+func workerOptionsFromState(statePath string) idleloom.WorkerOptions {
+	resolved, err := workerStatePath(statePath)
+	if err != nil {
+		return idleloom.WorkerOptions{}
+	}
+	state, err := idleloom.LoadState(resolved)
+	if err != nil {
+		return idleloom.WorkerOptions{}
+	}
+	return idleloom.WorkerOptions{Distribution: state.Distribution}
 }
 
 func workerStatePath(statePath string) (string, error) {

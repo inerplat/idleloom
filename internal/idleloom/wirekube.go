@@ -8,6 +8,8 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+
+	"github.com/inerplat/idleloom/internal/meship"
 )
 
 type WireKubeStatus struct {
@@ -16,6 +18,10 @@ type WireKubeStatus struct {
 	AgentNamespace        string
 	AgentName             string
 	ReadyPeers            int64
+	// MeshCIDR is the overlay range peers draw their addresses from. The
+	// in-place backends derive the worker's node address from it before the
+	// node exists, so enrollment needs it up front.
+	MeshCIDR string
 }
 
 // CheckWireKube validates the WireKube installation structurally: the mesh
@@ -31,6 +37,7 @@ func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeSt
 	}
 	var mesh struct {
 		Spec struct {
+			MeshCIDR       string `json:"meshCIDR"`
 			AutoAllowedIPs struct {
 				IncludeNodeInternalIP bool `json:"includeNodeInternalIP"`
 			} `json:"autoAllowedIPs"`
@@ -45,6 +52,7 @@ func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeSt
 	status.Installed = true
 	status.IncludeNodeInternalIP = mesh.Spec.AutoAllowedIPs.IncludeNodeInternalIP
 	status.ReadyPeers = mesh.Status.ReadyPeers
+	status.MeshCIDR = mesh.Spec.MeshCIDR
 
 	daemonSets, err := client.AppsV1().DaemonSets("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -88,4 +96,50 @@ func WireKubePeerConnected(ctx context.Context, client kubernetes.Interface, nod
 		return false, fmt.Errorf("decode WireKubePeer %s: %w", nodeName, err)
 	}
 	return peer.Status.Connected, nil
+}
+
+// ReserveMeshAddress derives the worker's node address from the WireKube mesh
+// and confirms no other peer already holds it.
+//
+// WireKube's allocator is a hash of the node name, so the address needs no
+// cluster-wide lease: it is reproducible from the name alone. It is not
+// collision-free though — the hash is reduced into the mesh CIDR — so an
+// existing peer holding the same address has to be reported rather than
+// silently overwritten.
+func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeName, meshCIDR string) (string, error) {
+	if meshCIDR == "" {
+		return "", fmt.Errorf("the WireKubeMesh does not publish spec.meshCIDR, so the worker node address cannot be derived")
+	}
+	address, err := meship.AddressForName(nodeName, meshCIDR)
+	if err != nil {
+		return "", err
+	}
+	raw, err := client.Discovery().RESTClient().Get().AbsPath("/apis/wirekube.io/v1alpha1/wirekubepeers").Do(ctx).Raw()
+	if err != nil {
+		return "", fmt.Errorf("list WireKube peers to check the worker address: %w", err)
+	}
+	var peers struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				AllowedIPs []string `json:"allowedIPs"`
+			} `json:"spec"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &peers); err != nil {
+		return "", fmt.Errorf("decode WireKube peers: %w", err)
+	}
+	for _, peer := range peers.Items {
+		if peer.Metadata.Name == nodeName {
+			continue
+		}
+		for _, allowed := range peer.Spec.AllowedIPs {
+			if strings.TrimSuffix(allowed, "/32") == address {
+				return "", fmt.Errorf("the mesh address %s derived from node name %q is already held by WireKubePeer/%s; enrol this worker under a different name", address, nodeName, peer.Metadata.Name)
+			}
+		}
+	}
+	return address, nil
 }

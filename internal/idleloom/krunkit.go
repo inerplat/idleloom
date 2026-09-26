@@ -36,6 +36,12 @@ type KrunkitRuntime struct {
 	Err    io.Writer
 }
 
+func (k KrunkitRuntime) Backend() RuntimeKind { return RuntimeKrunkit }
+
+// GuestArch is fixed: krunkit runs on Apple Silicon and boots an ARM64 Ubuntu
+// cloud image.
+func (k KrunkitRuntime) GuestArch() string { return "arm64" }
+
 func (k KrunkitRuntime) Preflight(ctx context.Context) error {
 	for _, binary := range []string{"krunkit", "gvproxy", "qemu-img", "ssh", "scp", "ssh-keygen", "hdiutil"} {
 		if _, err := exec.LookPath(binary); err != nil {
@@ -951,31 +957,42 @@ func recoverRuntimeMetadata(state *RuntimeState) (bool, error) {
 	return true, nil
 }
 
-func validateRuntimeOwnership(state RuntimeState) error {
+// validateRuntimeMarker checks that the runtime directory is one Idleloom
+// created for this node. Every backend keeps a marker there; only the ones
+// that build a VM also own disk images beside it.
+func validateRuntimeMarker(state RuntimeState) (string, error) {
 	if state.NodeName == "" {
-		return fmt.Errorf("runtime state has no node name")
+		return "", fmt.Errorf("runtime state has no node name")
 	}
 	canonical, err := filepath.EvalSymlinks(state.RuntimeDir)
 	if err != nil {
-		return fmt.Errorf("resolve runtime directory %s: %w", state.RuntimeDir, err)
+		return "", fmt.Errorf("resolve runtime directory %s: %w", state.RuntimeDir, err)
 	}
 	canonical, err = filepath.Abs(canonical)
 	if err != nil {
-		return fmt.Errorf("resolve absolute runtime directory: %w", err)
+		return "", fmt.Errorf("resolve absolute runtime directory: %w", err)
 	}
 	data, err := os.ReadFile(filepath.Join(canonical, runtimeMarker))
 	if err != nil {
-		return fmt.Errorf("refusing to use runtime directory %s: its Idleloom ownership marker %s is missing or unreadable (%w); Idleloom only manages directories it marked at creation — if this directory is left over from an old worker, remove it manually, and run \"idlectl status\" to find the state file that references it", canonical, runtimeMarker, err)
+		return "", fmt.Errorf("refusing to use runtime directory %s: its Idleloom ownership marker %s is missing or unreadable (%w); Idleloom only manages directories it marked at creation — if this directory is left over from an old worker, remove it manually, and run \"idlectl status\" to find the state file that references it", canonical, runtimeMarker, err)
 	}
 	var marker runtimeMarkerData
 	if err := json.Unmarshal(data, &marker); err != nil {
-		return fmt.Errorf("decode runtime marker in %s: %w", canonical, err)
+		return "", fmt.Errorf("decode runtime marker in %s: %w", canonical, err)
 	}
 	if marker.NodeName != state.NodeName {
-		return fmt.Errorf("runtime directory %s belongs to node %q, not %q", canonical, marker.NodeName, state.NodeName)
+		return "", fmt.Errorf("runtime directory %s belongs to node %q, not %q", canonical, marker.NodeName, state.NodeName)
 	}
 	if marker.RuntimeDir != canonical || state.RuntimeDir != canonical {
-		return fmt.Errorf("runtime directory ownership mismatch: marker=%q state=%q canonical=%q", marker.RuntimeDir, state.RuntimeDir, canonical)
+		return "", fmt.Errorf("runtime directory ownership mismatch: marker=%q state=%q canonical=%q", marker.RuntimeDir, state.RuntimeDir, canonical)
+	}
+	return canonical, nil
+}
+
+func validateRuntimeOwnership(state RuntimeState) error {
+	canonical, err := validateRuntimeMarker(state)
+	if err != nil {
+		return err
 	}
 	expectedPaths := map[string]string{
 		"root disk":       filepath.Join(canonical, "root.qcow2"),
