@@ -653,3 +653,32 @@ func TestAssignedMeshIPv4AcceptsAddressAndHostPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestInvokedNameAcceptsTheWindowsExecutableSuffix is a regression test for a
+// bug that made idlectl refuse to start on Windows at all: the guard against
+// running under a reserved internal service name compared the raw base name,
+// and a Windows build is necessarily idlectl.exe.
+func TestInvokedNameAcceptsTheWindowsExecutableSuffix(t *testing.T) {
+	// Paths use forward slashes so filepath.Base behaves the same on the
+	// platform running the test as it does on Windows; the suffix is the part
+	// under test.
+	for _, argv0 := range []string{
+		"idlectl.exe",
+		"IDLECTL.EXE",
+		"C:/idleloom/idlectl.exe",
+		"/usr/local/bin/idlectl",
+		"idlectl",
+	} {
+		if got := strings.ToLower(invokedName(argv0)); got != "idlectl" {
+			t.Errorf("invokedName(%q) = %q, want idlectl", argv0, got)
+		}
+	}
+	// The reserved service names must still be recognised, and an unrelated
+	// name must still be rejected.
+	if invokedName("/Library/Idleloom/idleloom-agent") != "idleloom-agent" {
+		t.Error("an internal service name is no longer recognised")
+	}
+	if invokedName("/tmp/something-else") == "idlectl" {
+		t.Error("an unrelated executable name is accepted as idlectl")
+	}
+}

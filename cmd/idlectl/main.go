@@ -122,7 +122,7 @@ var newWireKubeLifecycle = func(ctx context.Context, kubeconfig, kubeContext str
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	handled, internalErr := runInternalBinary(ctx, filepath.Base(os.Args[0]), os.Args[1:])
+	handled, internalErr := runInternalBinary(ctx, invokedName(os.Args[0]), os.Args[1:])
 	if !handled && internalErr == nil {
 		handled, internalErr = runInternalCommand(ctx, os.Args[1:])
 	}
@@ -136,7 +136,7 @@ func main() {
 	if handled {
 		return
 	}
-	if filepath.Base(os.Args[0]) != "idlectl" {
+	if invokedName(os.Args[0]) != "idlectl" {
 		_, _ = fmt.Fprintf(os.Stderr, "unsupported executable name %q: this binary must be invoked as idlectl; the internal service names are reserved for installed launchd services\n", filepath.Base(os.Args[0]))
 		os.Exit(2)
 	}
@@ -215,6 +215,19 @@ func runHelp(ctx context.Context, args []string) error {
 
 func versionText() string {
 	return fmt.Sprintf("idlectl %s (%s, %s, %s/%s)", version, commit, buildDate, runtime.GOOS, runtime.GOARCH)
+}
+
+// invokedName is the program name without the executable suffix a platform
+// adds. A Windows build is necessarily idlectl.exe, and comparing the raw
+// base name rejected it outright — the binary refused to run at all there.
+// The reserved internal service names never carry a suffix, so trimming one
+// cannot let a name through that would otherwise be refused.
+func invokedName(argv0 string) string {
+	name := filepath.Base(argv0)
+	if suffix := filepath.Ext(name); strings.EqualFold(suffix, ".exe") {
+		name = name[:len(name)-len(suffix)]
+	}
+	return name
 }
 
 func runInternalBinary(ctx context.Context, binary string, args []string) (bool, error) {
