@@ -13,6 +13,7 @@ Idleloom exposes two intentionally different Kubernetes execution contracts.
 | hostPath, NFS, and CSI storage | No | Yes |
 | Apple GPU interface | Metal | Vulkan through krunkit and DRA |
 | Kubernetes Node type | Observability projection | Real kubelet Node |
+| Host | macOS on Apple Silicon | macOS, Linux, or Windows |
 
 ## Native Metal
 

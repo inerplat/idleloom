@@ -54,6 +54,7 @@ nav:
       - Choose a Mode: getting-started/choose-mode.md
       - Native Metal: getting-started/native-metal.md
       - Linux Worker: getting-started/linux-worker.md
+      - Linux and Windows Hosts: getting-started/host-workers.md
   - Guides:
       - Native Shells: guides/native-shell.md
       - MLX Workloads: guides/native-mlx.md

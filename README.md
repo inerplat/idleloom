@@ -8,7 +8,11 @@ boundaries:
 | Mode | Best for | Kubernetes contract |
 | --- | --- | --- |
 | Native Metal | MLX, Ollama, llama.cpp, macOS tools | Restricted macOS workloads with observability projection |
-| Linux Worker | OCI containers, Pods, volumes, `exec`, port-forward | A real ARM64 kubelet Node in a krunkit VM |
+| Linux Worker | OCI containers, Pods, volumes, `exec`, port-forward | A real kubelet Node |
+
+A Linux Worker runs in a krunkit VM on macOS, on the host itself on Linux, and
+in a WSL2 distribution on Windows. See
+[Linux and Windows hosts](docs/getting-started/host-workers.md).
 
 **[Documentation](https://inerplat.github.io/idleloom/)**
 
@@ -166,6 +170,7 @@ metrics, artifact, and result contracts.
 - [Choose a mode](docs/getting-started/choose-mode.md)
 - [Native Metal](docs/getting-started/native-metal.md)
 - [Linux Worker](docs/getting-started/linux-worker.md)
+- [Linux and Windows hosts](docs/getting-started/host-workers.md)
 - [Native shell boundaries](docs/guides/native-shell.md)
 - [MLX](docs/guides/native-mlx.md)
 - [Ollama](docs/guides/native-ollama.md)
@@ -185,8 +190,9 @@ make test
 make vet
 ```
 
-Native Metal requires Apple Silicon. The Linux Worker requires macOS 14 or
-later and krunkit. MLX recipes currently require macOS 26 or later and Python
+Native Metal requires Apple Silicon. A Linux Worker on macOS requires macOS 14
+or later and krunkit; on a Linux or Windows host the worker runs in place, with
+no virtual machine for Idleloom to build. MLX recipes currently require macOS 26 or later and Python
 3.12. Vulkan DRA requires Kubernetes 1.35 or later with `resource.k8s.io/v1`.
 
 ## Current limitations
@@ -196,7 +202,6 @@ later and krunkit. MLX recipes currently require macOS 26 or later and Python
 - Native serving requires a connected WireKube host and a real Linux client
   node on the mesh.
 - Worker Vulkan is experimental and should be treated as single-tenant.
-- Windows Hyper-V enrollment is not part of the current release.
 
 ## License
 
