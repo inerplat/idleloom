@@ -153,17 +153,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace file: %w", err)
 	}
-	directory, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open parent directory: %w", err)
-	}
-	if err := directory.Sync(); err != nil {
-		return errors.Join(fmt.Errorf("sync parent directory: %w", err), directory.Close())
-	}
-	if err := directory.Close(); err != nil {
-		return fmt.Errorf("close parent directory: %w", err)
-	}
-	return nil
+	return syncDir(dir)
 }
 
 func EnsureStatePathAvailable(path string) error {
