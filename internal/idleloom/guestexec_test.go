@@ -115,3 +115,29 @@ func TestShellQuoteNeutralisesEmbeddedQuotes(t *testing.T) {
 		t.Errorf("shellQuote = %s", got)
 	}
 }
+
+// TestWSLExecOmitsTheDistributionWhenUnset covers the default case: the flag
+// is optional, and wsl.exe expresses "use the default distribution" by having
+// no -d at all. Passing -d "" asks for a distribution named the empty string.
+func TestWSLExecOmitsTheDistributionWhenUnset(t *testing.T) {
+	runner := &capturingRunner{}
+	exec := wslExec{Runner: runner}
+	if err := exec.Run(context.Background(), io.Discard, io.Discard, "uname", "-s"); err != nil {
+		t.Fatal(err)
+	}
+	call := runner.calls[0]
+	for index, arg := range call {
+		if arg == "-d" {
+			t.Fatalf("wsl invocation carries -d with no distribution: %v", call)
+		}
+		if arg == "" {
+			t.Fatalf("wsl invocation has an empty argument at %d: %v", index, call)
+		}
+	}
+	if strings.Join(call, " ") != wslBinary+" -u root --exec uname -s" {
+		t.Errorf("wsl invocation = %v", call)
+	}
+	if exec.Describe() == `WSL distribution ""` {
+		t.Error("an unset distribution is described as an empty name")
+	}
+}

@@ -117,11 +117,22 @@ type wslExec struct {
 }
 
 func (w wslExec) Describe() string {
+	if w.Distribution == "" {
+		return "the default WSL distribution"
+	}
 	return fmt.Sprintf("WSL distribution %q", w.Distribution)
 }
 
+// args builds the wsl.exe invocation. An empty distribution means "whichever
+// one is default", which wsl.exe expresses by omitting -d entirely; passing
+// -d "" instead selects a distribution named the empty string and fails.
 func (w wslExec) args(argv []string) []string {
-	return append([]string{"-d", w.Distribution, "-u", "root", "--exec"}, argv...)
+	prefix := make([]string, 0, 5+len(argv))
+	if w.Distribution != "" {
+		prefix = append(prefix, "-d", w.Distribution)
+	}
+	prefix = append(prefix, "-u", "root", "--exec")
+	return append(prefix, argv...)
 }
 
 func (w wslExec) Run(ctx context.Context, stdout, stderr io.Writer, argv ...string) error {
