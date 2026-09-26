@@ -3,7 +3,6 @@ package devruntime
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,10 +11,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/procgroup"
 )
 
 type ShellConfig struct {
@@ -111,7 +109,7 @@ func StartShell(ctx context.Context, config ShellConfig) (*ShellProcess, error) 
 
 func startCommandProcess(ctx context.Context, command *exec.Cmd, work string, timeout time.Duration, output io.Writer, onSpawn func(int) error) (*ShellProcess, error) {
 	command.Dir = work
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.SetGroup(command)
 	stderr := &boundedBuffer{limit: maxStderrBytes}
 	if output == nil {
 		output = io.Discard
@@ -125,7 +123,7 @@ func startCommandProcess(ctx context.Context, command *exec.Cmd, work string, ti
 	process := &ShellProcess{cmd: command, done: make(chan struct{}), stderr: stderr}
 	if onSpawn != nil {
 		if err := onSpawn(process.PID()); err != nil {
-			_ = unix.Kill(-process.PID(), unix.SIGKILL)
+			_ = procgroup.Kill(process.PID())
 			_ = command.Wait()
 			close(process.done)
 			return nil, err
@@ -191,7 +189,7 @@ func (process *ShellProcess) Stop() error {
 		return nil
 	}
 	pid := process.cmd.Process.Pid
-	if err := unix.Kill(-pid, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := procgroup.Kill(pid); err != nil {
 		return err
 	}
 	select {

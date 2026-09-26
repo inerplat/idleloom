@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/filelock"
 )
 
 const (
@@ -58,12 +58,12 @@ func Open(path string) (*Store, error) {
 	if err := lock.Chmod(0o600); err != nil {
 		return nil, errors.Join(fmt.Errorf("set native execution lock permissions: %w", err), lock.Close())
 	}
-	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		closeErr := lock.Close()
-		if err == unix.EWOULDBLOCK || err == unix.EAGAIN {
-			return nil, errors.Join(ErrStoreLocked, closeErr)
-		}
-		return nil, errors.Join(fmt.Errorf("lock native execution store: %w", err), closeErr)
+	locked, err := filelock.TryLock(lock)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("lock native execution store: %w", err), lock.Close())
+	}
+	if !locked {
+		return nil, errors.Join(ErrStoreLocked, lock.Close())
 	}
 	store := &Store{path: path, lock: lock}
 	file, err := os.Open(path)
@@ -107,7 +107,7 @@ func (s *Store) Close() error {
 	if s.lock == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(int(s.lock.Fd()), unix.LOCK_UN)
+	unlockErr := filelock.Unlock(s.lock)
 	closeErr := s.lock.Close()
 	s.lock = nil
 	return errors.Join(unlockErr, closeErr)

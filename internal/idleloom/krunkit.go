@@ -17,10 +17,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/filelock"
 )
 
 const (
@@ -347,7 +346,7 @@ func (k KrunkitRuntime) stopUnlocked(ctx context.Context, state RuntimeState) er
 		if err := requestVMStop(ctx, krunkitSocket(state)); err != nil {
 			process, _ := os.FindProcess(pid)
 			if process != nil {
-				_ = process.Signal(syscall.SIGTERM)
+				_ = requestProcessTermination(process)
 			}
 		}
 		if err := waitForPIDExit(ctx, pid, "krunkit", 30*time.Second); err != nil {
@@ -622,12 +621,6 @@ func krunkitArgs(state RuntimeState) []string {
 		"--device", "virtio-blk,path=" + state.RootDisk + ",format=qcow2",
 		"--device", "virtio-blk,path=" + state.SeedISO + ",format=raw",
 	}
-}
-
-func detachedCommand(name string, args ...string) *exec.Cmd {
-	command := exec.Command(name, args...)
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	return command
 }
 
 func renderCloudInit(nodeName, publicKey string) string {
@@ -1018,12 +1011,12 @@ func acquireRuntimeLock(ctx context.Context, state RuntimeState, create bool) (*
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return &runtimeLock{file: file}, nil
-		}
-		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
+		locked, err := filelock.TryLock(file)
+		if err != nil {
 			return nil, errors.Join(fmt.Errorf("lock runtime directory: %w", err), file.Close())
+		}
+		if locked {
+			return &runtimeLock{file: file}, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -1037,7 +1030,7 @@ func (l *runtimeLock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
+	unlockErr := filelock.Unlock(l.file)
 	closeErr := l.file.Close()
 	if unlockErr != nil {
 		return unlockErr
@@ -1132,16 +1125,19 @@ func processFromPIDFile(path, executable string) (int, bool, error) {
 	if err != nil || pid <= 0 {
 		return 0, false, fmt.Errorf("invalid %s pid file %s", executable, path)
 	}
-	process, err := os.FindProcess(pid)
-	if err != nil || process.Signal(syscall.Signal(0)) != nil || processIsZombie(pid) {
+	if processHasExited(pid) {
 		return pid, false, nil
 	}
-	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
+	// Guard against PID reuse: a recycled PID that now belongs to an unrelated
+	// program must not be treated as a live runtime process. When the name
+	// cannot be read at all the process is reported as not running, which is
+	// the safe direction — callers then re-create rather than adopt it.
+	name, ok := processExecutableName(pid)
+	if !ok {
 		return pid, false, nil
 	}
-	if filepath.Base(strings.TrimSpace(string(output))) != executable {
-		return pid, false, fmt.Errorf("pid %d from %s belongs to %q, not %s", pid, path, strings.TrimSpace(string(output)), executable)
+	if filepath.Base(name) != executable {
+		return pid, false, fmt.Errorf("pid %d from %s belongs to %q, not %s", pid, path, name, executable)
 	}
 	return pid, true, nil
 }
@@ -1167,7 +1163,7 @@ func terminatePID(pid int, executable string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("find %s process %d: %w", executable, pid, err)
 	}
-	if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := requestProcessTermination(process); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("signal %s process %d: %w", executable, pid, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -1189,17 +1185,8 @@ func terminatePID(pid int, executable string, timeout time.Duration) error {
 
 func waitForPIDExit(ctx context.Context, pid int, executable string, timeout time.Duration) error {
 	return waitUntilFor(ctx, timeout, fmt.Sprintf("%s (pid %d) to exit", executable, pid), func() bool {
-		process, err := os.FindProcess(pid)
-		return err != nil || process.Signal(syscall.Signal(0)) != nil || processIsZombie(pid)
+		return processHasExited(pid)
 	})
-}
-
-func processIsZombie(pid int) bool {
-	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "state=").Output()
-	if err != nil {
-		return true
-	}
-	return strings.HasPrefix(strings.TrimSpace(string(output)), "Z")
 }
 
 func requestVMStop(ctx context.Context, socketPath string) error {

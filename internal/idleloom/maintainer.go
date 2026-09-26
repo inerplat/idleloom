@@ -7,14 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/filelock"
 )
 
 const (
@@ -209,7 +205,7 @@ func stopMaintainer(statePath string) error {
 	if err != nil {
 		return fmt.Errorf("find certificate maintainer process %d: %w", metadata.PID, err)
 	}
-	if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := requestProcessTermination(process); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("signal certificate maintainer process %d: %w", metadata.PID, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -242,12 +238,12 @@ func acquireMaintainerLock(statePath string) (*maintainerLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open certificate maintainer lock: %w", err)
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		closeErr := file.Close()
-		if err == unix.EWOULDBLOCK || err == unix.EAGAIN {
-			return nil, errors.Join(fmt.Errorf("certificate maintainer is already running"), closeErr)
-		}
-		return nil, errors.Join(fmt.Errorf("lock certificate maintainer: %w", err), closeErr)
+	locked, err := filelock.TryLock(file)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("lock certificate maintainer: %w", err), file.Close())
+	}
+	if !locked {
+		return nil, errors.Join(fmt.Errorf("certificate maintainer is already running"), file.Close())
 	}
 	return &maintainerLock{file: file}, nil
 }
@@ -256,7 +252,7 @@ func (l *maintainerLock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
+	unlockErr := filelock.Unlock(l.file)
 	closeErr := l.file.Close()
 	if unlockErr != nil {
 		return unlockErr
@@ -270,13 +266,14 @@ func maintainerLockHeld(statePath string) (bool, error) {
 		return false, fmt.Errorf("open certificate maintainer lock: %w", err)
 	}
 	defer func() { _ = file.Close() }()
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		if err == unix.EWOULDBLOCK || err == unix.EAGAIN {
-			return true, nil
-		}
+	locked, err := filelock.TryLock(file)
+	if err != nil {
 		return false, fmt.Errorf("inspect certificate maintainer lock: %w", err)
 	}
-	if err := unix.Flock(int(file.Fd()), unix.LOCK_UN); err != nil {
+	if !locked {
+		return true, nil
+	}
+	if err := filelock.Unlock(file); err != nil {
 		return false, err
 	}
 	return false, nil
@@ -297,35 +294,17 @@ func readAndValidateMaintainer(statePath string) (maintainerProcessData, bool, e
 	if metadata.PID <= 0 || metadata.Nonce == "" || metadata.StatePath != statePath || metadata.Executable == "" || metadata.StartedAt == "" {
 		return metadata, false, fmt.Errorf("certificate maintainer metadata is incomplete")
 	}
-	process, err := os.FindProcess(metadata.PID)
-	if err != nil || process.Signal(syscall.Signal(0)) != nil || processIsZombie(metadata.PID) {
+	if processHasExited(metadata.PID) {
 		return metadata, false, nil
 	}
 	startedAt, err := processStartIdentity(metadata.PID)
 	if err != nil || startedAt != metadata.StartedAt {
 		return metadata, false, nil
 	}
-	args, err := exec.Command("ps", "-p", strconv.Itoa(metadata.PID), "-o", "args=").Output()
-	if err != nil {
-		return metadata, false, nil
-	}
-	expected := " maintain --state " + statePath
-	if !strings.HasSuffix(strings.TrimSpace(string(args)), expected) {
+	if !processRunsMaintainer(metadata.PID, metadata.Executable, statePath) {
 		return metadata, false, nil
 	}
 	return metadata, true, nil
-}
-
-func processStartIdentity(pid int) (string, error) {
-	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
-	if err != nil {
-		return "", fmt.Errorf("read process %d start time: %w", pid, err)
-	}
-	value := strings.TrimSpace(string(output))
-	if value == "" {
-		return "", fmt.Errorf("process %d has no start time", pid)
-	}
-	return value, nil
 }
 
 func writeMaintainerMetadata(statePath string, metadata maintainerProcessData) error {

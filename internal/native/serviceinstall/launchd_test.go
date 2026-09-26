@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -27,7 +28,13 @@ func TestLaunchdPlistEscapesArgumentsAndIsValid(t *testing.T) {
 	if !bytes.Contains(data, []byte("<key>ProcessType</key><string>Background</string>")) {
 		t.Fatalf("default service process type is not Background: %s", data)
 	}
-	command := exec.Command("plutil", "-lint", "-")
+	// plutil only ships with macOS. The structural assertions above still run
+	// everywhere; only the XML validation is skipped.
+	plutil, err := exec.LookPath("plutil")
+	if err != nil {
+		t.Skip("plutil is not available to validate the generated plist")
+	}
+	command := exec.Command(plutil, "-lint", "-")
 	command.Stdin = bytes.NewReader(data)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("plutil rejected generated plist: %v: %s", err, output)
@@ -303,6 +310,9 @@ func TestLaunchdNotLoadedErrorsAreExpected(t *testing.T) {
 }
 
 func TestCapturedBinaryMatchesRunningCodeIdentity(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("binary capture reads the running Mach-O code signature")
+	}
 	data, err := CaptureCurrentBinary()
 	if err != nil {
 		t.Fatal(err)

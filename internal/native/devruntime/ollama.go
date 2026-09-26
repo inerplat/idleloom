@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,10 +19,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/procgroup"
 )
 
 const (
@@ -244,7 +242,7 @@ func StartOllama(ctx context.Context, config OllamaProcessConfig) (*OllamaProces
 		"OLLAMA_MAX_LOADED_MODELS=1", "OLLAMA_MAX_QUEUE=1", "OLLAMA_NUM_PARALLEL=1",
 		"OLLAMA_NO_CLOUD=true", "OLLAMA_NOPRUNE=true",
 	}
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.SetGroup(command)
 	stderr := &boundedBuffer{limit: maxStderrBytes}
 	command.Stdout = stderr
 	command.Stderr = stderr
@@ -373,7 +371,7 @@ func (p *OllamaProcess) Stop() error {
 			transport.CloseIdleConnections()
 		}
 	}
-	if err := unix.Kill(-pid, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := procgroup.Kill(pid); err != nil {
 		return fmt.Errorf("kill Ollama process group: %w", err)
 	}
 	select {

@@ -6,9 +6,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/inerplat/idleloom/internal/procgroup"
 )
 
 func TestEmbeddedLocks(t *testing.T) {
@@ -46,7 +47,7 @@ func TestProcessStopWaitsForEntireProcessGroup(t *testing.T) {
 		t.Skip("process groups are Unix-specific")
 	}
 	cmd := exec.Command("/bin/sh", "-c", "sleep 60 & wait")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.SetGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}

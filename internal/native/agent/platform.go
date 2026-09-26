@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/procgroup"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -238,14 +238,7 @@ func (DarwinPlatform) ProcessStartToken(pid int) (string, error) {
 }
 
 func (DarwinPlatform) ProcessAlive(pid int) (bool, error) {
-	err := unix.Kill(pid, 0)
-	if err == nil || errors.Is(err, unix.EPERM) {
-		return true, nil
-	}
-	if errors.Is(err, unix.ESRCH) {
-		return false, nil
-	}
-	return false, err
+	return procgroup.Alive(pid)
 }
 
 func (DarwinPlatform) FindRunnerPIDs(ctx context.Context, runner, nonce string) ([]int, error) {
@@ -271,7 +264,7 @@ func (DarwinPlatform) FindRunnerPIDs(ctx context.Context, runner, nonce string) 
 }
 
 func (DarwinPlatform) KillProcessGroupAndWait(ctx context.Context, pid int) error {
-	if err := unix.Kill(-pid, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := procgroup.Kill(pid); err != nil {
 		return err
 	}
 	timeout := time.NewTimer(10 * time.Second)
@@ -279,7 +272,9 @@ func (DarwinPlatform) KillProcessGroupAndWait(ctx context.Context, pid int) erro
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		if err := unix.Kill(-pid, 0); errors.Is(err, unix.ESRCH) {
+		if gone, err := procgroup.Gone(pid); err != nil {
+			return err
+		} else if gone {
 			return nil
 		}
 		select {
