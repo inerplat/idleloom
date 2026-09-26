@@ -2,6 +2,7 @@ package idleloom
 
 import (
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -143,5 +144,69 @@ func TestInPlaceDeleteReleasesKubeletMountsBeforeRemoving(t *testing.T) {
 	}
 	if !strings.Contains(script, "sort -r") {
 		t.Error("delete does not unmount nested mounts deepest-first")
+	}
+}
+
+// failingExec fails the commands whose joined form contains a marker, so a
+// preflight check can be observed rejecting the condition it guards.
+type failingExec struct {
+	recordingExec
+	failScriptsContaining string
+	failRunsContaining    string
+}
+
+func (f *failingExec) Run(ctx context.Context, stdout, stderr io.Writer, argv ...string) error {
+	if f.failRunsContaining != "" && strings.Contains(strings.Join(argv, " "), f.failRunsContaining) {
+		return errProbeRefused
+	}
+	return f.recordingExec.Run(ctx, stdout, stderr, argv...)
+}
+
+func (f *failingExec) Script(ctx context.Context, stdout, stderr io.Writer, script string) error {
+	if f.failScriptsContaining != "" && strings.Contains(script, f.failScriptsContaining) {
+		return errProbeRefused
+	}
+	return f.recordingExec.Script(ctx, stdout, stderr, script)
+}
+
+var errProbeRefused = errors.New("refused")
+
+func TestPreflightRejectsAHostWithoutCgroupV2(t *testing.T) {
+	exec := &failingExec{
+		recordingExec:      recordingExec{replies: map[string]string{"uname -s": "Linux\n"}},
+		failRunsContaining: "/sys/fs/cgroup/cgroup.controllers",
+	}
+	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeWSL2}
+	err := runtime.Preflight(context.Background())
+	if err == nil {
+		t.Fatal("expected a host without cgroup v2 to be rejected")
+	}
+	// The remedy is the whole point of checking here: a hybrid hierarchy
+	// surfaces later as ClusterIP timeouts with no obvious cause.
+	if !strings.Contains(err.Error(), "cgroup_no_v1=all") {
+		t.Errorf("error does not say how to fix it: %v", err)
+	}
+}
+
+func TestPreflightRejectsAHostWithoutTheDummyDriver(t *testing.T) {
+	exec := &failingExec{
+		recordingExec:         recordingExec{replies: map[string]string{"uname -s": "Linux\n"}},
+		failScriptsContaining: "type dummy",
+	}
+	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
+	err := runtime.Preflight(context.Background())
+	if err == nil {
+		t.Fatal("expected a host that cannot create a dummy link to be rejected")
+	}
+	if !strings.Contains(err.Error(), "dummy") {
+		t.Errorf("error does not name the missing driver: %v", err)
+	}
+}
+
+func TestPreflightRejectsANonLinuxGuest(t *testing.T) {
+	exec := &recordingExec{replies: map[string]string{"uname -s": "Darwin\n"}}
+	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
+	if err := runtime.Preflight(context.Background()); err == nil {
+		t.Fatal("expected a non-Linux guest to be rejected")
 	}
 }
