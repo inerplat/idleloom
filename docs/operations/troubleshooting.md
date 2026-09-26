@@ -93,6 +93,68 @@ kubectl get node -l idleloom-worker=true -o wide
 
 Do not use deferred readiness to declare a broken Node healthy.
 
+## In-place worker preflight fails
+
+```sh
+sudo idlectl create worker NAME --dry-run --kubeconfig "${IDLELOOM_KUBECONFIG}"
+```
+
+Preflight refuses a host that cannot carry a kubelet, and names the remedy.
+The two it catches most often, both of which a WSL2 host gets wrong by
+default:
+
+- **No cgroup v2.** kubelet's systemd cgroup driver needs the unified
+  hierarchy. Left hybrid, Cilium's socket load balancer cannot attach and
+  every Pod-to-ClusterIP call times out with nothing pointing at the cause.
+  On Windows add `kernelCommandLine=cgroup_no_v1=all` under `[wsl2]` in
+  `%UserProfile%\.wslconfig` and run `wsl --shutdown`.
+- **No `dummy` driver.** The worker's mesh address lives on a dummy link
+  before kubelet starts. Loopback is not a substitute: Cilium treats
+  addresses on `lo` as NodePort-capable and would SNAT service traffic to an
+  address no peer can route back to.
+
+## In-place worker registers with the wrong address
+
+```sh
+kubectl get node NAME -o jsonpath='{.status.addresses}'
+kubectl get wirekubepeer NAME -o jsonpath='{.spec.allowedIPs}'
+```
+
+The node's `InternalIP` must equal the first entry of the peer's
+`allowedIPs` — both are the mesh address derived from the node name. A host
+address there instead (`10.0.2.2`, `192.168.x.x`) means the worker installed
+a bundle that let kubelet detect its own address. Confirm the address is
+held locally, then re-enrol:
+
+```sh
+systemctl status idleloom-node-address.service
+ip -o addr show dev idleloom0
+cat /etc/default/idleloom-kubelet
+```
+
+## Worker enrols but the WireKube peer never connects
+
+```sh
+kubectl get wirekubepeer NAME -o jsonpath='{.status.natType}{"\n"}'
+kubectl logs -n wirekube-system -l app.kubernetes.io/name=wirekube --tail=50
+```
+
+A worker behind symmetric NAT cannot establish a direct path, so the relay
+is the only route and an unreachable relay means no connectivity at all.
+`no relay connected` in the agent log with `dial tcp <relay>: i/o timeout`
+is egress filtering, not a WireKube fault — check the relay port
+specifically, since a host that reaches everything else may still have that
+one port blocked:
+
+```sh
+nc -vz RELAY_HOST 3478
+```
+
+Double NAT makes this likely: a Windows host adds its own NAT layer unless
+WSL2 runs with `networkingMode=mirrored`. With the relay reachable the
+worker still connects — WireKube keeps it warm and falls back to it — but
+without the relay a symmetric-NAT worker has no path.
+
 ## Inventory before cleanup
 
 ```sh
