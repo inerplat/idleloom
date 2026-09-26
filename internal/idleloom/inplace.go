@@ -157,11 +157,20 @@ func (r InPlaceRuntime) Stop(ctx context.Context, _ RuntimeState) error {
 }
 
 func (r InPlaceRuntime) Delete(ctx context.Context, state RuntimeState) error {
-	script := `systemctl disable --now kubelet.service 2>/dev/null || true
+	// kubelet leaves each Pod's projected volumes mounted under
+	// /var/lib/kubelet. Removing the tree without unmounting them first fails
+	// on every one of those paths, and on an in-place worker there is no VM
+	// teardown afterwards to clean up what was left behind. Unmount deepest
+	// first so nested mounts release before their parents.
+	script := `set -u
+systemctl disable --now kubelet.service 2>/dev/null || true
 systemctl disable --now ` + nodeAddressUnit + ` 2>/dev/null || true
 rm -f /etc/systemd/system/kubelet.service /etc/systemd/system/` + nodeAddressUnit + `
 rm -f ` + nodeAddressScript + `
 systemctl daemon-reload 2>/dev/null || true
+awk '$2 ~ /^\/var\/lib\/kubelet/ { print $2 }' /proc/self/mounts | sort -r | while read -r mount; do
+	umount "$mount" 2>/dev/null || umount -l "$mount" 2>/dev/null || true
+done
 rm -rf /var/lib/idleloom /var/lib/kubelet /etc/kubernetes
 ip link delete ` + nodeAddressLink + ` 2>/dev/null || true
 `

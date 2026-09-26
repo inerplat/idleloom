@@ -206,11 +206,11 @@ func TestCreateWorkerValidatesNameBeforeAnyHostOrClusterChange(t *testing.T) {
 func TestStartAndStopWorkerValidateTheRequestedName(t *testing.T) {
 	statePath := savedWorkerState(t, "worker-a")
 	err := runStartWorker(context.Background(), []string{"worker", "ghost", "--state", statePath})
-	if err == nil || !strings.Contains(err.Error(), `this Mac's worker is "worker-a", not "ghost"`) {
+	if err == nil || !strings.Contains(err.Error(), `this host's worker is "worker-a", not "ghost"`) {
 		t.Fatalf("start mismatch error = %v", err)
 	}
 	err = runStopWorker(context.Background(), []string{"worker", "ghost", "--state", statePath})
-	if err == nil || !strings.Contains(err.Error(), `this Mac's worker is "worker-a", not "ghost"`) {
+	if err == nil || !strings.Contains(err.Error(), `this host's worker is "worker-a", not "ghost"`) {
 		t.Fatalf("stop mismatch error = %v", err)
 	}
 }
@@ -221,7 +221,7 @@ func TestDeleteWorkerRequiresMatchingNameAsConfirmation(t *testing.T) {
 	}
 	statePath := savedWorkerState(t, "worker-a")
 	err := runDelete(context.Background(), []string{"--state", statePath, "worker", "ghost"})
-	if err == nil || !strings.Contains(err.Error(), `this Mac's worker is "worker-a", not "ghost"`) {
+	if err == nil || !strings.Contains(err.Error(), `this host's worker is "worker-a", not "ghost"`) {
 		t.Fatalf("delete worker mismatch error = %v", err)
 	}
 }
@@ -229,7 +229,7 @@ func TestDeleteWorkerRequiresMatchingNameAsConfirmation(t *testing.T) {
 func TestDeleteWorkerWithoutStateIsFriendly(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	err := runDelete(context.Background(), []string{"--state", statePath, "worker", "ghost"})
-	if err == nil || !strings.Contains(err.Error(), "no Idleloom worker exists on this Mac") {
+	if err == nil || !strings.Contains(err.Error(), "no Idleloom worker exists on this host") {
 		t.Fatalf("delete worker without state error = %v", err)
 	}
 	if strings.Contains(err.Error(), statePath) {
@@ -254,7 +254,7 @@ func TestDeleteSeparatesWorkerAndClusterFlags(t *testing.T) {
 	if err == nil || strings.Contains(err.Error(), "does not apply to workers") {
 		t.Fatalf("worker --kubeconfig/--context must not be rejected by the guard, got %v", err)
 	}
-	if !strings.Contains(err.Error(), `this Mac's worker is "worker-a", not "ghost"`) {
+	if !strings.Contains(err.Error(), `this host's worker is "worker-a", not "ghost"`) {
 		t.Fatalf("worker delete with cluster flags error = %v", err)
 	}
 }
@@ -293,7 +293,7 @@ func TestGetWorkersReportsNameMismatchWithoutClusterAccess(t *testing.T) {
 	statePath := savedWorkerState(t, "worker-a")
 	var output bytes.Buffer
 	err := getWorkers(context.Background(), &output, "", "", statePath, "ghost", "table")
-	if err == nil || !strings.Contains(err.Error(), `this Mac's worker is "worker-a"`) {
+	if err == nil || !strings.Contains(err.Error(), `this host's worker is "worker-a"`) {
 		t.Fatalf("getWorkers mismatch error = %v", err)
 	}
 }
@@ -351,7 +351,7 @@ func TestLoadImageParsesRefsAgainstMissingWorker(t *testing.T) {
 	if err == nil || isUsageError(err) {
 		t.Fatalf("load image with refs error = %v, want a non-usage no-worker error", err)
 	}
-	if !strings.Contains(err.Error(), "no Idleloom worker exists on this Mac") {
+	if !strings.Contains(err.Error(), "no Idleloom worker exists on this host") {
 		t.Fatalf("load image no-worker error = %v", err)
 	}
 }
@@ -364,7 +364,7 @@ func TestLoadImageArchiveMakesRefsOptional(t *testing.T) {
 	if err == nil || isUsageError(err) {
 		t.Fatalf("load image --archive error = %v, want a non-usage no-worker error", err)
 	}
-	if !strings.Contains(err.Error(), "no Idleloom worker exists on this Mac") {
+	if !strings.Contains(err.Error(), "no Idleloom worker exists on this host") {
 		t.Fatalf("load image --archive no-worker error = %v", err)
 	}
 }

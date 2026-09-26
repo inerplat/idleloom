@@ -13,12 +13,27 @@ import (
 const (
 	elfClass64        = 2      // EI_CLASS value for a 64-bit ELF binary.
 	elfMachineAArch64 = 0x00B7 // e_machine value for EM_AARCH64 (arm64).
+	elfMachineX8664   = 0x003E // e_machine value for EM_X86_64 (amd64).
 )
 
-// validateCredentialProviderBinary asserts that path is a linux/arm64 ELF
-// binary without executing it. Kubelet execs credential providers inside the
-// worker VM, so a macOS/darwin build would fail there at runtime.
-func validateCredentialProviderBinary(path string) error {
+// elfMachineForArch maps a Go architecture to the ELF e_machine value a Linux
+// binary for it carries.
+var elfMachineForArch = map[string]uint16{
+	"arm64": elfMachineAArch64,
+	"amd64": elfMachineX8664,
+}
+
+// validateCredentialProviderBinary asserts that path is a Linux ELF binary for
+// the worker's architecture, without executing it. Kubelet execs credential
+// providers inside the worker, so a build for the wrong platform — a macOS
+// binary, or an amd64 one on an ARM worker — would only fail at image pull
+// time, long after enrollment reported success.
+func validateCredentialProviderBinary(path, arch string) error {
+	expected, ok := elfMachineForArch[arch]
+	if !ok {
+		return fmt.Errorf("unsupported worker architecture %q", arch)
+	}
+	target := "linux/" + arch
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("read credential provider binary %s: %w", path, err)
@@ -26,16 +41,16 @@ func validateCredentialProviderBinary(path string) error {
 	defer func() { _ = file.Close() }()
 	header := make([]byte, 20)
 	if _, err := io.ReadFull(file, header); err != nil {
-		return fmt.Errorf("credential provider binary %s is too small to be a linux/arm64 build; a macOS/darwin build will not run in the worker VM", path)
+		return fmt.Errorf("credential provider binary %s is too small to be a %s build; a macOS/darwin build will not run in the worker", path, target)
 	}
 	if header[0] != 0x7f || header[1] != 'E' || header[2] != 'L' || header[3] != 'F' {
-		return fmt.Errorf("credential provider binary %s is not an ELF binary; it must be a linux/arm64 build; a macOS/darwin build will not run in the worker VM", path)
+		return fmt.Errorf("credential provider binary %s is not an ELF binary; it must be a %s build; a macOS/darwin build will not run in the worker", path, target)
 	}
 	if header[4] != elfClass64 {
-		return fmt.Errorf("credential provider binary %s is not 64-bit; it must be a linux/arm64 build; a macOS/darwin build will not run in the worker VM", path)
+		return fmt.Errorf("credential provider binary %s is not 64-bit; it must be a %s build; a macOS/darwin build will not run in the worker", path, target)
 	}
-	if machine := binary.LittleEndian.Uint16(header[18:20]); machine != elfMachineAArch64 {
-		return fmt.Errorf("credential provider binary %s is not built for arm64 (aarch64); it must be a linux/arm64 build; a macOS/darwin build will not run in the worker VM", path)
+	if machine := binary.LittleEndian.Uint16(header[18:20]); machine != expected {
+		return fmt.Errorf("credential provider binary %s is not built for %s; it must be a %s build; a macOS/darwin build will not run in the worker", path, arch, target)
 	}
 	return nil
 }
@@ -80,7 +95,7 @@ func validateCredentialProviderConfig(path string, binBasenames map[string]bool)
 // validateCredentialProviders performs fail-fast, pre-side-effect host
 // validation of the credential provider inputs. It returns nil when none are
 // configured.
-func validateCredentialProviders(bins []string, configPath, envPath string) error {
+func validateCredentialProviders(bins []string, configPath, envPath, arch string) error {
 	if configPath == "" && len(bins) == 0 && envPath == "" {
 		return nil
 	}
@@ -92,7 +107,7 @@ func validateCredentialProviders(bins []string, configPath, envPath string) erro
 	}
 	basenames := make(map[string]bool, len(bins))
 	for _, bin := range bins {
-		if err := validateCredentialProviderBinary(bin); err != nil {
+		if err := validateCredentialProviderBinary(bin, arch); err != nil {
 			return err
 		}
 		base := filepath.Base(bin)

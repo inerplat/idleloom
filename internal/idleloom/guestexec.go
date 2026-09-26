@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,19 @@ func newLinuxExec(runner CommandRunner) linuxExec {
 
 func (l linuxExec) Describe() string { return "this host" }
 
+// checkElevation reports why commands cannot be run as root, if they cannot.
+// Enrollment installs system services, so a host that offers neither root nor
+// a non-interactive sudo has to say so before anything else is attempted.
+func (l linuxExec) checkElevation() error {
+	if !l.Elevate {
+		return nil
+	}
+	if _, err := exec.LookPath("sudo"); err != nil {
+		return fmt.Errorf("idlectl is not running as root and sudo was not found in PATH; enrolling a worker installs system services, so run idlectl with sudo or as root")
+	}
+	return nil
+}
+
 func (l linuxExec) command(argv []string) (string, []string) {
 	if l.Elevate {
 		return "sudo", append([]string{"-n", "--"}, argv...)
@@ -58,6 +72,9 @@ func (l linuxExec) command(argv []string) (string, []string) {
 func (l linuxExec) Run(ctx context.Context, stdout, stderr io.Writer, argv ...string) error {
 	if len(argv) == 0 {
 		return fmt.Errorf("no command given")
+	}
+	if err := l.checkElevation(); err != nil {
+		return err
 	}
 	name, args := l.command(argv)
 	return l.Runner.Run(ctx, stdout, stderr, name, args...)

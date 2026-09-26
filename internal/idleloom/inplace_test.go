@@ -117,3 +117,31 @@ func TestBundlePinsTheNodeIPForInPlaceWorkers(t *testing.T) {
 		t.Error("krunkit bundle no longer detects its own node IP")
 	}
 }
+
+// TestInPlaceDeleteReleasesKubeletMountsBeforeRemoving covers a failure mode
+// the krunkit backend never had: there, deleting the VM discards everything
+// at once. An in-place worker's directory tree survives the command, so
+// kubelet's projected Pod volumes have to be unmounted or the removal fails
+// on every one of them and leaves them mounted.
+func TestInPlaceDeleteReleasesKubeletMountsBeforeRemoving(t *testing.T) {
+	exec := &recordingExec{}
+	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux, Out: io.Discard, Err: io.Discard}
+	if err := runtime.Delete(context.Background(), RuntimeState{NodeName: "worker-a"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	script := exec.allScripts()
+	unmount := strings.Index(script, "umount")
+	remove := strings.Index(script, "rm -rf /var/lib/idleloom /var/lib/kubelet")
+	if unmount < 0 {
+		t.Fatal("delete never unmounts kubelet's Pod volumes")
+	}
+	if remove < 0 {
+		t.Fatal("delete never removes the worker state directories")
+	}
+	if unmount > remove {
+		t.Error("delete removes /var/lib/kubelet before unmounting its Pod volumes")
+	}
+	if !strings.Contains(script, "sort -r") {
+		t.Error("delete does not unmount nested mounts deepest-first")
+	}
+}

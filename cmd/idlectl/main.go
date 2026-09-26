@@ -52,7 +52,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const usageText = `idlectl manages Idleloom compute on this Mac.
+const usageText = `idlectl manages Idleloom compute on this machine.
 
 Native Metal — run macOS workloads on this Mac and project observability-only Nodes:
   idlectl join HOST [flags]
@@ -60,7 +60,7 @@ Native Metal — run macOS workloads on this Mac and project observability-only 
   idlectl recipe (list | show NAME@VERSION | render NAME@VERSION --name RUN) [flags]
   idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]
 
-Worker — run a schedulable Kubernetes Node in a Linux VM on this Mac:
+Worker — run a schedulable Kubernetes Node on this machine:
   idlectl create worker NAME [flags]
   idlectl start worker [NAME] [flags]
   idlectl stop worker [NAME] [flags]
@@ -1125,7 +1125,7 @@ func runGet(ctx context.Context, args []string) error {
 	}
 	if resourceName == resourceWorkers {
 		if *namespace != "" || *allNamespaces {
-			return fmt.Errorf("workers are local to this Mac; do not use --namespace or --all-namespaces")
+			return fmt.Errorf("workers are local to this machine; do not use --namespace or --all-namespaces")
 		}
 		return getWorkers(ctx, os.Stdout, *kubeconfig, *kubeContext, *statePath, name, *output)
 	}
