@@ -22,6 +22,11 @@ type BundleConfig struct {
 	ClusterDNS    string
 	ClusterDomain string
 	KubeletPath   string
+	// NodeIP is the address kubelet registers as the Node InternalIP. When
+	// empty the guest detects its own outbound address, which is what a
+	// krunkit VM on a private subnet wants. The in-place backends set it to
+	// the WireKube mesh address so the Node IP is unique across hosts.
+	NodeIP string
 	// RegistryMirrors are resolved containerd certs.d mirror entries.
 	RegistryMirrors []RegistryMirror
 	// CredentialProviderBins are host paths to linux/arm64 provider binaries.
@@ -243,7 +248,7 @@ if [ -f "$base/credential-providers.env" ]; then
     /usr/bin/rm -f "$base/credential-providers.env"
 fi
 
-node_ip=$(/usr/sbin/ip -4 route get 1.1.1.1 | /usr/bin/awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')
+%s
 if [ -z "$node_ip" ]; then
     echo "idleloom: could not determine the worker node IP" >&2
     exit 1
@@ -256,7 +261,21 @@ EOF
 /usr/bin/systemctl enable containerd.service kubelet.service >/dev/null
 /usr/bin/systemctl restart containerd.service
 /usr/bin/systemctl restart kubelet.service
-`, extraArgs)
+`, renderNodeIPResolution(cfg), extraArgs)
+}
+
+// renderNodeIPResolution produces the shell that establishes $node_ip.
+//
+// A krunkit VM owns its subnet, so detecting the outbound source address is
+// both correct and self-maintaining. An in-place worker shares a network
+// Idleloom does not control, and its detected address would be the host's —
+// not unique across machines, and published to every mesh peer through
+// autoAllowedIPs. Those backends pin the address instead.
+func renderNodeIPResolution(cfg BundleConfig) string {
+	if cfg.NodeIP == "" {
+		return `node_ip=$(/usr/sbin/ip -4 route get 1.1.1.1 | /usr/bin/awk '{for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}')`
+	}
+	return "node_ip=" + shellQuote(cfg.NodeIP)
 }
 
 const kubernetesSysctls = `net.ipv4.ip_forward = 1

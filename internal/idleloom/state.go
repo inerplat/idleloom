@@ -14,19 +14,23 @@ import (
 )
 
 type State struct {
-	NodeName             string       `json:"nodeName"`
-	KubeconfigPath       string       `json:"kubeconfigPath"`
-	Context              string       `json:"context"`
-	Network              string       `json:"network"`
-	Taint                string       `json:"taint,omitempty"`
-	TaintConfigured      bool         `json:"taintConfigured,omitempty"`
-	TokenTTLSeconds      int64        `json:"tokenTTLSeconds,omitempty"`
-	NetworkLease         string       `json:"networkLease,omitempty"`
-	NetworkLeaseUID      string       `json:"networkLeaseUID,omitempty"`
-	NetworkReservationID string       `json:"networkReservationID,omitempty"`
-	Runtime              RuntimeState `json:"runtime"`
-	Phase                string       `json:"phase"`
-	CreatedAt            time.Time    `json:"createdAt"`
+	NodeName             string `json:"nodeName"`
+	KubeconfigPath       string `json:"kubeconfigPath"`
+	Context              string `json:"context"`
+	Network              string `json:"network"`
+	Taint                string `json:"taint,omitempty"`
+	TaintConfigured      bool   `json:"taintConfigured,omitempty"`
+	TokenTTLSeconds      int64  `json:"tokenTTLSeconds,omitempty"`
+	NetworkLease         string `json:"networkLease,omitempty"`
+	NetworkLeaseUID      string `json:"networkLeaseUID,omitempty"`
+	NetworkReservationID string `json:"networkReservationID,omitempty"`
+	// Distribution records the WSL2 distribution this worker was enrolled on,
+	// so later lifecycle commands act on it rather than the machine's current
+	// default distribution.
+	Distribution string       `json:"distribution,omitempty"`
+	Runtime      RuntimeState `json:"runtime"`
+	Phase        string       `json:"phase"`
+	CreatedAt    time.Time    `json:"createdAt"`
 	// RegistryMirrors and the credential provider host paths are persisted so
 	// an interrupted enrollment can rebuild the worker bundle on resume. Only
 	// paths are stored, never secret file contents.
@@ -94,6 +98,14 @@ type RuntimeState struct {
 	MemoryMB      int    `json:"memoryMB"`
 	DiskMB        int    `json:"diskMB"`
 	Planned       bool   `json:"planned,omitempty"`
+}
+
+// HoldsNetworkReservation reports whether this worker owns a cluster-wide
+// subnet lease. Only the VM-provisioning backends take one: an in-place worker
+// derives its node address from the WireKube mesh, which needs no lease
+// because the address is a function of the node name.
+func (s State) HoldsNetworkReservation() bool {
+	return s.NetworkReservationID != ""
 }
 
 func DefaultStatePath() (string, error) {

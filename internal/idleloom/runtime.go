@@ -24,6 +24,17 @@ func (ExecRunner) Run(ctx context.Context, stdout, stderr io.Writer, name string
 	return command.Run()
 }
 
+// RunWithInput is Run with the command's standard input attached. The
+// in-place worker backends stream bundles and scripts this way so nothing has
+// to be staged on the guest filesystem first.
+func (ExecRunner) RunWithInput(ctx context.Context, stdin io.Reader, stdout, stderr io.Writer, name string, args ...string) error {
+	command := exec.CommandContext(ctx, name, args...)
+	command.Stdin = stdin
+	command.Stdout = stdout
+	command.Stderr = stderr
+	return command.Run()
+}
+
 func (ExecRunner) Output(ctx context.Context, name string, args ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, name, args...)
 	var stderr bytes.Buffer
@@ -57,7 +68,35 @@ type WorkerStatus struct {
 	Network string
 }
 
+// RuntimeKind identifies the backend that owns a worker.
+type RuntimeKind string
+
+const (
+	// RuntimeKrunkit provisions an ARM64 Linux VM on Apple Silicon.
+	RuntimeKrunkit RuntimeKind = "krunkit"
+	// RuntimeLinux enrolls the Linux host idlectl runs on.
+	RuntimeLinux RuntimeKind = "linux"
+	// RuntimeWSL2 enrolls a WSL2 distribution on a Windows host.
+	RuntimeWSL2 RuntimeKind = "wsl2"
+)
+
+// ProvisionsVM reports whether the backend builds its own virtual machine.
+// Those backends own a private subnet and need one reserved cluster-wide so
+// two workers cannot advertise the same node address. The in-place backends
+// take their address from the WireKube mesh instead, which is already unique
+// per node name.
+func (k RuntimeKind) ProvisionsVM() bool {
+	return k == RuntimeKrunkit
+}
+
 type WorkerRuntime interface {
+	// Backend identifies which runtime implementation this is. Enrollment
+	// branches on it where a VM-provisioning backend and an in-place backend
+	// genuinely differ, such as address allocation.
+	Backend() RuntimeKind
+	// GuestArch is the CPU architecture of the worker's Linux environment,
+	// which selects the kubelet build to install.
+	GuestArch() string
 	Preflight(context.Context) error
 	Plan(context.Context, RuntimeConfig) (RuntimeState, error)
 	Create(context.Context, *RuntimeState) error

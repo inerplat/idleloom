@@ -30,23 +30,33 @@ func TestValidateInitOptions(t *testing.T) {
 		Timeout:  time.Minute,
 		TokenTTL: time.Minute,
 	}
-	if err := validateInitOptions(valid); err != nil {
+	if err := validateInitOptions(valid, RuntimeKrunkit); err != nil {
 		t.Fatalf("valid options rejected: %v", err)
 	}
 	tooSmall := valid
 	tooSmall.MemoryMB = 2048
-	if err := validateInitOptions(tooSmall); err == nil {
+	if err := validateInitOptions(tooSmall, RuntimeKrunkit); err == nil {
 		t.Fatal("expected 2 GiB VM to be rejected")
 	}
 	badTaint := valid
 	badTaint.Taint = "dedicated"
-	if err := validateInitOptions(badTaint); err == nil {
+	if err := validateInitOptions(badTaint, RuntimeKrunkit); err == nil {
 		t.Fatal("expected malformed taint to be rejected")
 	}
 	unsafeTaint := valid
 	unsafeTaint.Taint = "example.com/dedicated=gpu:NoSchedule;rm -rf /"
-	if err := validateInitOptions(unsafeTaint); err == nil {
+	if err := validateInitOptions(unsafeTaint, RuntimeKrunkit); err == nil {
 		t.Fatal("expected shell metacharacters in taint to be rejected")
+	}
+	// An in-place worker is not sized by Idleloom, so the VM bounds must not
+	// reject it. The taint rules still apply.
+	unsized := valid
+	unsized.CPUs, unsized.MemoryMB, unsized.DiskMB = 0, 0, 0
+	if err := validateInitOptions(unsized, RuntimeLinux); err != nil {
+		t.Fatalf("in-place worker rejected for VM sizing: %v", err)
+	}
+	if err := validateInitOptions(unsafeTaint, RuntimeLinux); err == nil {
+		t.Fatal("expected shell metacharacters in taint to be rejected for in-place workers")
 	}
 }
 
@@ -232,7 +242,7 @@ func TestResumeEnrollmentReinstallsFreshBootstrapBundle(t *testing.T) {
 	var servingNotBefore time.Time
 	app := &App{
 		Out: io.Discard, Err: io.Discard, Now: time.Now, Runtime: runtime,
-		DownloadKubelet: func(context.Context, string) (string, error) { return kubelet, nil },
+		DownloadKubelet: func(context.Context, string, string) (string, error) { return kubelet, nil },
 		ApproveKubeletServingCSR: func(_ context.Context, _ *Cluster, _, _ string, notBefore time.Time, _ bool, _ time.Duration) error {
 			servingNotBefore = notBefore
 			return nil
@@ -558,6 +568,10 @@ type resumeRuntime struct {
 	status               WorkerStatus
 }
 
+func (r *resumeRuntime) Backend() RuntimeKind { return RuntimeKrunkit }
+
+func (r *resumeRuntime) GuestArch() string { return "arm64" }
+
 func (r *resumeRuntime) Preflight(context.Context) error { return nil }
 func (r *resumeRuntime) Plan(context.Context, RuntimeConfig) (RuntimeState, error) {
 	return RuntimeState{}, nil
@@ -594,6 +608,10 @@ func (r *resumeRuntime) Status(context.Context, *RuntimeState) (WorkerStatus, er
 
 func (r deletingRuntime) Validate(context.Context, RuntimeState) error { return nil }
 func (r deletingRuntime) Delete(context.Context, RuntimeState) error   { return r.err }
+
+func (r rejectingRuntime) Backend() RuntimeKind { return RuntimeKrunkit }
+
+func (r rejectingRuntime) GuestArch() string { return "arm64" }
 
 func (r rejectingRuntime) Preflight(context.Context) error { return nil }
 func (r rejectingRuntime) Plan(context.Context, RuntimeConfig) (RuntimeState, error) {
