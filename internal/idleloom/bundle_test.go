@@ -187,3 +187,27 @@ func readBundle(t *testing.T, path string) map[string][]byte {
 	}
 	return entries
 }
+
+// TestWorkerBundleConfigCarriesTheNodeAddress guards a bug that only appeared
+// when an interrupted enrollment was resumed: that path rebuilt the bundle
+// from scratch and left out the node address, so the worker re-registered
+// with its own detected address instead of the mesh one. Both paths now build
+// the config here, so the address cannot go missing from one of them.
+func TestWorkerBundleConfigCarriesTheNodeAddress(t *testing.T) {
+	state := State{
+		NodeName: "worker-a",
+		Taint:    "idleloom-dedicated=compute:NoSchedule",
+		Runtime:  RuntimeState{NodeName: "worker-a", GuestIP: "198.18.18.207"},
+	}
+	cluster := &Cluster{Server: "https://example.invalid:6443", ClusterDNS: "10.96.0.10", ClusterDomain: "cluster.local"}
+	config := workerBundleConfig(state, cluster, "token", "/tmp/kubelet")
+	if config.NodeIP != "198.18.18.207" {
+		t.Errorf("NodeIP = %q, want the worker's mesh address", config.NodeIP)
+	}
+	if config.NodeName != "worker-a" || config.Taint != state.Taint {
+		t.Errorf("bundle config does not describe the worker: %+v", config)
+	}
+	if !strings.Contains(renderInstallScript(config), "node_ip='198.18.18.207'") {
+		t.Error("the rendered install script does not pin the node address")
+	}
+}

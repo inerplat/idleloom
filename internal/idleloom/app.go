@@ -285,23 +285,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		}
 	}()
 
-	bundlePath, cleanupBundle, err := CreateWorkerBundle(BundleConfig{
-		NodeName:      opts.NodeName,
-		Taint:         opts.Taint,
-		Server:        cluster.Server,
-		TLSServerName: cluster.TLSServerName,
-		CAData:        cluster.CAData,
-		Token:         token.Value,
-		ClusterDNS:    cluster.ClusterDNS,
-		ClusterDomain: cluster.ClusterDomain,
-		KubeletPath:   kubeletPath,
-		NodeIP:        state.Runtime.GuestIP,
-
-		RegistryMirrors:          mirrors,
-		CredentialProviderBins:   opts.CredentialProviderBins,
-		CredentialProviderConfig: opts.CredentialProviderConfig,
-		CredentialProviderEnv:    opts.CredentialProviderEnv,
-	})
+	bundlePath, cleanupBundle, err := CreateWorkerBundle(workerBundleConfig(state, cluster, token.Value, kubeletPath))
 	if err != nil {
 		return err
 	}
@@ -606,7 +590,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 		return fmt.Errorf("an enrolling worker state is required")
 	}
 	if state.Runtime.Planned {
-		return fmt.Errorf("worker enrollment stopped before the VM was created; delete the local state with \"idlectl delete worker %s --local-only --force --state %s\", then run \"idlectl create worker\" again", state.NodeName, statePath)
+		return fmt.Errorf("worker enrollment stopped before %s was prepared; delete the local state with \"idlectl delete worker %s --local-only --force --state %s\", then run \"idlectl create worker\" again", a.plannedSubject(), state.NodeName, statePath)
 	}
 	_, nodeErr := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
 	if nodeErr != nil && !apierrors.IsNotFound(nodeErr) {
@@ -667,15 +651,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 		if err := validateCredentialProviders(state.CredentialProviderBins, state.CredentialProviderConfig, state.CredentialProviderEnv, a.Runtime.GuestArch()); err != nil {
 			return fmt.Errorf("cannot rebuild the interrupted worker bundle: %w", err)
 		}
-		bundlePath, cleanupBundle, err := CreateWorkerBundle(BundleConfig{
-			NodeName: state.NodeName, Taint: state.Taint, Server: cluster.Server,
-			TLSServerName: cluster.TLSServerName, CAData: cluster.CAData, Token: token.Value,
-			ClusterDNS: cluster.ClusterDNS, ClusterDomain: cluster.ClusterDomain, KubeletPath: kubeletPath,
-			RegistryMirrors:          state.RegistryMirrors,
-			CredentialProviderBins:   state.CredentialProviderBins,
-			CredentialProviderConfig: state.CredentialProviderConfig,
-			CredentialProviderEnv:    state.CredentialProviderEnv,
-		})
+		bundlePath, cleanupBundle, err := CreateWorkerBundle(workerBundleConfig(*state, cluster, token.Value, kubeletPath))
 		if err != nil {
 			return err
 		}
@@ -736,6 +712,42 @@ func (a *App) preflightStepMessage() string {
 	default:
 		return "Checking the host"
 	}
+}
+
+// workerBundleConfig describes the bundle for a worker.
+//
+// Enrollment and the resume path both install one, and they have to agree on
+// every field. They did not: the resume path rebuilt the bundle without the
+// node address, so a worker that finished enrolling through a resume
+// re-registered with its own detected address instead of the mesh one. Both
+// now read the same saved state.
+func workerBundleConfig(state State, cluster *Cluster, token, kubeletPath string) BundleConfig {
+	return BundleConfig{
+		NodeName:      state.NodeName,
+		Taint:         state.Taint,
+		Server:        cluster.Server,
+		TLSServerName: cluster.TLSServerName,
+		CAData:        cluster.CAData,
+		Token:         token,
+		ClusterDNS:    cluster.ClusterDNS,
+		ClusterDomain: cluster.ClusterDomain,
+		KubeletPath:   kubeletPath,
+		NodeIP:        state.Runtime.GuestIP,
+
+		RegistryMirrors:          state.RegistryMirrors,
+		CredentialProviderBins:   state.CredentialProviderBins,
+		CredentialProviderConfig: state.CredentialProviderConfig,
+		CredentialProviderEnv:    state.CredentialProviderEnv,
+	}
+}
+
+// plannedSubject names what enrollment would have created, for a message
+// about an enrollment that stopped before it did.
+func (a *App) plannedSubject() string {
+	if a.Runtime.Backend().ProvisionsVM() {
+		return "the VM"
+	}
+	return "the host"
 }
 
 // lifecycleStepMessage names a start, stop, or delete step for the active

@@ -181,10 +181,15 @@ func (r InPlaceRuntime) Start(ctx context.Context, state *RuntimeState) error {
 	return nil
 }
 
-func (r InPlaceRuntime) WaitReady(ctx context.Context, state RuntimeState, timeout time.Duration) error {
-	return waitUntilFor(ctx, timeout, "the worker kubelet to start", func() bool {
-		status, err := r.Status(ctx, &state)
-		return err == nil && status.VM == "running"
+// WaitReady waits for the guest to be usable, not for kubelet to be running.
+//
+// It is called during enrollment before the bundle is installed, and again
+// when resuming an interrupted enrollment — in both cases kubelet may not
+// exist yet. The krunkit backend draws the same line: it waits for SSH to
+// answer, not for a workload to be up.
+func (r InPlaceRuntime) WaitReady(ctx context.Context, _ RuntimeState, timeout time.Duration) error {
+	return waitUntilFor(ctx, timeout, r.Exec.Describe()+" to become reachable", func() bool {
+		return r.Exec.Run(ctx, io.Discard, io.Discard, "true") == nil
 	})
 }
 
@@ -200,15 +205,17 @@ func (r InPlaceRuntime) Delete(ctx context.Context, state RuntimeState) error {
 	// kubelet leaves each Pod's projected volumes mounted under
 	// /var/lib/kubelet. Removing the tree without unmounting them first fails
 	// on every one of those paths, and on an in-place worker there is no VM
-	// teardown afterwards to clean up what was left behind. Unmount deepest
-	// first so nested mounts release before their parents.
+	// teardown afterwards to clean up what was left behind. The worker state
+	// directory is covered too, since an operator may have put either on its
+	// own volume. Unmount deepest first so nested mounts release before their
+	// parents.
 	script := `set -u
 systemctl disable --now kubelet.service 2>/dev/null || true
 systemctl disable --now ` + nodeAddressUnit + ` 2>/dev/null || true
 rm -f /etc/systemd/system/kubelet.service /etc/systemd/system/` + nodeAddressUnit + `
 rm -f ` + nodeAddressScript + `
 systemctl daemon-reload 2>/dev/null || true
-awk '$2 ~ /^\/var\/lib\/kubelet/ { print $2 }' /proc/self/mounts | sort -r | while read -r mount; do
+awk '$2 ~ /^\/var\/lib\/(kubelet|idleloom)/ { print $2 }' /proc/self/mounts | sort -r | while read -r mount; do
 	umount "$mount" 2>/dev/null || umount -l "$mount" 2>/dev/null || true
 done
 rm -rf /var/lib/idleloom /var/lib/kubelet /etc/kubernetes

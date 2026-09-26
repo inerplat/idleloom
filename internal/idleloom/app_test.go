@@ -202,7 +202,7 @@ func TestResumeEnrollmentRejectsRuntimeThatWasOnlyPlanned(t *testing.T) {
 	}
 	cluster := &Cluster{Client: kubernetesfake.NewClientset()}
 	err := app.resumeEnrollment(context.Background(), filepath.Join(t.TempDir(), "state.json"), state, cluster, time.Second)
-	if err == nil || !strings.Contains(err.Error(), "before the VM was created") {
+	if err == nil || !strings.Contains(err.Error(), "stopped before the VM was prepared") {
 		t.Fatalf("planned resume error = %v", err)
 	}
 	if runtime.startCalls != 0 {

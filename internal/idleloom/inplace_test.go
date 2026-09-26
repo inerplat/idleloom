@@ -6,6 +6,7 @@ import (
 	"io"
 	"strings"
 	"testing"
+	"time"
 )
 
 // recordingExec captures what a runtime would run instead of running it.
@@ -145,6 +146,11 @@ func TestInPlaceDeleteReleasesKubeletMountsBeforeRemoving(t *testing.T) {
 	if !strings.Contains(script, "sort -r") {
 		t.Error("delete does not unmount nested mounts deepest-first")
 	}
+	// Either directory may sit on its own volume on a host Idleloom does not
+	// otherwise control.
+	if !strings.Contains(script, "kubelet|idleloom") {
+		t.Error("delete only unmounts under /var/lib/kubelet, not the worker state directory")
+	}
 }
 
 // failingExec fails the commands whose joined form contains a marker, so a
@@ -208,5 +214,18 @@ func TestPreflightRejectsANonLinuxGuest(t *testing.T) {
 	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
 	if err := runtime.Preflight(context.Background()); err == nil {
 		t.Fatal("expected a non-Linux guest to be rejected")
+	}
+}
+
+// TestWaitReadyDoesNotRequireKubelet covers resuming an interrupted
+// enrollment: WaitReady runs before the bundle installs kubelet, so requiring
+// kubelet there would deadlock every resume.
+func TestWaitReadyDoesNotRequireKubelet(t *testing.T) {
+	// No replies configured, so "systemctl is-active kubelet.service" answers
+	// empty — kubelet is not running.
+	exec := &recordingExec{}
+	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
+	if err := runtime.WaitReady(context.Background(), RuntimeState{NodeName: "worker-a"}, time.Second); err != nil {
+		t.Fatalf("WaitReady required kubelet to already be running: %v", err)
 	}
 }
