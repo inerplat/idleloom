@@ -99,11 +99,11 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	for _, warning := range mirrorWarnings {
 		_, _ = fmt.Fprintf(a.Err, "warning: %s\n", warning)
 	}
-	if err := validateCredentialProviders(opts.CredentialProviderBins, opts.CredentialProviderConfig, opts.CredentialProviderEnv); err != nil {
+	if err := validateCredentialProviders(opts.CredentialProviderBins, opts.CredentialProviderConfig, opts.CredentialProviderEnv, a.Runtime.GuestArch()); err != nil {
 		return err
 	}
 
-	a.step("Checking the Apple Silicon host")
+	a.step(a.preflightStepMessage())
 	if err := a.Runtime.Preflight(ctx); err != nil {
 		return err
 	}
@@ -440,7 +440,7 @@ func (a *App) Start(ctx context.Context, statePath string, override ClusterOverr
 			return err
 		}
 	}
-	a.step("Starting the krunkit worker VM")
+	a.step(a.lifecycleStepMessage("Starting"))
 	startNotBefore := state.CreatedAt
 	if err := a.Runtime.Start(ctx, &state.Runtime); err != nil {
 		return err
@@ -664,7 +664,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 				_, _ = fmt.Fprintf(a.Err, "warning: %v\n", err)
 			}
 		}()
-		if err := validateCredentialProviders(state.CredentialProviderBins, state.CredentialProviderConfig, state.CredentialProviderEnv); err != nil {
+		if err := validateCredentialProviders(state.CredentialProviderBins, state.CredentialProviderConfig, state.CredentialProviderEnv, a.Runtime.GuestArch()); err != nil {
 			return fmt.Errorf("cannot rebuild the interrupted worker bundle: %w", err)
 		}
 		bundlePath, cleanupBundle, err := CreateWorkerBundle(BundleConfig{
@@ -724,6 +724,28 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 	}
 	_, _ = fmt.Fprintf(a.Out, "\nIdleloom worker %s enrollment resumed and is Ready.\n", state.NodeName)
 	return nil
+}
+
+// preflightStepMessage names the preflight step for the active backend.
+func (a *App) preflightStepMessage() string {
+	switch a.Runtime.Backend() {
+	case RuntimeKrunkit:
+		return "Checking the Apple Silicon host"
+	case RuntimeWSL2:
+		return "Checking the WSL2 environment"
+	default:
+		return "Checking the host"
+	}
+}
+
+// lifecycleStepMessage names a start, stop, or delete step for the active
+// backend. Only krunkit has a VM to act on; the in-place backends act on the
+// worker's services inside an environment that outlives them.
+func (a *App) lifecycleStepMessage(verb string) string {
+	if a.Runtime.Backend().ProvisionsVM() {
+		return verb + " the krunkit worker VM"
+	}
+	return verb + " the worker"
 }
 
 // createStepMessage names the provisioning step for the active backend.
@@ -875,7 +897,7 @@ func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverri
 		return err
 	}
 	if localOnly {
-		a.step("Stopping the local krunkit worker VM")
+		a.step(a.lifecycleStepMessage("Stopping the local"))
 		if err := a.Runtime.Stop(ctx, state.Runtime); err != nil {
 			return err
 		}
@@ -923,7 +945,7 @@ func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverri
 		}
 		return fmt.Errorf("worker still has active workload pods: %s; drain or remove them before stopping", strings.Join(busy, ", "))
 	}
-	a.step("Stopping the krunkit worker VM")
+	a.step(a.lifecycleStepMessage("Stopping"))
 	if err := a.Runtime.Stop(ctx, state.Runtime); err != nil {
 		return err
 	}
@@ -1044,7 +1066,7 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 			}
 			return errors.Join(err, stateErr, schedulingErr)
 		}
-		a.step("Deleting the krunkit worker VM")
+		a.step(a.lifecycleStepMessage("Deleting"))
 		if err := a.Runtime.Delete(ctx, state.Runtime); err != nil {
 			return err
 		}

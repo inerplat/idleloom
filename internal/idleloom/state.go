@@ -195,7 +195,7 @@ func LoadState(path string) (State, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return State{}, fmt.Errorf("no Idleloom worker exists on this Mac (state file %s not found); create one with \"idlectl create worker NAME\". If this Mac is a Native Metal host, use \"idlectl delete host NAME\" instead", path)
+			return State{}, fmt.Errorf("no Idleloom worker exists on this host (state file %s not found); create one with \"idlectl create worker NAME\". If this is a Native Metal host, use \"idlectl delete host NAME\" instead", path)
 		}
 		return State{}, fmt.Errorf("read state %s: %w", path, err)
 	}

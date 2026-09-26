@@ -28,7 +28,7 @@ func writeTempFile(t *testing.T, name string, data []byte) string {
 }
 
 func TestValidateCredentialProviderBinary(t *testing.T) {
-	if err := validateCredentialProviderBinary(writeTempFile(t, "arm64", elfHeader(elfClass64, elfMachineAArch64))); err != nil {
+	if err := validateCredentialProviderBinary(writeTempFile(t, "arm64", elfHeader(elfClass64, elfMachineAArch64)), "arm64"); err != nil {
 		t.Fatalf("valid linux/arm64 ELF rejected: %v", err)
 	}
 
@@ -37,14 +37,14 @@ func TestValidateCredentialProviderBinary(t *testing.T) {
 		data []byte
 		want string
 	}{
-		{"x86-64", elfHeader(elfClass64, 0x3E), "not built for arm64"},
+		{"x86-64", elfHeader(elfClass64, elfMachineX8664), "not built for arm64"},
 		{"32-bit arm", elfHeader(1, elfMachineAArch64), "not 64-bit"},
 		{"mach-o darwin", []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xb7, 0x00}, "not an ELF binary"},
 		{"too short", []byte{0x7f, 'E', 'L'}, "too small"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateCredentialProviderBinary(writeTempFile(t, tc.name, tc.data))
+			err := validateCredentialProviderBinary(writeTempFile(t, tc.name, tc.data), "arm64")
 			if err == nil {
 				t.Fatalf("expected an error for %s", tc.name)
 			}
@@ -109,19 +109,38 @@ func TestValidateCredentialProviderConfig(t *testing.T) {
 	}
 }
 
+// TestValidateCredentialProviderBinaryFollowsTheWorkerArchitecture covers the
+// in-place backends, whose workers are linux/amd64 rather than linux/arm64.
+func TestValidateCredentialProviderBinaryFollowsTheWorkerArchitecture(t *testing.T) {
+	amd64 := writeTempFile(t, "amd64", elfHeader(elfClass64, elfMachineX8664))
+	if err := validateCredentialProviderBinary(amd64, "amd64"); err != nil {
+		t.Fatalf("valid linux/amd64 ELF rejected for an amd64 worker: %v", err)
+	}
+	if err := validateCredentialProviderBinary(amd64, "arm64"); err == nil {
+		t.Fatal("an amd64 binary was accepted for an arm64 worker")
+	}
+	arm64 := writeTempFile(t, "arm64", elfHeader(elfClass64, elfMachineAArch64))
+	if err := validateCredentialProviderBinary(arm64, "amd64"); err == nil {
+		t.Fatal("an arm64 binary was accepted for an amd64 worker")
+	}
+	if err := validateCredentialProviderBinary(arm64, "riscv64"); err == nil {
+		t.Fatal("an unsupported worker architecture was accepted")
+	}
+}
+
 func TestValidateCredentialProvidersNoneConfigured(t *testing.T) {
-	if err := validateCredentialProviders(nil, "", ""); err != nil {
+	if err := validateCredentialProviders(nil, "", "", "arm64"); err != nil {
 		t.Fatalf("no providers should validate cleanly: %v", err)
 	}
 }
 
 func TestValidateCredentialProvidersRequiresConfigAndBin(t *testing.T) {
 	bin := writeTempFile(t, "ecr-credential-provider", elfHeader(elfClass64, elfMachineAArch64))
-	if err := validateCredentialProviders([]string{bin}, "", ""); err == nil || !strings.Contains(err.Error(), "config is required") {
+	if err := validateCredentialProviders([]string{bin}, "", "", "arm64"); err == nil || !strings.Contains(err.Error(), "config is required") {
 		t.Fatalf("expected a missing-config error, got %v", err)
 	}
 	config := writeTempFile(t, "config.yaml", []byte(goodCredentialProviderConfig))
-	if err := validateCredentialProviders(nil, config, ""); err == nil || !strings.Contains(err.Error(), "binary is required") {
+	if err := validateCredentialProviders(nil, config, "", "arm64"); err == nil || !strings.Contains(err.Error(), "binary is required") {
 		t.Fatalf("expected a missing-bin error, got %v", err)
 	}
 }
@@ -130,10 +149,10 @@ func TestValidateCredentialProvidersEndToEnd(t *testing.T) {
 	bin := writeTempFile(t, "ecr-credential-provider", elfHeader(elfClass64, elfMachineAArch64))
 	config := writeTempFile(t, "config.yaml", []byte(goodCredentialProviderConfig))
 	env := writeTempFile(t, "aws.env", []byte("AWS_ACCESS_KEY_ID=example\n"))
-	if err := validateCredentialProviders([]string{bin}, config, env); err != nil {
+	if err := validateCredentialProviders([]string{bin}, config, env, "arm64"); err != nil {
 		t.Fatalf("valid credential providers rejected: %v", err)
 	}
-	if err := validateCredentialProviders([]string{bin}, config, filepath.Join(t.TempDir(), "missing.env")); err == nil {
+	if err := validateCredentialProviders([]string{bin}, config, filepath.Join(t.TempDir(), "missing.env"), "arm64"); err == nil {
 		t.Fatal("expected an error for a missing env file")
 	}
 }
@@ -148,7 +167,7 @@ func TestValidateCredentialProvidersRejectsDuplicateBinaryBasename(t *testing.T)
 		}
 	}
 	config := writeTempFile(t, "config.yaml", []byte(goodCredentialProviderConfig))
-	err := validateCredentialProviders([]string{binA, binB}, config, "")
+	err := validateCredentialProviders([]string{binA, binB}, config, "", "arm64")
 	if err == nil || !strings.Contains(err.Error(), "duplicate credential provider binary basename") {
 		t.Fatalf("expected a duplicate-basename error, got %v", err)
 	}
