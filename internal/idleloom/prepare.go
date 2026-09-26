@@ -33,8 +33,16 @@ install -d -m 0755 /etc/sysctl.d
 cat > /etc/sysctl.d/99-idleloom-kubernetes.conf <<'IDLELOOM_SYSCTL'
 ` + kubernetesSysctls + `IDLELOOM_SYSCTL
 
-modprobe overlay
-modprobe br_netfilter
+# A kernel with these built in has nothing to load, and modprobe fails on
+# some of those. What matters is that the functionality is there afterwards,
+# so check for it rather than trusting the exit status: without br_netfilter
+# the bridge sysctls do not exist and no CNI can filter bridged traffic.
+modprobe overlay 2>/dev/null || true
+modprobe br_netfilter 2>/dev/null || true
+if [ ! -e /proc/sys/net/bridge/bridge-nf-call-iptables ]; then
+  echo "idleloom: this kernel provides no br_netfilter; bridged Pod traffic would bypass iptables and no CNI can work" >&2
+  exit 1
+fi
 sysctl --system >/dev/null
 
 export DEBIAN_FRONTEND=noninteractive
