@@ -780,7 +780,7 @@ func (a *App) downloadKubelet(ctx context.Context, version string) (string, erro
 	return DownloadKubelet(ctx, version, arch)
 }
 
-// LoadImage loads local container image(s) directly into the worker VM's
+// LoadImage loads local container image(s) directly into the worker's
 // containerd so Pods with imagePullPolicy IfNotPresent or Never can use them
 // without a registry. Either refs (exported with a container engine) or a
 // pre-saved --archive tar is uploaded and imported.
