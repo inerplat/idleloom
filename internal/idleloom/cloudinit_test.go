@@ -65,3 +65,23 @@ func TestIndentScriptIndentsEveryNonEmptyLine(t *testing.T) {
 		t.Errorf("indentScript = %q", got)
 	}
 }
+
+// TestPrepareScriptVerifiesBrNetfilterRatherThanTrustingModprobe covers a
+// kernel that has the module built in, where modprobe can fail even though
+// the functionality is present — and the opposite case, where a kernel
+// genuinely lacks it and the worker must refuse rather than register a node
+// whose Pod traffic bypasses iptables.
+func TestPrepareScriptVerifiesBrNetfilterRatherThanTrustingModprobe(t *testing.T) {
+	script := renderPrepareScript()
+	if !strings.Contains(script, "modprobe br_netfilter 2>/dev/null || true") {
+		t.Error("a failed modprobe still aborts the whole prepare")
+	}
+	if !strings.Contains(script, "/proc/sys/net/bridge/bridge-nf-call-iptables") {
+		t.Error("prepare does not verify br_netfilter is actually available")
+	}
+	check := strings.Index(script, "/proc/sys/net/bridge/bridge-nf-call-iptables")
+	sysctl := strings.Index(script, "sysctl --system")
+	if check > sysctl {
+		t.Error("prepare applies the bridge sysctls before checking they can exist")
+	}
+}
