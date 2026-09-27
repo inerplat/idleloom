@@ -418,7 +418,7 @@ func assignUID(uid types.UID) clienttesting.ReactionFunc {
 func newTestClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		MeshesGVR: "WireKubeMeshList", PeersGVR: "WireKubePeerList", ExternalPeersGVR: "WireKubeExternalPeerList",
-		meshclaim.LeasesGVR: "LeaseList", ServicesGVR: "ServiceList",
+		meshclaim.LeasesGVR: "LeaseList", ServicesGVR: "ServiceList", DaemonSetsGVR: "DaemonSetList",
 	})
 	client.PrependReactor("create", meshclaim.LeasesGVR.Resource, func(action clienttesting.Action) (bool, runtime.Object, error) {
 		object := action.(clienttesting.CreateAction).GetObject().(*unstructured.Unstructured)
@@ -442,6 +442,9 @@ func newTestClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 			}
 		case "Service":
 			resource = ServicesGVR
+			namespace = unstructuredObject.GetNamespace()
+		case "DaemonSet":
+			resource = DaemonSetsGVR
 			namespace = unstructuredObject.GetNamespace()
 		}
 		if err := client.Tracker().Create(resource, object, namespace); err != nil {
@@ -478,5 +481,68 @@ func relayService(host string) *unstructured.Unstructured {
 			"ports": []any{map[string]any{"name": "relay-tcp", "protocol": "TCP", "port": int64(3478)}},
 		},
 		"status": map[string]any{"loadBalancer": map[string]any{"ingress": []any{map[string]any{"hostname": host}}}},
+	}}
+}
+
+// TestClaimMeshIPFollowsTheAgentNamespace. A claim arbitrates by name inside
+// one namespace, so claiming in the chart default while WireKube runs
+// somewhere else would give Idleloom a private pool that contends with
+// nothing — the exact failure the allocator exists to remove, made silent.
+func TestClaimMeshIPFollowsTheAgentNamespace(t *testing.T) {
+	const namespace = "wirekube-prod"
+	client := newTestClient(testMesh(1), wirekubeAgentDaemonSet(namespace))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentNamespace != namespace {
+		t.Fatalf("AgentNamespace = %q, want %q", report.AgentNamespace, namespace)
+	}
+	state, err := loadOrCreateState(t.TempDir(), "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, claim, _, err := claimMeshIP(context.Background(), client, state, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Namespace != namespace {
+		t.Errorf("claim namespace = %q, want the agent's %q", claim.Namespace, namespace)
+	}
+	if _, err := client.Resource(meshclaim.LeasesGVR).Namespace(namespace).
+		Get(context.Background(), claim.Name, metav1.GetOptions{}); err != nil {
+		t.Errorf("the claim is not in %s: %v", namespace, err)
+	}
+}
+
+// TestClaimMeshIPFallsBackToTheChartDefault when no agent DaemonSet is
+// visible, which is right for every default install and is all that can be
+// done otherwise.
+func TestClaimMeshIPFallsBackToTheChartDefault(t *testing.T) {
+	client := newTestClient(testMesh(1))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentNamespace != "" {
+		t.Fatalf("AgentNamespace = %q with no DaemonSet present", report.AgentNamespace)
+	}
+	state, err := loadOrCreateState(t.TempDir(), "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, claim, _, err := claimMeshIP(context.Background(), client, state, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Namespace != meshclaim.DefaultNamespace {
+		t.Errorf("claim namespace = %q, want %q", claim.Namespace, meshclaim.DefaultNamespace)
+	}
+}
+
+func wirekubeAgentDaemonSet(namespace string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{"name": "wirekube-agent", "namespace": namespace},
 	}}
 }

@@ -26,6 +26,8 @@ import (
 	"k8s.io/client-go/rest"
 
 	"golang.org/x/crypto/curve25519"
+
+	"github.com/inerplat/idleloom/internal/meshclaim"
 )
 
 const (
@@ -42,11 +44,16 @@ var (
 	MeshesGVR        = schema.GroupVersionResource{Group: "wirekube.io", Version: "v1alpha1", Resource: "wirekubemeshes"}
 	PeersGVR         = schema.GroupVersionResource{Group: "wirekube.io", Version: "v1alpha1", Resource: "wirekubepeers"}
 	ExternalPeersGVR = schema.GroupVersionResource{Group: "wirekube.io", Version: "v1alpha1", Resource: "wirekubeexternalpeers"}
+	DaemonSetsGVR    = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
 )
 
 type DoctorReport struct {
 	MeshName string
 	MeshCIDR string
+	// AgentNamespace is where the WireKube agent runs, and so where its
+	// address claims live. Idlectl has to claim in that exact namespace,
+	// because a claim somewhere else arbitrates against nothing.
+	AgentNamespace string
 	// AddressAllocation is the mesh's spec.addressAllocation. "allocator"
 	// means WireKube resolves address collisions by moving a peer; anything
 	// else means every peer takes the address its name hashes to and a
@@ -128,6 +135,16 @@ func Inspect(ctx context.Context, client dynamic.Interface) (DoctorReport, error
 	report := DoctorReport{MeshName: mesh.GetName()}
 	report.MeshCIDR, _, _ = unstructured.NestedString(mesh.Object, "spec", "meshCIDR")
 	report.AddressAllocation, _, _ = unstructured.NestedString(mesh.Object, "spec", "addressAllocation")
+	report.AgentNamespace = discoverAgentNamespace(ctx, client)
+	if report.AgentNamespace == "" && report.ArbitratesAddresses() {
+		// Falling back is right for a default install, but if WireKube is
+		// installed somewhere else the claim lands in a namespace nothing else
+		// reads, and two hosts could take the same address believing they had
+		// arbitrated. Say so rather than let it pass.
+		report.Warnings = append(report.Warnings, fmt.Sprintf(
+			"could not find the WireKube agent DaemonSet, so mesh address claims will be made in %s; "+
+				"confirm that is where WireKube runs", meshclaim.DefaultNamespace))
+	}
 	if err := validateMeshCIDR(report.MeshCIDR); err != nil {
 		return DoctorReport{}, err
 	}

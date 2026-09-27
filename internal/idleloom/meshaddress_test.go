@@ -259,3 +259,47 @@ func clientServingPeers(t *testing.T, peers ...peerFixture) kubernetes.Interface
 	}
 	return client
 }
+
+// TestReserveMeshAddressClaimsInTheAgentNamespace. The claim only arbitrates
+// against WireKube's own if it lands in the same namespace; writing to the
+// chart default while WireKube runs elsewhere would give idlectl a private
+// pool that contends with nothing.
+func TestReserveMeshAddressClaimsInTheAgentNamespace(t *testing.T) {
+	const namespace = "wirekube-prod"
+	client := fake.NewSimpleClientset()
+	wireKube := allocatorMesh()
+	wireKube.AgentNamespace = namespace
+
+	if _, err := ReserveMeshAddress(context.Background(), client, "worker1", wireKube); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := client.CoordinationV1().Leases(namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims.Items) != 1 {
+		t.Fatalf("%d claims in %s, want one", len(claims.Items), namespace)
+	}
+	if n := len(listLeases(t, client)); n != 0 {
+		t.Errorf("%d claims landed in %s as well", n, meshclaim.DefaultNamespace)
+	}
+	// And the preview and the release follow it too, or a dry run would report
+	// a free address that is taken and teardown would leak the claim.
+	preview, err := PreviewMeshAddress(context.Background(), client, "worker1", wireKube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Moved {
+		t.Error("the preview did not see the claim it just made in the agent namespace")
+	}
+	if err := ReleaseMeshAddress(context.Background(), client, "worker1", wireKube); err != nil {
+		t.Fatal(err)
+	}
+	claims, err = client.CoordinationV1().Leases(namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims.Items) != 0 {
+		t.Errorf("%d claims left in %s after release", len(claims.Items), namespace)
+	}
+}
