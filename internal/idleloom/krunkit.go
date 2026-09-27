@@ -42,6 +42,10 @@ func (k KrunkitRuntime) Backend() RuntimeKind { return RuntimeKrunkit }
 // cloud image.
 func (k KrunkitRuntime) GuestArch() string { return "arm64" }
 
+// Environment is empty: this backend builds the VM it enrols, so there is no
+// pre-existing environment to pick between.
+func (k KrunkitRuntime) Environment() string { return "" }
+
 func (k KrunkitRuntime) Preflight(ctx context.Context) error {
 	for _, binary := range []string{"krunkit", "gvproxy", "qemu-img", "ssh", "scp", "ssh-keygen", "hdiutil"} {
 		if _, err := exec.LookPath(binary); err != nil {

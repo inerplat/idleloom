@@ -27,6 +27,11 @@ type guestExec interface {
 	Script(ctx context.Context, stdout, stderr io.Writer, script string) error
 	// Send copies a local file to guestPath, owned by root and mode 0600.
 	Send(ctx context.Context, localPath, guestPath string) error
+	// Environment names the specific environment this is bound to, where
+	// there is a choice of them: the WSL distribution, and nothing on a Linux
+	// host. Enrollment records it so later lifecycle commands act on the same
+	// one rather than on whatever is default at the time.
+	Environment() string
 }
 
 // shellQuote renders a value safe to embed in a POSIX shell command.
@@ -47,6 +52,9 @@ func newLinuxExec(runner CommandRunner) linuxExec {
 }
 
 func (l linuxExec) Describe() string { return "this host" }
+
+// Environment is empty: a Linux host is the only environment there is.
+func (l linuxExec) Environment() string { return "" }
 
 // checkElevation reports why commands cannot be run as root, if they cannot.
 // Enrollment installs system services, so a host that offers neither root nor
@@ -129,6 +137,27 @@ func (w wslExec) Describe() string {
 // args builds the wsl.exe invocation. An empty distribution means "whichever
 // one is default", which wsl.exe expresses by omitting -d entirely; passing
 // -d "" instead selects a distribution named the empty string and fails.
+func (w wslExec) Environment() string { return w.Distribution }
+
+// resolveWSLDistribution reports which distribution wsl.exe uses when none is
+// named, by asking that distribution its own name.
+//
+// Recording it matters because the default is a machine setting a user can
+// change. An enrollment that stored nothing would have every later command —
+// including delete, which erases /var/lib/kubelet and /etc/kubernetes — follow
+// the default wherever it had moved to.
+//
+// It asks through --exec rather than parsing "wsl --list", whose output is
+// UTF-16 and decorated; a program's own output passes through unchanged.
+func resolveWSLDistribution(ctx context.Context, runner CommandRunner) string {
+	out, err := runner.Output(ctx, wslBinary, "-u", "root", "--exec",
+		"sh", "-c", `printf %s "$WSL_DISTRO_NAME"`)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func (w wslExec) args(argv []string) []string {
 	prefix := make([]string, 0, 5+len(argv))
 	if w.Distribution != "" {

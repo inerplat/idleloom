@@ -13,14 +13,17 @@ import (
 
 // recordingExec captures what a runtime would run instead of running it.
 type recordingExec struct {
-	scripts  []string
-	runs     [][]string
-	sent     [][2]string
-	replies  map[string]string
-	failures map[string]error
+	scripts     []string
+	runs        [][]string
+	sent        [][2]string
+	replies     map[string]string
+	failures    map[string]error
+	environment string
 }
 
 func (r *recordingExec) Describe() string { return "the test guest" }
+
+func (r *recordingExec) Environment() string { return r.environment }
 
 func (r *recordingExec) Run(_ context.Context, stdout, _ io.Writer, argv ...string) error {
 	r.runs = append(r.runs, argv)
@@ -376,5 +379,46 @@ func TestCheckSystemdIsRunningReadsTheState(t *testing.T) {
 		if !c.accept && err != nil && !strings.Contains(err.Error(), "wsl.conf") {
 			t.Errorf("%s: the error does not name the remedy: %v", c.what, err)
 		}
+	}
+}
+
+// TestInPlaceDeleteStopsWhatTheWorkerWasRunning. Stopping kubelet does not
+// stop what it started: containerd shims are detached by design, so the CNI,
+// the WireKube agent and every user workload keep running. A VM backend takes
+// them with the machine; here there is nothing afterwards, and the mounts and
+// configuration they are using are removed a few lines later.
+func TestInPlaceDeleteStopsWhatTheWorkerWasRunning(t *testing.T) {
+	exec := &recordingExec{}
+	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux, Out: io.Discard, Err: io.Discard}
+	if err := runtime.Delete(context.Background(), RuntimeState{NodeName: "worker-a"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	script := exec.allScripts()
+	kill := strings.Index(script, "ctr -n k8s.io tasks kill")
+	unmount := strings.Index(script, "umount")
+	if kill < 0 {
+		t.Fatal("delete leaves the worker's containers running")
+	}
+	if unmount >= 0 && kill > unmount {
+		t.Error("delete unmounts the volumes the containers are using before killing them")
+	}
+	// containerd may not be installed if enrollment failed early, and a
+	// teardown that aborts there would leave far more behind than it cleaned.
+	if !strings.Contains(script, "command -v ctr") {
+		t.Error("delete assumes ctr is present")
+	}
+}
+
+// TestEnvironmentRecordsTheDistribution. The value goes into the worker state
+// and decides which distribution every later command acts on, including the
+// delete that erases /var/lib/kubelet and /etc/kubernetes.
+func TestEnvironmentRecordsTheDistribution(t *testing.T) {
+	bound := InPlaceRuntime{Exec: &recordingExec{environment: "Ubuntu-24.04"}, Kind: RuntimeWSL2}
+	if got := bound.Environment(); got != "Ubuntu-24.04" {
+		t.Errorf("Environment = %q, want the bound distribution", got)
+	}
+	host := InPlaceRuntime{Exec: &recordingExec{}, Kind: RuntimeLinux}
+	if got := host.Environment(); got != "" {
+		t.Errorf("Environment = %q, want nothing on a Linux host", got)
 	}
 }
