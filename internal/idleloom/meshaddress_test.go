@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -376,5 +377,48 @@ func TestCheckWireKubeRefusesAnAmbiguousAgentNamespace(t *testing.T) {
 		if c.refuse && err != nil && !strings.Contains(err.Error(), "more than one namespace") {
 			t.Errorf("the error does not say what is wrong: %v", err)
 		}
+	}
+}
+
+// TestHolderIdentitiesMatchWireKube. These prefixes are WireKube's, and they
+// are what keeps a node and an external peer of the same name from adopting
+// each other's claim. Reproducing them wrong would not fail a build or a
+// request; it would hand two peers one address.
+func TestHolderIdentitiesMatchWireKube(t *testing.T) {
+	if got := meshclaim.HolderForPeer("alice"); got != "wirekubepeer/alice" {
+		t.Errorf("HolderForPeer = %q", got)
+	}
+	if got := meshclaim.HolderForExternalPeer("alice"); got != "wirekubeexternalpeer/alice" {
+		t.Errorf("HolderForExternalPeer = %q", got)
+	}
+}
+
+// TestReserveMeshAddressClaimsUnderThePeerHolder. A worker is a WireKubePeer,
+// and WireKube's agent adopts the claim by matching exactly this identity when
+// the worker joins. Using the bare node name would leave the agent unable to
+// find it, and it would claim a second address.
+func TestReserveMeshAddressClaimsUnderThePeerHolder(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	if _, err := ReserveMeshAddress(context.Background(), client, "worker1", allocatorMesh()); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := client.CoordinationV1().Leases(meshclaim.DefaultNamespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims.Items) != 1 {
+		t.Fatalf("%d claims, want one", len(claims.Items))
+	}
+	want := meshclaim.HolderForPeer("worker1")
+	if got := *claims.Items[0].Spec.HolderIdentity; got != want {
+		t.Errorf("holderIdentity = %q, want %q", got, want)
+	}
+}
+
+func TestWaitForPeerGone(t *testing.T) {
+	// A cluster that does not serve the CRD has no peer to wait for.
+	absent := clientServingPeers(t)
+	if err := waitForPeerGone(context.Background(), absent, "worker1", time.Second); err != nil {
+		t.Errorf("waited on a cluster with no WireKube peers: %v", err)
 	}
 }

@@ -203,7 +203,10 @@ func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 
 // claimMeshAddress takes the address through WireKube's allocator.
 func claimMeshAddress(ctx context.Context, client kubernetes.Interface, nodeName string, wireKube WireKubeStatus) (MeshAddress, error) {
-	result, err := meshAllocator(client, wireKube).Allocate(ctx, meshclaim.Request{Holder: nodeName})
+	result, err := meshAllocator(client, wireKube).Allocate(ctx, meshclaim.Request{
+		Holder: meshclaim.HolderForPeer(nodeName),
+		Name:   nodeName,
+	})
 	if err != nil {
 		return MeshAddress{}, err
 	}
@@ -222,7 +225,7 @@ func ReleaseMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 	if !wireKube.ArbitratesAddresses() || wireKube.MeshCIDR == "" {
 		return nil
 	}
-	return meshAllocator(client, wireKube).Release(ctx, nodeName)
+	return meshAllocator(client, wireKube).Release(ctx, meshclaim.HolderForPeer(nodeName))
 }
 
 // meshEnrollmentGrace is how long a claim survives with no peer answering for
@@ -424,5 +427,41 @@ func meshAddressHeldByAnother(ctx context.Context, client kubernetes.Interface, 
 	if err != nil {
 		return false, fmt.Errorf("read the claim on the mesh address %s: %w", address, err)
 	}
-	return claim.Spec.HolderIdentity == nil || *claim.Spec.HolderIdentity != nodeName, nil
+	return claim.Spec.HolderIdentity == nil || *claim.Spec.HolderIdentity != meshclaim.HolderForPeer(nodeName), nil
+}
+
+// meshPeerRemovalTimeout bounds the wait for a deleted node's WireKubePeer to
+// disappear. It is short because the peer carries a Node ownerReference and
+// garbage collection is prompt; overrunning it costs nothing but the address
+// waiting out WireKube's reaper instead.
+const meshPeerRemovalTimeout = 30 * time.Second
+
+// waitForPeerGone blocks until no WireKubePeer answers for nodeName.
+//
+// Deleting the Node removes the peer, but by garbage collection, so the two
+// are not simultaneous. Handing the address back while the peer still
+// advertises it lets the next enrollment claim it, and the mesh carries two
+// peers on one /32 until the collector catches up.
+func waitForPeerGone(ctx context.Context, client kubernetes.Interface, nodeName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		raw, err := client.Discovery().RESTClient().Get().
+			AbsPath("/apis/wirekube.io/v1alpha1/wirekubepeers/" + nodeName).Do(ctx).Raw()
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			// The CRD may not be served at all, which is not a peer lingering.
+			return nil
+		}
+		_ = raw
+		if time.Now().After(deadline) {
+			return fmt.Errorf("WireKubePeer/%s still exists %s after the node was deleted", nodeName, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }

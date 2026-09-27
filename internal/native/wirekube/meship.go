@@ -72,7 +72,7 @@ func claimMeshIP(ctx context.Context, client dynamic.Interface, state State, rep
 
 	if report.ArbitratesAddresses() {
 		result, err := allocator.Allocate(ctx, meshclaim.Request{
-			Holder:    state.PeerName,
+			Holder:    meshclaim.HolderForPeer(state.PeerName),
 			Name:      state.DisplayName,
 			Preferred: state.AssignedMeshIP,
 		})
@@ -90,7 +90,7 @@ func claimMeshIP(ctx context.Context, client dynamic.Interface, state State, rep
 	if err != nil {
 		return "", meshIPClaim{}, false, err
 	}
-	result, err := allocator.Reserve(ctx, state.PeerName, expected)
+	result, err := allocator.Reserve(ctx, meshclaim.HolderForPeer(state.PeerName), expected)
 	if err != nil {
 		if errors.Is(err, meshclaim.ErrInUse) {
 			return "", meshIPClaim{}, false, fmt.Errorf(
@@ -232,7 +232,7 @@ func deleteMeshIPClaim(ctx context.Context, client dynamic.Interface, state Stat
 		MeshCIDR: state.MeshCIDR,
 	}
 	if state.MeshCIDR != "" {
-		if err := allocator.Release(ctx, state.PeerName); err != nil {
+		if err := allocator.Release(ctx, meshclaim.HolderForPeer(state.PeerName)); err != nil {
 			return err
 		}
 	}
@@ -415,7 +415,7 @@ func confirmMeshIPStillHeld(ctx context.Context, client dynamic.Interface, state
 		return fmt.Errorf("confirm the claim on mesh address %s: %w", address, err)
 	}
 	holder, _, _ := unstructured.NestedString(lease.Object, "spec", "holderIdentity")
-	if holder != state.PeerName {
+	if holder != meshclaim.HolderForPeer(state.PeerName) {
 		return fmt.Errorf("the mesh address %s was claimed by %q during enrollment", address, holder)
 	}
 	return nil

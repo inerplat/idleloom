@@ -423,6 +423,25 @@ func (a *Allocator) validate() error {
 	return nil
 }
 
+// Holder identities are prefixed by the kind that owns them, matching
+// wirekube/pkg/meshalloc.
+//
+// WireKubePeer and WireKubeExternalPeer are both cluster-scoped, so one name
+// can exist as both — and "wirekubectl invite alice" names the external peer
+// after its display name, so a node called alice is all it takes. Unprefixed,
+// whichever came second would find the other's claim, see its own holder
+// identity on it, adopt it, and the two would advertise one address.
+const (
+	peerHolderPrefix         = "wirekubepeer/"
+	externalPeerHolderPrefix = "wirekubeexternalpeer/"
+)
+
+// HolderForPeer is the claim holder identity of a WireKubePeer.
+func HolderForPeer(name string) string { return peerHolderPrefix + name }
+
+// HolderForExternalPeer is the claim holder identity of a WireKubeExternalPeer.
+func HolderForExternalPeer(name string) string { return externalPeerHolderPrefix + name }
+
 // ClaimName is the Lease name that arbitrates address within mesh. It must
 // match wirekube/pkg/meshalloc.ClaimName exactly or the two never contend.
 func ClaimName(mesh, address string) string {
