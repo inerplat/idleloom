@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/inerplat/idleloom/internal/meshclaim"
 	"github.com/inerplat/idleloom/internal/meship"
 )
 
@@ -24,6 +26,21 @@ type WireKubeStatus struct {
 	// in-place backends derive the worker's node address from it before the
 	// node exists, so enrollment needs it up front.
 	MeshCIDR string
+	// MeshName is the WireKubeMesh the address comes from. Claims are named
+	// after it, so it has to travel with the CIDR.
+	MeshName string
+	// AddressAllocation is the mesh's spec.addressAllocation: "hash" when
+	// every peer computes its own address and a collision is nobody's to
+	// resolve, "allocator" when WireKube arbitrates them through claims.
+	AddressAllocation string
+}
+
+// ArbitratesAddresses reports whether the mesh resolves address collisions
+// rather than leaving both peers advertising the same /32. Enrollment can only
+// take a different address when it does; on a hash mesh the address is
+// whatever the node name produces, and a collision has to be refused.
+func (s WireKubeStatus) ArbitratesAddresses() bool {
+	return s.AddressAllocation == meshclaim.AddressAllocationAllocator
 }
 
 // CheckWireKube validates the WireKube installation structurally: the mesh
@@ -31,7 +48,30 @@ type WireKubeStatus struct {
 // deliberately does NOT require a ready ingress peer — on a bootstrapping mesh
 // this worker becomes the first one, and waitForWireKube already waits for the
 // worker's own peer to connect within the command timeout.
+// defaultMeshName is the only WireKubeMesh Idleloom reads; CheckWireKube asks
+// for it by name.
+const defaultMeshName = "default"
+
 func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeStatus, error) {
+	status, err := ReadWireKube(ctx, client)
+	if err != nil {
+		return status, err
+	}
+	if err := validateWireKubeStatus(status); err != nil {
+		return status, err
+	}
+	return status, nil
+}
+
+// ReadWireKube reports what the mesh says without judging whether it is fit to
+// enrol into.
+//
+// Teardown needs the mesh name, CIDR and agent namespace to hand an address
+// claim back, and it needs them from a mesh that may well have stopped being
+// usable — the agent removed, Node InternalIPs switched off. Refusing to read
+// those out because the installation would fail a fresh enrollment would leak
+// the claim for no reason.
+func ReadWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeStatus, error) {
 	var status WireKubeStatus
 	raw, err := client.Discovery().RESTClient().Get().AbsPath("/apis/wirekube.io/v1alpha1/wirekubemeshes/default").Do(ctx).Raw()
 	if err != nil {
@@ -39,8 +79,9 @@ func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeSt
 	}
 	var mesh struct {
 		Spec struct {
-			MeshCIDR       string `json:"meshCIDR"`
-			AutoAllowedIPs struct {
+			MeshCIDR          string `json:"meshCIDR"`
+			AddressAllocation string `json:"addressAllocation"`
+			AutoAllowedIPs    struct {
 				IncludeNodeInternalIP bool `json:"includeNodeInternalIP"`
 			} `json:"autoAllowedIPs"`
 		} `json:"spec"`
@@ -55,20 +96,26 @@ func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeSt
 	status.IncludeNodeInternalIP = mesh.Spec.AutoAllowedIPs.IncludeNodeInternalIP
 	status.ReadyPeers = mesh.Status.ReadyPeers
 	status.MeshCIDR = mesh.Spec.MeshCIDR
+	status.MeshName = defaultMeshName
+	status.AddressAllocation = mesh.Spec.AddressAllocation
 
 	daemonSets, err := client.AppsV1().DaemonSets("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return status, fmt.Errorf("list DaemonSets while checking WireKube: %w", err)
 	}
+	// The agent's namespace is also where its address claims live, and a wrong
+	// answer there is silent: the claim would arbitrate against nothing. An
+	// ambiguous match is therefore treated as no match.
 	for _, daemonSet := range daemonSets.Items {
-		if strings.Contains(strings.ToLower(daemonSet.Name), "wirekube") {
-			status.AgentNamespace = daemonSet.Namespace
-			status.AgentName = daemonSet.Name
+		if !meshclaim.IsAgentDaemonSet(daemonSet.Name, daemonSet.Labels) {
+			continue
+		}
+		if status.AgentName != "" && status.AgentNamespace != daemonSet.Namespace {
+			status.AgentNamespace = ""
 			break
 		}
-	}
-	if err := validateWireKubeStatus(status); err != nil {
-		return status, err
+		status.AgentNamespace = daemonSet.Namespace
+		status.AgentName = daemonSet.Name
 	}
 	return status, nil
 }
@@ -79,6 +126,13 @@ func validateWireKubeStatus(status WireKubeStatus) error {
 	}
 	if !status.IncludeNodeInternalIP {
 		return fmt.Errorf("the WireKubeMesh default must set spec.autoAllowedIPs.includeNodeInternalIP=true")
+	}
+	if status.ArbitratesAddresses() && status.AgentNamespace == "" {
+		// More than one agent DaemonSet answered, so there is no telling which
+		// namespace holds the mesh address claims. Guessing the chart default
+		// would put this worker's claim somewhere WireKube never reads, where
+		// it arbitrates against nothing and two workers can take one address.
+		return fmt.Errorf("found WireKube agent DaemonSets in more than one namespace, so the namespace holding the mesh address claims is ambiguous; remove the stale installation before enrolling")
 	}
 	return nil
 }
@@ -100,28 +154,114 @@ func WireKubePeerConnected(ctx context.Context, client kubernetes.Interface, nod
 	return peer.Status.Connected, nil
 }
 
-// ReserveMeshAddress derives the worker's node address from the WireKube mesh
-// and confirms no other peer already holds it.
+// MeshAddress is the overlay address a worker will advertise.
+type MeshAddress struct {
+	// Address is the bare IPv4 address, the form kubelet takes as --node-ip.
+	Address string
+	// Claimed is true when a cluster-wide claim backs the address, which is
+	// what "idlectl delete worker" has to release.
+	Claimed bool
+	// Moved is true when the node name's own address was taken and the worker
+	// was given another. Worth saying out loud: the operator picked a name
+	// expecting one address and got a different one.
+	Moved bool
+}
+
+// ReserveMeshAddress settles the worker's node address against the WireKube
+// mesh.
 //
-// WireKube's allocator is a hash of the node name, so the address needs no
-// cluster-wide lease: it is reproducible from the name alone. It is not
-// collision-free though — the hash is reduced into the mesh CIDR — so an
-// existing peer holding the same address has to be reported rather than
-// silently overwritten.
-func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeName, meshCIDR string) (string, error) {
-	if meshCIDR == "" {
-		return "", fmt.Errorf("the WireKubeMesh does not publish spec.meshCIDR, so the worker node address cannot be derived")
+// WireKube derives a peer's address from a hash of its name, which is what
+// lets idlectl know the address before the node exists. The hash is reduced
+// into the mesh CIDR though, so it is not collision-free, and what happens
+// next depends on the mesh:
+//
+//   - spec.addressAllocation=allocator: WireKube arbitrates addresses through
+//     claims. Enrollment claims one too, under the node name, and WireKube's
+//     agent adopts that claim when the worker joins. A contested address means
+//     this worker takes another, not that enrollment fails.
+//   - otherwise: nothing arbitrates, so an address another peer already holds
+//     has to be reported rather than silently duplicated.
+func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeName string, wireKube WireKubeStatus) (MeshAddress, error) {
+	if wireKube.MeshCIDR == "" {
+		return MeshAddress{}, fmt.Errorf("the WireKubeMesh does not publish spec.meshCIDR, so the worker node address cannot be derived")
 	}
-	address, err := meship.AddressForName(nodeName, meshCIDR)
+	if wireKube.ArbitratesAddresses() {
+		return claimMeshAddress(ctx, client, nodeName, wireKube)
+	}
+	address, err := meship.AddressForName(nodeName, wireKube.MeshCIDR)
 	if err != nil {
-		return "", err
+		return MeshAddress{}, err
 	}
-	if err := checkExternalPeerClaims(ctx, client, address, meshCIDR); err != nil {
-		return "", err
+	if err := checkExternalPeerClaims(ctx, client, address, wireKube.MeshCIDR); err != nil {
+		return MeshAddress{}, err
 	}
+	if err := checkPeerAllowedIPs(ctx, client, nodeName, address); err != nil {
+		return MeshAddress{}, err
+	}
+	return MeshAddress{Address: address}, nil
+}
+
+// claimMeshAddress takes the address through WireKube's allocator.
+func claimMeshAddress(ctx context.Context, client kubernetes.Interface, nodeName string, wireKube WireKubeStatus) (MeshAddress, error) {
+	result, err := meshAllocator(client, wireKube).Allocate(ctx, meshclaim.Request{
+		Holder: meshclaim.HolderForPeer(nodeName),
+		Name:   nodeName,
+	})
+	if err != nil {
+		return MeshAddress{}, err
+	}
+	address, _, err := net.ParseCIDR(result.Address)
+	if err != nil {
+		return MeshAddress{}, fmt.Errorf("parse the claimed mesh address %q: %w", result.Address, err)
+	}
+	return MeshAddress{Address: address.String(), Claimed: true, Moved: result.Moved}, nil
+}
+
+// ReleaseMeshAddress hands the worker's address back so the next enrollment
+// can use it immediately. WireKube's reaper would collect it anyway once the
+// node is gone, so a failure here is worth reporting but is not worth failing
+// a teardown over.
+func ReleaseMeshAddress(ctx context.Context, client kubernetes.Interface, nodeName string, wireKube WireKubeStatus) error {
+	if !wireKube.ArbitratesAddresses() || wireKube.MeshCIDR == "" {
+		return nil
+	}
+	return meshAllocator(client, wireKube).Release(ctx, meshclaim.HolderForPeer(nodeName))
+}
+
+// meshEnrollmentGrace is how long a claim survives with no peer answering for
+// it. It has to outlast the worker's whole enrollment — download, boot, TLS
+// bootstrap, agent connect — because until the WireKubePeer exists WireKube's
+// reaper sees nothing but an unheld claim. It is deliberately generous: the
+// cost of overshooting is that an abandoned address takes longer to come back,
+// and the cost of undershooting is an address reassigned mid-enrollment.
+const meshEnrollmentGrace = time.Hour
+
+// claimNamespace is where WireKube keeps its address claims: the namespace its
+// agent runs in. Idlectl has to write into that exact namespace — a claim
+// somewhere else arbitrates against nothing — so it uses the namespace
+// CheckWireKube already discovered from the agent DaemonSet rather than
+// assuming the chart default.
+func claimNamespace(agentNamespace string) string {
+	if agentNamespace != "" {
+		return agentNamespace
+	}
+	return meshclaim.DefaultNamespace
+}
+
+func meshAllocator(client kubernetes.Interface, wireKube WireKubeStatus) *meshclaim.Allocator {
+	return &meshclaim.Allocator{
+		Store:    meshclaim.Typed(client, wireKube.AgentNamespace),
+		MeshName: wireKube.MeshName,
+		MeshCIDR: wireKube.MeshCIDR,
+		Grace:    meshEnrollmentGrace,
+	}
+}
+
+// checkPeerAllowedIPs refuses an address a WireKubePeer already advertises.
+func checkPeerAllowedIPs(ctx context.Context, client kubernetes.Interface, nodeName, address string) error {
 	raw, err := client.Discovery().RESTClient().Get().AbsPath("/apis/wirekube.io/v1alpha1/wirekubepeers").Do(ctx).Raw()
 	if err != nil {
-		return "", fmt.Errorf("list WireKube peers to check the worker address: %w", err)
+		return fmt.Errorf("list WireKube peers to check the worker address: %w", err)
 	}
 	var peers struct {
 		Items []struct {
@@ -134,7 +274,7 @@ func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(raw, &peers); err != nil {
-		return "", fmt.Errorf("decode WireKube peers: %w", err)
+		return fmt.Errorf("decode WireKube peers: %w", err)
 	}
 	for _, peer := range peers.Items {
 		if peer.Metadata.Name == nodeName {
@@ -142,11 +282,11 @@ func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 		}
 		for _, allowed := range peer.Spec.AllowedIPs {
 			if routeCovers(allowed, address) {
-				return "", fmt.Errorf("the mesh address %s derived from node name %q is already routed to WireKubePeer/%s as %s; enrol this worker under a different name", address, nodeName, peer.Metadata.Name, allowed)
+				return fmt.Errorf("the mesh address %s derived from node name %q is already routed to WireKubePeer/%s as %s; enrol this worker under a different name, or set the WireKubeMesh spec.addressAllocation to \"allocator\" so WireKube assigns a free address instead", address, nodeName, peer.Metadata.Name, allowed)
 			}
 		}
 	}
-	return address, nil
+	return nil
 }
 
 // routeCovers reports whether an entry in a peer's allowedIPs would capture
@@ -240,4 +380,88 @@ func conflictingExternalPeer(claims []externalPeerClaim, address, meshCIDR strin
 		}
 	}
 	return nil
+}
+
+// PreviewMeshAddress reports the address a worker named nodeName would take,
+// without claiming it. A dry run has to be able to say "this name collides"
+// without consuming an address, because the run that follows it needs the same
+// address still free.
+func PreviewMeshAddress(ctx context.Context, client kubernetes.Interface, nodeName string, wireKube WireKubeStatus) (MeshAddress, error) {
+	if wireKube.MeshCIDR == "" {
+		return MeshAddress{}, fmt.Errorf("the WireKubeMesh does not publish spec.meshCIDR, so the worker node address cannot be derived")
+	}
+	address, err := meship.AddressForName(nodeName, wireKube.MeshCIDR)
+	if err != nil {
+		return MeshAddress{}, err
+	}
+	if !wireKube.ArbitratesAddresses() {
+		if err := checkExternalPeerClaims(ctx, client, address, wireKube.MeshCIDR); err != nil {
+			return MeshAddress{}, err
+		}
+		if err := checkPeerAllowedIPs(ctx, client, nodeName, address); err != nil {
+			return MeshAddress{}, err
+		}
+		return MeshAddress{Address: address}, nil
+	}
+	// On an arbitrating mesh a taken address is not a failure, so the preview
+	// reports that it is spoken for rather than refusing. It cannot say which
+	// address the real run would land on, because that depends on what is free
+	// at the time.
+	held, err := meshAddressHeldByAnother(ctx, client, nodeName, address, wireKube)
+	if err != nil {
+		return MeshAddress{}, err
+	}
+	return MeshAddress{Address: address, Moved: held}, nil
+}
+
+// meshAddressHeldByAnother reports whether somebody other than nodeName holds
+// a claim on address. A worker's own claim does not count: re-running a dry
+// run against a worker that is already enrolled would otherwise report that
+// its address had been taken, by itself.
+func meshAddressHeldByAnother(ctx context.Context, client kubernetes.Interface, nodeName, address string, wireKube WireKubeStatus) (bool, error) {
+	name := meshclaim.ClaimName(wireKube.MeshName, address)
+	claim, err := client.CoordinationV1().Leases(claimNamespace(wireKube.AgentNamespace)).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the claim on the mesh address %s: %w", address, err)
+	}
+	return claim.Spec.HolderIdentity == nil || *claim.Spec.HolderIdentity != meshclaim.HolderForPeer(nodeName), nil
+}
+
+// meshPeerRemovalTimeout bounds the wait for a deleted node's WireKubePeer to
+// disappear. It is short because the peer carries a Node ownerReference and
+// garbage collection is prompt; overrunning it costs nothing but the address
+// waiting out WireKube's reaper instead.
+const meshPeerRemovalTimeout = 30 * time.Second
+
+// waitForPeerGone blocks until no WireKubePeer answers for nodeName.
+//
+// Deleting the Node removes the peer, but by garbage collection, so the two
+// are not simultaneous. Handing the address back while the peer still
+// advertises it lets the next enrollment claim it, and the mesh carries two
+// peers on one /32 until the collector catches up.
+func waitForPeerGone(ctx context.Context, client kubernetes.Interface, nodeName string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		raw, err := client.Discovery().RESTClient().Get().
+			AbsPath("/apis/wirekube.io/v1alpha1/wirekubepeers/" + nodeName).Do(ctx).Raw()
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			// The CRD may not be served at all, which is not a peer lingering.
+			return nil
+		}
+		_ = raw
+		if time.Now().After(deadline) {
+			return fmt.Errorf("WireKubePeer/%s still exists %s after the node was deleted", nodeName, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }

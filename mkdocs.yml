@@ -69,5 +69,6 @@ nav:
       - Troubleshooting: operations/troubleshooting.md
   - Reference:
       - Recipes: recipes.md
+      - Mesh Addressing: mesh-addressing.md
       - Native Training Contract: native-training.md
       - Worker Bootstrap: worker-bootstrap.md

@@ -18,6 +18,9 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	clienttesting "k8s.io/client-go/testing"
+
+	"github.com/inerplat/idleloom/internal/meshclaim"
+	"github.com/inerplat/idleloom/internal/meship"
 )
 
 func TestInspectValidatesWireKubePeerRelayPrerequisites(t *testing.T) {
@@ -170,7 +173,7 @@ func TestEnrollRejectsPeerOwnedByAnotherEnrollmentAndRollsBackClaim(t *testing.T
 	if readErr != nil {
 		t.Fatal(readErr)
 	}
-	if _, getErr := dynamicClient.Resource(IPClaimsGVR).Namespace(ipClaimNamespace).Get(context.Background(), stored.MeshIPClaimName, metav1.GetOptions{}); getErr == nil {
+	if _, getErr := dynamicClient.Resource(meshclaim.LeasesGVR).Namespace(stored.MeshIPClaimNamespaceOrDefault()).Get(context.Background(), stored.MeshIPClaimName, metav1.GetOptions{}); getErr == nil {
 		t.Fatal("mesh IP claim leaked after foreign peer conflict")
 	}
 }
@@ -200,8 +203,92 @@ func TestEnrollRejectsPeerNameThatMatchesKubernetesNode(t *testing.T) {
 	}
 }
 
+// TestMeshIPClaimAtomicallyRejectsAnotherEnrollment: on a mesh that does not
+// arbitrate addresses there is no second choice, so two hosts whose names
+// produce one address cannot both enrol. The create is what settles it.
 func TestMeshIPClaimAtomicallyRejectsAnotherEnrollment(t *testing.T) {
 	client := newTestClient()
+	report := DoctorReport{MeshName: defaultMeshName, MeshCIDR: "172.31.240.0/20"}
+	first, second := collidingStates(t)
+
+	if _, _, _, err := claimMeshIP(context.Background(), client, first, report); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := claimMeshIP(context.Background(), client, second, report)
+	if err == nil {
+		t.Fatal("a second enrollment acquired the same mesh IP claim")
+	}
+	if !strings.Contains(err.Error(), "allocator") {
+		t.Errorf("error %q does not say which setting makes the collision recoverable", err)
+	}
+}
+
+// TestMeshIPClaimMovesOnAnArbitratingMesh is the same collision on a mesh that
+// resolves them: the second host takes another address instead of failing.
+func TestMeshIPClaimMovesOnAnArbitratingMesh(t *testing.T) {
+	client := newTestClient()
+	report := DoctorReport{MeshName: defaultMeshName, MeshCIDR: "172.31.240.0/20", AddressAllocation: "allocator"}
+	first, second := collidingStates(t)
+
+	held, _, _, err := claimMeshIP(context.Background(), client, first, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	moved, claim, created, err := claimMeshIP(context.Background(), client, second, report)
+	if err != nil {
+		t.Fatalf("the second enrollment was refused instead of moved: %v", err)
+	}
+	if moved == held {
+		t.Fatalf("both hosts took %s", held)
+	}
+	if !created {
+		t.Error("the claim was reported as adopted, but it was made here")
+	}
+	if claim.Namespace != meshclaim.DefaultNamespace {
+		t.Errorf("claim namespace = %q, want WireKube's %q; a claim nowhere near WireKube's arbitrates nothing",
+			claim.Namespace, meshclaim.DefaultNamespace)
+	}
+	if claim.Name != meshclaim.ClaimName(defaultMeshName, moved) {
+		t.Errorf("claim name = %q, want %q", claim.Name, meshclaim.ClaimName(defaultMeshName, moved))
+	}
+	if !meship.Contains(moved, report.MeshCIDR) {
+		t.Errorf("%s is not an address the mesh can hand out", moved)
+	}
+}
+
+// TestMeshIPClaimIsIdempotent: a re-run of an interrupted join keeps the
+// address rather than consuming a second one.
+func TestMeshIPClaimIsIdempotent(t *testing.T) {
+	client := newTestClient()
+	report := DoctorReport{MeshName: defaultMeshName, MeshCIDR: "172.31.240.0/20", AddressAllocation: "allocator"}
+	state, err := loadOrCreateState(t.TempDir(), "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, created, err := claimMeshIP(context.Background(), client, state, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created {
+		t.Error("the first claim was reported as adopted")
+	}
+	state.AssignedMeshIP = first
+	again, _, createdAgain, err := claimMeshIP(context.Background(), client, state, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != first {
+		t.Errorf("the second run moved from %s to %s", first, again)
+	}
+	if createdAgain {
+		t.Error("the second run reported a new claim rather than adopting its own")
+	}
+}
+
+// collidingStates returns two enrollments whose display names produce the same
+// mesh address, which is the situation the allocator exists for.
+func collidingStates(t *testing.T) (State, State) {
+	t.Helper()
 	first, err := loadOrCreateState(t.TempDir(), "idleloom-mac-one", "enrollment-one")
 	if err != nil {
 		t.Fatal(err)
@@ -210,13 +297,10 @@ func TestMeshIPClaimAtomicallyRejectsAnotherEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	address := "172.31.241.10/32"
-	if _, _, err := ensureMeshIPClaim(context.Background(), client, first, address); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := ensureMeshIPClaim(context.Background(), client, second, address); err == nil {
-		t.Fatal("a second enrollment acquired the same mesh IP claim")
-	}
+	// Forcing the display names to match is the shortest way to a guaranteed
+	// collision; searching for a natural pair would test the hash, not this.
+	second.DisplayName = first.DisplayName
+	return first, second
 }
 
 func TestRevokeDeletesOwnedWireKubePeerClaimAndPrivateState(t *testing.T) {
@@ -246,16 +330,6 @@ func TestRevokeCleansLegacyExternalPeerEnrollment(t *testing.T) {
 	}
 	state.MeshCIDR = "172.31.240.0/20"
 	state.PeerUID = "legacy-peer-uid"
-	address, _ := meshIPForName(state.PeerName, state.MeshCIDR)
-	claimClient := newTestClient()
-	claim, _, err := ensureMeshIPClaim(context.Background(), claimClient, state, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	state.MeshIPClaimName, state.MeshIPClaimUID = claim.GetName(), claim.GetUID()
-	if err := writeState(directory, state); err != nil {
-		t.Fatal(err)
-	}
 	peer := &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "wirekube.io/v1alpha1", "kind": "WireKubeExternalPeer",
 		"metadata": map[string]any{
@@ -268,12 +342,27 @@ func TestRevokeCleansLegacyExternalPeerEnrollment(t *testing.T) {
 			"allowedDestinations": []any{state.MeshCIDR},
 		},
 	}}
-	dynamicClient := newTestClient(peer, claim.DeepCopy())
+	dynamicClient := newTestClient(peer)
+	address, claim, _, err := claimMeshIP(context.Background(), dynamicClient, state,
+		DoctorReport{MeshName: defaultMeshName, MeshCIDR: state.MeshCIDR})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.AssignedMeshIP = address
+	state.MeshIPClaimName, state.MeshIPClaimUID, state.MeshIPClaimNamespace = claim.Name, claim.UID, claim.Namespace
+	if err := writeState(directory, state); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := Revoke(context.Background(), RevokeConfig{Dynamic: dynamicClient, StateDirectory: directory, RuntimeDirectory: t.TempDir(), WaitTimeout: time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	if exists, err := HasState(directory); err != nil || exists {
 		t.Fatalf("legacy state remains after revoke: exists=%v err=%v", exists, err)
+	}
+	if _, err := dynamicClient.Resource(meshclaim.LeasesGVR).Namespace(claim.Namespace).
+		Get(context.Background(), claim.Name, metav1.GetOptions{}); err == nil {
+		t.Error("the mesh address claim survived revoke, so the address stays out of the pool")
 	}
 }
 
@@ -329,9 +418,9 @@ func assignUID(uid types.UID) clienttesting.ReactionFunc {
 func newTestClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), map[schema.GroupVersionResource]string{
 		MeshesGVR: "WireKubeMeshList", PeersGVR: "WireKubePeerList", ExternalPeersGVR: "WireKubeExternalPeerList",
-		IPClaimsGVR: "LeaseList", ServicesGVR: "ServiceList",
+		meshclaim.LeasesGVR: "LeaseList", ServicesGVR: "ServiceList", DaemonSetsGVR: "DaemonSetList",
 	})
-	client.PrependReactor("create", IPClaimsGVR.Resource, func(action clienttesting.Action) (bool, runtime.Object, error) {
+	client.PrependReactor("create", meshclaim.LeasesGVR.Resource, func(action clienttesting.Action) (bool, runtime.Object, error) {
 		object := action.(clienttesting.CreateAction).GetObject().(*unstructured.Unstructured)
 		object.SetUID(types.UID("claim-" + object.GetName()))
 		return false, nil, nil
@@ -346,10 +435,16 @@ func newTestClient(objects ...runtime.Object) *dynamicfake.FakeDynamicClient {
 		case "WireKubePeer":
 			resource = PeersGVR
 		case "Lease":
-			resource = IPClaimsGVR
-			namespace = ipClaimNamespace
+			resource = meshclaim.LeasesGVR
+			namespace = unstructuredObject.GetNamespace()
+			if namespace == "" {
+				namespace = meshclaim.DefaultNamespace
+			}
 		case "Service":
 			resource = ServicesGVR
+			namespace = unstructuredObject.GetNamespace()
+		case "DaemonSet":
+			resource = DaemonSetsGVR
 			namespace = unstructuredObject.GetNamespace()
 		}
 		if err := client.Tracker().Create(resource, object, namespace); err != nil {
@@ -387,4 +482,227 @@ func relayService(host string) *unstructured.Unstructured {
 		},
 		"status": map[string]any{"loadBalancer": map[string]any{"ingress": []any{map[string]any{"hostname": host}}}},
 	}}
+}
+
+// TestClaimMeshIPFollowsTheAgentNamespace. A claim arbitrates by name inside
+// one namespace, so claiming in the chart default while WireKube runs
+// somewhere else would give Idleloom a private pool that contends with
+// nothing — the exact failure the allocator exists to remove, made silent.
+func TestClaimMeshIPFollowsTheAgentNamespace(t *testing.T) {
+	const namespace = "wirekube-prod"
+	client := newTestClient(testMesh(1), wirekubeAgentDaemonSet(namespace))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentNamespace != namespace {
+		t.Fatalf("AgentNamespace = %q, want %q", report.AgentNamespace, namespace)
+	}
+	state, err := loadOrCreateState(t.TempDir(), "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, claim, _, err := claimMeshIP(context.Background(), client, state, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Namespace != namespace {
+		t.Errorf("claim namespace = %q, want the agent's %q", claim.Namespace, namespace)
+	}
+	if _, err := client.Resource(meshclaim.LeasesGVR).Namespace(namespace).
+		Get(context.Background(), claim.Name, metav1.GetOptions{}); err != nil {
+		t.Errorf("the claim is not in %s: %v", namespace, err)
+	}
+}
+
+// TestClaimMeshIPFallsBackToTheChartDefault when no agent DaemonSet is
+// visible, which is right for every default install and is all that can be
+// done otherwise.
+func TestClaimMeshIPFallsBackToTheChartDefault(t *testing.T) {
+	client := newTestClient(testMesh(1))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentNamespace != "" {
+		t.Fatalf("AgentNamespace = %q with no DaemonSet present", report.AgentNamespace)
+	}
+	state, err := loadOrCreateState(t.TempDir(), "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, claim, _, err := claimMeshIP(context.Background(), client, state, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Namespace != meshclaim.DefaultNamespace {
+		t.Errorf("claim namespace = %q, want %q", claim.Namespace, meshclaim.DefaultNamespace)
+	}
+}
+
+func wirekubeAgentDaemonSet(namespace string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{
+			"name": "wirekube-agent", "namespace": namespace,
+			"labels": map[string]any{
+				"app.kubernetes.io/name":      "wirekube",
+				"app.kubernetes.io/component": "agent",
+			},
+		},
+	}}
+}
+
+// TestConfirmMeshIPReadsTheClaimWhereItWasWritten. Recomputing the namespace
+// during the late re-check would disagree with the create on any installation
+// that does not run WireKube in the chart's default namespace, and the
+// enrollment would roll itself back over a claim that never went missing.
+func TestConfirmMeshIPReadsTheClaimWhereItWasWritten(t *testing.T) {
+	const namespace = "wirekube-prod"
+	client := newTestClient(testMesh(1), wirekubeAgentDaemonSet(namespace))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadOrCreateState(t.TempDir(), "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, claim, _, err := claimMeshIP(context.Background(), client, state, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Namespace == meshclaim.DefaultNamespace {
+		t.Fatalf("test vector is useless: the claim landed in %s anyway", claim.Namespace)
+	}
+	if err := confirmMeshIPStillHeld(context.Background(), client, state, report, claim, address); err != nil {
+		t.Errorf("the re-check failed against a claim that is right there: %v", err)
+	}
+}
+
+// TestDiscoverAgentNamespaceRefusesToGuess. Two candidates is a coin toss
+// whose losing side is silent, so it reports none and lets the caller warn.
+func TestDiscoverAgentNamespaceRefusesToGuess(t *testing.T) {
+	client := newTestClient(testMesh(1),
+		wirekubeAgentDaemonSet("wirekube-system"),
+		wirekubeAgentDaemonSet("wirekube-staging"))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentNamespace != "" {
+		t.Errorf("AgentNamespace = %q, want none when two installations are visible", report.AgentNamespace)
+	}
+}
+
+// TestDiscoverAgentNamespaceIgnoresTheRelay. A substring match on "wirekube"
+// would take the relay's namespace just as happily.
+func TestDiscoverAgentNamespaceIgnoresTheRelay(t *testing.T) {
+	relay := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{
+			"name": "wirekube-relay", "namespace": "wirekube-relay-ns",
+			"labels": map[string]any{"app.kubernetes.io/name": "wirekube-relay"},
+		},
+	}}
+	client := newTestClient(testMesh(1), relay, wirekubeAgentDaemonSet("wirekube-system"))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentNamespace != "wirekube-system" {
+		t.Errorf("AgentNamespace = %q, want the agent's", report.AgentNamespace)
+	}
+}
+
+// TestEnrollReportsAnAddressMove. Re-enrolling onto a different address is
+// legitimate — the old one was taken while this host was away — but it changes
+// what the mesh routes here, so the operator has to be told. The warning used
+// to be appended to a DoctorReport that Enroll discards.
+func TestEnrollReportsAnAddressMove(t *testing.T) {
+	directory := t.TempDir()
+	state, err := loadOrCreateState(directory, "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.MeshCIDR = "172.31.240.0/20"
+	// The address this host last held, which somebody else has since taken.
+	held, err := meshIPForName(state.DisplayName, state.MeshCIDR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.AssignedMeshIP = held
+	if err := writeState(directory, state); err != nil {
+		t.Fatal(err)
+	}
+
+	mesh := testMesh(1)
+	if err := unstructured.SetNestedField(mesh.Object, "allocator", "spec", "addressAllocation"); err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(mesh, wirekubeAgentDaemonSet("wirekube-system"))
+	client.PrependReactor("create", PeersGVR.Resource, assignUID("peer-uid"))
+	squatter := &meshclaim.Allocator{
+		Store: meshclaim.Dynamic(client, "wirekube-system"), MeshName: defaultMeshName, MeshCIDR: state.MeshCIDR,
+	}
+	if _, err := squatter.Allocate(context.Background(), meshclaim.Request{Holder: "somebody-else", Preferred: held}); err != nil {
+		t.Fatal(err)
+	}
+
+	var warnings []string
+	config := testEnrollConfig(directory, client, newKubernetesTestClient())
+	config.Warn = func(message string) { warnings = append(warnings, message) }
+	got, err := Enroll(context.Background(), config)
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	if got.AssignedMeshIP == held {
+		t.Fatalf("took %s, which somebody-else holds", held)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("the address moved and nothing said so")
+	}
+	if !strings.Contains(warnings[0], held) || !strings.Contains(warnings[0], got.AssignedMeshIP) {
+		t.Errorf("the warning does not name both addresses: %q", warnings[0])
+	}
+}
+
+// TestEnrollRefusesAnUnknownClaimNamespace. Guessing the chart default is
+// right when there is one installation where the chart puts it. Here there is
+// no evidence of that, and a claim in the wrong namespace arbitrates against
+// nothing: two hosts take one address while both believe the allocator settled
+// it. Refusing is the smaller harm.
+func TestEnrollRefusesAnUnknownClaimNamespace(t *testing.T) {
+	mesh := testMesh(1)
+	if err := unstructured.SetNestedField(mesh.Object, "allocator", "spec", "addressAllocation"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		what    string
+		objects []runtime.Object
+	}{
+		{"no agent visible", []runtime.Object{mesh}},
+		{"two installations", []runtime.Object{mesh,
+			wirekubeAgentDaemonSet("wirekube-system"), wirekubeAgentDaemonSet("wirekube-staging")}},
+	} {
+		client := newTestClient(c.objects...)
+		_, err := Enroll(context.Background(), testEnrollConfig(t.TempDir(), client, newKubernetesTestClient()))
+		if err == nil {
+			t.Errorf("%s: Enroll claimed an address anyway", c.what)
+			continue
+		}
+		if !strings.Contains(err.Error(), "namespace") {
+			t.Errorf("%s: the error does not say what is wrong: %v", c.what, err)
+		}
+	}
+}
+
+// TestEnrollProceedsOnAHashMesh with the same ambiguity, because nothing
+// claims there and the namespace does not decide anything.
+func TestEnrollProceedsOnAHashMesh(t *testing.T) {
+	client := newTestClient(testMesh(1))
+	client.PrependReactor("create", PeersGVR.Resource, assignUID("peer-uid"))
+	if _, err := Enroll(context.Background(), testEnrollConfig(t.TempDir(), client, newKubernetesTestClient())); err != nil {
+		t.Errorf("a hash mesh was refused over a namespace it does not use: %v", err)
+	}
 }

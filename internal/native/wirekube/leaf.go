@@ -26,6 +26,8 @@ import (
 	"k8s.io/client-go/rest"
 
 	"golang.org/x/crypto/curve25519"
+
+	"github.com/inerplat/idleloom/internal/meshclaim"
 )
 
 const (
@@ -42,19 +44,34 @@ var (
 	MeshesGVR        = schema.GroupVersionResource{Group: "wirekube.io", Version: "v1alpha1", Resource: "wirekubemeshes"}
 	PeersGVR         = schema.GroupVersionResource{Group: "wirekube.io", Version: "v1alpha1", Resource: "wirekubepeers"}
 	ExternalPeersGVR = schema.GroupVersionResource{Group: "wirekube.io", Version: "v1alpha1", Resource: "wirekubeexternalpeers"}
-	IPClaimsGVR      = schema.GroupVersionResource{Group: "coordination.k8s.io", Version: "v1", Resource: "leases"}
+	DaemonSetsGVR    = schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "daemonsets"}
 )
 
 type DoctorReport struct {
-	MeshName       string
-	MeshCIDR       string
-	MTU            int32
-	RelayMode      string
-	RelayProvider  string
-	RelayTransport string
-	RelayEndpoint  string
-	ReadyPeers     int64
-	Warnings       []string
+	MeshName string
+	MeshCIDR string
+	// AgentNamespace is where the WireKube agent runs, and so where its
+	// address claims live. Idlectl has to claim in that exact namespace,
+	// because a claim somewhere else arbitrates against nothing.
+	AgentNamespace string
+	// AddressAllocation is the mesh's spec.addressAllocation. "allocator"
+	// means WireKube resolves address collisions by moving a peer; anything
+	// else means every peer takes the address its name hashes to and a
+	// collision is nobody's to fix.
+	AddressAllocation string
+	MTU               int32
+	RelayMode         string
+	RelayProvider     string
+	RelayTransport    string
+	RelayEndpoint     string
+	ReadyPeers        int64
+	Warnings          []string
+}
+
+// ArbitratesAddresses reports whether the mesh resolves address collisions by
+// moving a peer rather than leaving both on the same /32.
+func (r DoctorReport) ArbitratesAddresses() bool {
+	return r.AddressAllocation == meshclaim.AddressAllocationAllocator
 }
 
 type State struct {
@@ -74,6 +91,8 @@ type State struct {
 	KubernetesAPIEndpoint string    `json:"kubernetesAPIEndpoint,omitempty"`
 	MeshIPClaimName       string    `json:"meshIPClaimName,omitempty"`
 	MeshIPClaimUID        types.UID `json:"meshIPClaimUID,omitempty"`
+	MeshIPClaimNamespace  string    `json:"meshIPClaimNamespace,omitempty"`
+	MeshName              string    `json:"meshName,omitempty"`
 	PeerMode              string    `json:"peerMode,omitempty"`
 	RelayTransport        string    `json:"relayTransport,omitempty"`
 	RelayTokenAudience    string    `json:"relayTokenAudience,omitempty"`
@@ -93,6 +112,10 @@ type EnrollConfig struct {
 	APIEndpoint    string
 	TokenDuration  time.Duration
 	WaitTimeout    time.Duration
+	// Warn receives messages the operator needs but that are not failures,
+	// such as an address moving between enrollments. Enroll returns only the
+	// State, so without this they would have nowhere to go.
+	Warn func(string)
 }
 
 type RevokeConfig struct {
@@ -116,6 +139,8 @@ func Inspect(ctx context.Context, client dynamic.Interface) (DoctorReport, error
 	}
 	report := DoctorReport{MeshName: mesh.GetName()}
 	report.MeshCIDR, _, _ = unstructured.NestedString(mesh.Object, "spec", "meshCIDR")
+	report.AddressAllocation, _, _ = unstructured.NestedString(mesh.Object, "spec", "addressAllocation")
+	report.AgentNamespace = discoverAgentNamespace(ctx, client)
 	if err := validateMeshCIDR(report.MeshCIDR); err != nil {
 		return DoctorReport{}, err
 	}
@@ -189,25 +214,35 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 	state.PeerServiceAccount = peerServiceAccountName(state.PeerName)
 	state.MTU = report.MTU
 	state.AllowedDestinations = []string{report.MeshCIDR}
-	expectedAddress, err := validateMeshIPAvailability(ctx, config.Dynamic, state.PeerName, state.DisplayName, report.MeshCIDR)
+	if report.ArbitratesAddresses() && report.AgentNamespace == "" {
+		// Guessing the chart default is right when there is simply one
+		// installation and it is where the chart puts it, but here there is no
+		// evidence of that: either no agent DaemonSet answered or several did,
+		// in different namespaces. A claim in the wrong namespace arbitrates
+		// against nothing, so two hosts would take one address while both
+		// believed the allocator had settled it. That is worse than refusing.
+		return State{}, fmt.Errorf("cannot tell which namespace holds WireKube's mesh address claims: found no single WireKube agent DaemonSet; remove any stale installation, or run idlectl where the agent is visible")
+	}
+	expectedAddress, claim, claimCreated, err := claimMeshIP(ctx, config.Dynamic, state, report)
 	if err != nil {
 		return State{}, err
 	}
-	claim, claimCreated, err := ensureMeshIPClaim(ctx, config.Dynamic, state, expectedAddress)
-	if err != nil {
-		return State{}, err
+	if state.AssignedMeshIP != "" && state.AssignedMeshIP != expectedAddress && config.Warn != nil {
+		// Reenrolling onto a different address is legitimate: the old one was
+		// taken while this host was away. It changes what the mesh routes to
+		// this host though, so it is not something to do quietly.
+		config.Warn(fmt.Sprintf("the mesh address moved from %s to %s because the first was already claimed",
+			state.AssignedMeshIP, expectedAddress))
 	}
-	state.MeshIPClaimName = claim.GetName()
-	state.MeshIPClaimUID = claim.GetUID()
+	state.MeshIPClaimName = claim.Name
+	state.MeshIPClaimUID = claim.UID
+	state.MeshIPClaimNamespace = claim.Namespace
+	state.MeshName = report.MeshName
 	state.AssignedMeshIP = expectedAddress
 	state.IngressPublicKey = ""
 	if err := writeState(config.StateDirectory, state); err != nil {
 		if claimCreated {
-			uid := claim.GetUID()
-			rollbackErr := config.Dynamic.Resource(IPClaimsGVR).Namespace("idleloom-system").Delete(ctx, claim.GetName(), metav1.DeleteOptions{
-				Preconditions: &metav1.Preconditions{UID: &uid},
-			})
-			return State{}, errors.Join(err, rollbackErr)
+			return State{}, errors.Join(err, rollbackMeshIPClaim(ctx, config.Dynamic, claim))
 		}
 		return State{}, err
 	}
@@ -224,12 +259,7 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 	if err := writeState(config.StateDirectory, state); err != nil {
 		return State{}, errors.Join(err, rollbackNewWireKubeEnrollment(ctx, config.Dynamic, peer, claim, state, peerCreated, claimCreated))
 	}
-	currentExpectedAddress, err := validateMeshIPAvailability(ctx, config.Dynamic, state.PeerName, state.DisplayName, report.MeshCIDR)
-	if err != nil {
-		return State{}, errors.Join(err, rollbackNewWireKubeEnrollment(ctx, config.Dynamic, peer, claim, state, peerCreated, claimCreated))
-	}
-	if currentExpectedAddress != expectedAddress {
-		err := fmt.Errorf("deterministic WireKube mesh address changed during enrollment")
+	if err := confirmMeshIPStillHeld(ctx, config.Dynamic, state, report, claim, expectedAddress); err != nil {
 		return State{}, errors.Join(err, rollbackNewWireKubeEnrollment(ctx, config.Dynamic, peer, claim, state, peerCreated, claimCreated))
 	}
 	if err := ensurePeerIdentity(ctx, config.Kubernetes, state, config.HostID); err != nil {
