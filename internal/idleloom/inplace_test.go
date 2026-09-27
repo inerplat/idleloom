@@ -179,7 +179,10 @@ var errProbeRefused = errors.New("refused")
 
 func TestPreflightRejectsAHostWithoutCgroupV2(t *testing.T) {
 	exec := &failingExec{
-		recordingExec:      recordingExec{replies: map[string]string{"uname -s": "Linux\n"}},
+		recordingExec: recordingExec{replies: map[string]string{
+			"uname -s":            "Linux\n",
+			"cat /etc/os-release": "ID=ubuntu\n",
+		}},
 		failRunsContaining: "/sys/fs/cgroup/cgroup.controllers",
 	}
 	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeWSL2}
@@ -196,7 +199,10 @@ func TestPreflightRejectsAHostWithoutCgroupV2(t *testing.T) {
 
 func TestPreflightRejectsAHostWithoutTheDummyDriver(t *testing.T) {
 	exec := &failingExec{
-		recordingExec:         recordingExec{replies: map[string]string{"uname -s": "Linux\n"}},
+		recordingExec: recordingExec{replies: map[string]string{
+			"uname -s":            "Linux\n",
+			"cat /etc/os-release": "ID=ubuntu\n",
+		}},
 		failScriptsContaining: "type dummy",
 	}
 	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
@@ -227,5 +233,40 @@ func TestWaitReadyDoesNotRequireKubelet(t *testing.T) {
 	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
 	if err := runtime.WaitReady(context.Background(), RuntimeState{NodeName: "worker-a"}, time.Second); err != nil {
 		t.Fatalf("WaitReady required kubelet to already be running: %v", err)
+	}
+}
+
+func TestPreflightAcceptsUbuntuAndDebianDerivatives(t *testing.T) {
+	for _, release := range []string{
+		"NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n",
+		"ID=debian\nID_LIKE=\"debian\"\n",
+		"ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n",
+	} {
+		exec := &recordingExec{replies: map[string]string{
+			"uname -s":            "Linux\n",
+			"cat /etc/os-release": release,
+		}}
+		runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
+		if err := runtime.Preflight(context.Background()); err != nil {
+			t.Errorf("rejected a Debian-family host (%q): %v", release, err)
+		}
+	}
+}
+
+// TestPreflightRejectsANonDebianDistribution matters because the prepare
+// script installs containerd with apt-get: without this check it would run
+// part-way and fail on a missing command, after changing the host.
+func TestPreflightRejectsANonDebianDistribution(t *testing.T) {
+	exec := &recordingExec{replies: map[string]string{
+		"uname -s":            "Linux\n",
+		"cat /etc/os-release": "NAME=\"Fedora Linux\"\nID=fedora\n",
+	}}
+	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
+	err := runtime.Preflight(context.Background())
+	if err == nil {
+		t.Fatal("expected a non-Debian distribution to be rejected")
+	}
+	if !strings.Contains(err.Error(), "apt-get") {
+		t.Errorf("error does not explain why: %v", err)
 	}
 }
