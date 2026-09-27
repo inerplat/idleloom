@@ -219,7 +219,7 @@ func deleteMeshIPClaim(ctx context.Context, client dynamic.Interface, state Stat
 	// claim is wherever it was made.
 	allocator := &meshclaim.Allocator{
 		Store:    meshclaim.Dynamic(client, state.MeshIPClaimNamespaceOrDefault()),
-		MeshName: defaultMeshName,
+		MeshName: state.MeshNameOrDefault(),
 		MeshCIDR: state.MeshCIDR,
 	}
 	if state.MeshCIDR != "" {
@@ -322,6 +322,16 @@ func waitForClaimGone(ctx context.Context, client dynamic.Interface, namespace, 
 		return fmt.Errorf("wait for mesh IP claim Lease/%s deletion: %w", name, err)
 	}
 	return nil
+}
+
+// MeshNameOrDefault is the mesh this host claimed its address in. Claims are
+// labelled with it, so a release that guessed would find nothing. State written
+// before the field existed predates any mesh but the default.
+func (s State) MeshNameOrDefault() string {
+	if s.MeshName != "" {
+		return s.MeshName
+	}
+	return defaultMeshName
 }
 
 // MeshIPClaimNamespaceOrDefault is where this host's claim lives. State

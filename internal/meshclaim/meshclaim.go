@@ -49,6 +49,14 @@ const (
 	addressAnnotation = "wirekube.io/address"
 	attemptAnnotation = "wirekube.io/attempt"
 
+	// AddressAllocationHash and AddressAllocationAllocator are the values of
+	// WireKubeMesh.spec.addressAllocation. They are part of the same contract
+	// as the claim naming: idlectl must only claim on a mesh that arbitrates,
+	// because on one that does not, WireKube's agent forces every peer onto
+	// its hashed address and would overwrite anything else.
+	AddressAllocationHash      = "hash"
+	AddressAllocationAllocator = "allocator"
+
 	// probeLimit matches WireKube's: after this many candidates are found
 	// taken, listing the claims once is both cheaper and exact.
 	probeLimit = 32
@@ -280,23 +288,42 @@ func (a *Allocator) heldClaim(ctx context.Context, request Request) (Result, boo
 	if err != nil {
 		return Result{}, false, err
 	}
-	mine := make([]coordinationv1.Lease, 0, 1)
+	var mine, stale []coordinationv1.Lease
 	for i := range claims {
-		// The label is truncated and so ambiguous; the holder is authoritative.
-		if holderOf(&claims[i]) == request.Holder && claims[i].Annotations[addressAnnotation] != "" {
+		// The label is lossy and so ambiguous; the holder is authoritative.
+		address := claims[i].Annotations[addressAnnotation]
+		if holderOf(&claims[i]) != request.Holder || address == "" {
+			continue
+		}
+		// A claim the mesh CIDR no longer covers is a leftover from the CIDR it
+		// was made under, not an allocation. Handing it back would give the
+		// caller an address the mesh cannot route, and the caller would fall
+		// back to an unclaimed one, which is the duplicate this package exists
+		// to prevent.
+		if meship.Contains(address, a.MeshCIDR) {
 			mine = append(mine, claims[i])
+		} else {
+			stale = append(stale, claims[i])
 		}
 	}
-	if len(mine) == 0 {
-		return Result{}, false, nil
-	}
 	sort.Slice(mine, func(i, j int) bool { return betterClaim(&mine[i], &mine[j], request.Preferred) })
-	keep := &mine[0]
+	// Release everything this holder should not be holding: the stale ones and
+	// any duplicate beyond the first. Nothing else collects them — the reaper
+	// only reclaims claims whose holder is gone.
+	for i := range stale {
+		if err := a.deleteClaim(ctx, &stale[i]); err != nil {
+			return Result{}, false, err
+		}
+	}
 	for i := 1; i < len(mine); i++ {
 		if err := a.deleteClaim(ctx, &mine[i]); err != nil {
 			return Result{}, false, err
 		}
 	}
+	if len(mine) == 0 {
+		return Result{}, false, nil
+	}
+	keep := &mine[0]
 	return Result{
 		Address:   keep.Annotations[addressAnnotation],
 		ClaimName: keep.Name,
@@ -435,12 +462,30 @@ func holderOf(lease *coordinationv1.Lease) string {
 	return *lease.Spec.HolderIdentity
 }
 
-// labelSafe renders a peer name as a label value. Node names can exceed the
-// 63-character label limit; the label is only a selector shortcut, and the
-// holder is authoritative, so truncating beats failing the create.
+// labelSafe renders a holder as a label value. It must match
+// wirekube/pkg/meshalloc.labelSafe, or the two sides select different claims.
+//
+// It is lossy on purpose. A label value is at most 63 characters of
+// alphanumerics, '-', '_' and '.'; two holders reducing to the same label is
+// harmless, because the label is only a selector shortcut and holderIdentity
+// decides ownership. Producing an invalid value is not harmless — it fails the
+// create, and it fails the list too, where an unparseable selector surfaces as
+// an error that looks nothing like the label that caused it.
 func labelSafe(name string) string {
-	if len(name) > 63 {
-		name = name[:63]
+	out := make([]rune, 0, len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '-', r == '_', r == '.':
+			out = append(out, r)
+		default:
+			out = append(out, '-')
+		}
+		if len(out) == 63 {
+			break
+		}
 	}
-	return strings.Trim(name, "-_.")
+	// A label value must start and end alphanumeric. Trimming can empty it,
+	// which is still valid and still selects consistently.
+	return strings.Trim(string(out), "-_.")
 }

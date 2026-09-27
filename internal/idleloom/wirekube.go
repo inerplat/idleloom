@@ -40,7 +40,7 @@ type WireKubeStatus struct {
 // take a different address when it does; on a hash mesh the address is
 // whatever the node name produces, and a collision has to be refused.
 func (s WireKubeStatus) ArbitratesAddresses() bool {
-	return s.AddressAllocation == "allocator"
+	return s.AddressAllocation == meshclaim.AddressAllocationAllocator
 }
 
 // CheckWireKube validates the WireKube installation structurally: the mesh
