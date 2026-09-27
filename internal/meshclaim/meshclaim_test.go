@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/inerplat/idleloom/internal/meship"
@@ -18,7 +17,7 @@ const testMesh = "198.18.18.0/24"
 
 func newAllocator() *Allocator {
 	return &Allocator{
-		Client:   fake.NewSimpleClientset(),
+		Store:    Typed(fake.NewSimpleClientset(), ""),
 		MeshName: "default",
 		MeshCIDR: testMesh,
 	}
@@ -90,7 +89,7 @@ func TestAllocateTakesTheHashedAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := a.Allocate(context.Background(), "worker1", "")
+	got, err := a.Allocate(context.Background(), Request{Holder: "worker1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,10 +110,10 @@ func TestAllocateMovesRatherThanRefusing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Allocate(context.Background(), "squatter", contested); err != nil {
+	if _, err := a.Allocate(context.Background(), Request{Holder: "squatter", Preferred: contested}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := a.Allocate(context.Background(), "worker1", "")
+	got, err := a.Allocate(context.Background(), Request{Holder: "worker1"})
 	if err != nil {
 		t.Fatalf("Allocate refused instead of moving: %v", err)
 	}
@@ -133,12 +132,12 @@ func TestAllocateMovesRatherThanRefusing(t *testing.T) {
 // must land on the same address rather than consume a second one.
 func TestAllocateIsIdempotent(t *testing.T) {
 	a := newAllocator()
-	first, err := a.Allocate(context.Background(), "worker1", "")
+	first, err := a.Allocate(context.Background(), Request{Holder: "worker1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i := range 3 {
-		got, err := a.Allocate(context.Background(), "worker1", "")
+		got, err := a.Allocate(context.Background(), Request{Holder: "worker1"})
 		if err != nil {
 			t.Fatalf("run %d: %v", i, err)
 		}
@@ -164,7 +163,7 @@ func TestAllocatePrefersTheRecordedAddress(t *testing.T) {
 	if hashed == preferred {
 		t.Fatal("test vector is useless")
 	}
-	got, err := a.Allocate(context.Background(), "worker1", preferred)
+	got, err := a.Allocate(context.Background(), Request{Holder: "worker1", Preferred: preferred})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +182,7 @@ func TestAllocateIgnoresAnUnusablePreferredAddress(t *testing.T) {
 	}
 	for _, preferred := range []string{"10.9.9.9/32", "198.18.18.0/32", "198.18.18.255/32", "garbage", "198.18.18.9"} {
 		a := newAllocator()
-		got, err := a.Allocate(context.Background(), "worker1", preferred)
+		got, err := a.Allocate(context.Background(), Request{Holder: "worker1", Preferred: preferred})
 		if err != nil {
 			t.Fatalf("preferred %q: %v", preferred, err)
 		}
@@ -206,7 +205,7 @@ func TestAllocateExhaustsExactly(t *testing.T) {
 	seen := make(map[string]string, capacity)
 	for i := range capacity {
 		name := fmt.Sprintf("peer-%d", i)
-		got, err := a.Allocate(context.Background(), name, "")
+		got, err := a.Allocate(context.Background(), Request{Holder: name})
 		if err != nil {
 			t.Fatalf("filling slot %d: %v", i, err)
 		}
@@ -215,7 +214,7 @@ func TestAllocateExhaustsExactly(t *testing.T) {
 		}
 		seen[got.Address] = name
 	}
-	_, err = a.Allocate(context.Background(), "one-too-many", "")
+	_, err = a.Allocate(context.Background(), Request{Holder: "one-too-many"})
 	if !errors.Is(err, ErrExhausted) {
 		t.Fatalf("error = %v, want ErrExhausted", err)
 	}
@@ -235,7 +234,7 @@ func TestAllocateFindsTheLastFreeAddress(t *testing.T) {
 	var free string
 	for i := range capacity {
 		name := fmt.Sprintf("filler-%d", i)
-		got, err := a.Allocate(context.Background(), name, "")
+		got, err := a.Allocate(context.Background(), Request{Holder: name})
 		if err != nil {
 			t.Fatalf("filling slot %d: %v", i, err)
 		}
@@ -246,7 +245,7 @@ func TestAllocateFindsTheLastFreeAddress(t *testing.T) {
 			}
 		}
 	}
-	got, err := a.Allocate(context.Background(), "latecomer", "")
+	got, err := a.Allocate(context.Background(), Request{Holder: "latecomer"})
 	if err != nil {
 		t.Fatalf("Allocate with one address free: %v", err)
 	}
@@ -257,7 +256,7 @@ func TestAllocateFindsTheLastFreeAddress(t *testing.T) {
 
 func TestReleaseReturnsTheAddressToThePool(t *testing.T) {
 	a := newAllocator()
-	held, err := a.Allocate(context.Background(), "worker1", "")
+	held, err := a.Allocate(context.Background(), Request{Holder: "worker1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +271,7 @@ func TestReleaseReturnsTheAddressToThePool(t *testing.T) {
 	if err := a.Release(context.Background(), "worker1"); err != nil {
 		t.Fatalf("second Release: %v", err)
 	}
-	got, err := a.Allocate(context.Background(), "successor", held.Address)
+	got, err := a.Allocate(context.Background(), Request{Holder: "successor", Preferred: held.Address})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +282,7 @@ func TestReleaseReturnsTheAddressToThePool(t *testing.T) {
 
 func TestReleaseLeavesAnotherHoldersClaimAlone(t *testing.T) {
 	a := newAllocator()
-	if _, err := a.Allocate(context.Background(), "keeper", ""); err != nil {
+	if _, err := a.Allocate(context.Background(), Request{Holder: "keeper"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.Release(context.Background(), "stranger"); err != nil {
@@ -296,12 +295,12 @@ func TestReleaseLeavesAnotherHoldersClaimAlone(t *testing.T) {
 
 func TestAllocateRejectsAnIncompleteAllocator(t *testing.T) {
 	for name, a := range map[string]*Allocator{
-		"no client":    {MeshName: "default", MeshCIDR: testMesh},
-		"no mesh name": {Client: fake.NewSimpleClientset(), MeshCIDR: testMesh},
-		"no cidr":      {Client: fake.NewSimpleClientset(), MeshName: "default"},
-		"bad cidr":     {Client: fake.NewSimpleClientset(), MeshName: "default", MeshCIDR: "198.18.18.0/31"},
+		"no store":     {MeshName: "default", MeshCIDR: testMesh},
+		"no mesh name": {Store: Typed(fake.NewSimpleClientset(), ""), MeshCIDR: testMesh},
+		"no cidr":      {Store: Typed(fake.NewSimpleClientset(), ""), MeshName: "default"},
+		"bad cidr":     {Store: Typed(fake.NewSimpleClientset(), ""), MeshName: "default", MeshCIDR: "198.18.18.0/31"},
 	} {
-		if _, err := a.Allocate(context.Background(), "worker1", ""); err == nil {
+		if _, err := a.Allocate(context.Background(), Request{Holder: "worker1"}); err == nil {
 			t.Errorf("%s: Allocate succeeded", name)
 		}
 		if err := a.Release(context.Background(), "worker1"); err == nil && name != "bad cidr" {
@@ -312,9 +311,9 @@ func TestAllocateRejectsAnIncompleteAllocator(t *testing.T) {
 
 func countClaims(t *testing.T, a *Allocator) int {
 	t.Helper()
-	claims, err := a.Client.CoordinationV1().Leases(a.namespace()).List(context.Background(), metav1.ListOptions{})
+	claims, err := a.Store.List(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	return len(claims.Items)
+	return len(claims)
 }
