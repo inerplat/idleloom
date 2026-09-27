@@ -572,6 +572,8 @@ func (r *resumeRuntime) Backend() RuntimeKind { return RuntimeKrunkit }
 
 func (r *resumeRuntime) GuestArch() string { return "arm64" }
 
+func (r *resumeRuntime) Environment() string { return "" }
+
 func (r *resumeRuntime) Preflight(context.Context) error { return nil }
 func (r *resumeRuntime) Plan(context.Context, RuntimeConfig) (RuntimeState, error) {
 	return RuntimeState{}, nil
@@ -612,6 +614,8 @@ func (r deletingRuntime) Delete(context.Context, RuntimeState) error   { return 
 func (r rejectingRuntime) Backend() RuntimeKind { return RuntimeKrunkit }
 
 func (r rejectingRuntime) GuestArch() string { return "arm64" }
+
+func (r rejectingRuntime) Environment() string { return "" }
 
 func (r rejectingRuntime) Preflight(context.Context) error { return nil }
 func (r rejectingRuntime) Plan(context.Context, RuntimeConfig) (RuntimeState, error) {

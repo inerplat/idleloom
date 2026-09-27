@@ -191,11 +191,14 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		return err
 	}
 	state := State{
-		NodeName:        opts.NodeName,
-		KubeconfigPath:  cluster.KubeconfigPath,
-		Context:         cluster.Context,
-		Network:         opts.Network,
-		Distribution:    opts.Distribution,
+		NodeName:       opts.NodeName,
+		KubeconfigPath: cluster.KubeconfigPath,
+		Context:        cluster.Context,
+		Network:        opts.Network,
+		// What the runtime bound to, which is the resolved default when the
+		// caller named no distribution. Recording the empty string would let
+		// a later delete follow whatever the default had become.
+		Distribution:    a.Runtime.Environment(),
 		Taint:           opts.Taint,
 		TaintConfigured: true,
 		TokenTTLSeconds: durationSecondsCeil(opts.TokenTTL),
@@ -406,8 +409,8 @@ func (a *App) Start(ctx context.Context, statePath string, override ClusterOverr
 	if err != nil {
 		return err
 	}
-	if state.HoldsNetworkReservation() {
-		if err := ValidateRuntimeNetworkReservation(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime); err != nil {
+	{
+		if err := ValidateNetworkReservationIfHeld(ctx, cluster.Client, state); err != nil {
 			return err
 		}
 	}
@@ -960,8 +963,8 @@ func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverri
 	if err != nil {
 		return err
 	}
-	if state.HoldsNetworkReservation() {
-		if err := ValidateRuntimeNetworkReservation(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime); err != nil {
+	{
+		if err := ValidateNetworkReservationIfHeld(ctx, cluster.Client, state); err != nil {
 			return err
 		}
 	}

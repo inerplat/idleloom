@@ -97,6 +97,11 @@ type WorkerRuntime interface {
 	// GuestArch is the CPU architecture of the worker's Linux environment,
 	// which selects the kubelet build to install.
 	GuestArch() string
+	// Environment names the specific environment this worker was bound to,
+	// where the host offers a choice: the WSL distribution, and nothing
+	// elsewhere. It is recorded at enrollment so later commands act on the
+	// same one.
+	Environment() string
 	Preflight(context.Context) error
 	Plan(context.Context, RuntimeConfig) (RuntimeState, error)
 	Create(context.Context, *RuntimeState) error
