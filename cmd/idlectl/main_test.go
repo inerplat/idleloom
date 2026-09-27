@@ -370,6 +370,7 @@ func TestMissingWireKubeRequiresExplicitNonInteractiveDependencyInstall(t *testi
 		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
 		nativewirekube.ServicesGVR:      "ServiceList",
+		nativewirekube.DaemonSetsGVR:    "DaemonSetList",
 	})
 	called := false
 	original := newWireKubeLifecycle
@@ -409,6 +410,7 @@ func TestExistingCompatibleWireKubeSkipsDependencyResolver(t *testing.T) {
 		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
 		nativewirekube.ServicesGVR:      "ServiceList",
+		nativewirekube.DaemonSetsGVR:    "DaemonSetList",
 	})
 	if err := client.Tracker().Create(nativewirekube.MeshesGVR, mesh, ""); err != nil {
 		t.Fatal(err)
@@ -442,6 +444,7 @@ func TestMissingWireKubePlansInstallsAndContinuesJoin(t *testing.T) {
 		nativewirekube.PeersGVR:         "WireKubePeerList",
 		nativewirekube.ExternalPeersGVR: "WireKubeExternalPeerList",
 		nativewirekube.ServicesGVR:      "ServiceList",
+		nativewirekube.DaemonSetsGVR:    "DaemonSetList",
 	})
 	lifecycle := &fakeWireKubeLifecycle{plan: wirekubecli.Plan{
 		Context: "cluster", WireKubeVersion: wirekubecli.CompatibleVersion,
