@@ -173,7 +173,7 @@ func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 
 // claimMeshAddress takes the address through WireKube's allocator.
 func claimMeshAddress(ctx context.Context, client kubernetes.Interface, nodeName string, wireKube WireKubeStatus) (MeshAddress, error) {
-	result, err := meshAllocator(client, wireKube).Allocate(ctx, nodeName, "")
+	result, err := meshAllocator(client, wireKube).Allocate(ctx, meshclaim.Request{Holder: nodeName})
 	if err != nil {
 		return MeshAddress{}, err
 	}
@@ -205,7 +205,7 @@ const meshEnrollmentGrace = time.Hour
 
 func meshAllocator(client kubernetes.Interface, wireKube WireKubeStatus) *meshclaim.Allocator {
 	return &meshclaim.Allocator{
-		Client:   client,
+		Store:    meshclaim.Typed(client, ""),
 		MeshName: wireKube.MeshName,
 		MeshCIDR: wireKube.MeshCIDR,
 		Grace:    meshEnrollmentGrace,

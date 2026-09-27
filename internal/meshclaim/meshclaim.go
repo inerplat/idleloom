@@ -31,7 +31,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/inerplat/idleloom/internal/meship"
 )
@@ -60,10 +60,8 @@ var ErrExhausted = errors.New("every address in the WireKube mesh CIDR is alread
 
 // Allocator claims mesh addresses through the Kubernetes API.
 type Allocator struct {
-	// Client talks to the cluster the mesh lives in.
-	Client kubernetes.Interface
-	// Namespace holds the claim Leases. Empty means DefaultNamespace.
-	Namespace string
+	// Store reads and creates the claim Leases. Use Typed or Dynamic.
+	Store Store
 	// MeshName is the WireKubeMesh the address comes from.
 	MeshName string
 	// MeshCIDR is the range to allocate from.
@@ -76,10 +74,39 @@ type Allocator struct {
 	Grace time.Duration
 }
 
+// Request describes the claim to make.
+type Request struct {
+	// Holder identifies who holds the claim. It is the name WireKube's reaper
+	// looks up to decide whether the claim is still answered for, so it has to
+	// be the WireKubePeer or WireKubeExternalPeer name.
+	Holder string
+	// Name is the name the address derives from. It defaults to Holder, and
+	// differs only where WireKube itself derives from something else: an
+	// external peer's address comes from its display name while the peer
+	// resource carries another. Deriving from the wrong one would move a peer
+	// that is already up.
+	Name string
+	// Preferred is the address the caller already advertises, if any. It is
+	// taken when it is usable and free, so adopting the allocator renumbers
+	// nobody.
+	Preferred string
+}
+
+func (r Request) hashName() string {
+	if r.Name != "" {
+		return r.Name
+	}
+	return r.Holder
+}
+
 // Result is a claimed address and how it was reached.
 type Result struct {
 	// Address is the claimed /32 in CIDR notation.
 	Address string
+	// ClaimName and ClaimUID identify the Lease, for a caller that has to roll
+	// the claim back as part of a larger failed enrollment.
+	ClaimName string
+	ClaimUID  types.UID
 	// Attempt is the candidate index that won; 0 is the hashed address.
 	Attempt int
 	// Adopted is true when the claim already existed and was this peer's.
@@ -89,34 +116,70 @@ type Result struct {
 	Moved bool
 }
 
+// ErrInUse reports that a specific address is claimed by somebody else. Only
+// Reserve returns it; Allocate moves to another address instead.
+var ErrInUse = errors.New("the mesh address is already claimed")
+
+// Reserve claims one specific address for holder, or fails.
+//
+// It is for the caller that cannot move — a mesh that does not arbitrate
+// addresses gives every peer exactly the address its name hashes to, so there
+// is no second choice to fall back on and a contested address has to be
+// reported. Reserving the address the caller was going to take anyway still
+// keeps two enrolments from racing onto it.
+//
+// Claiming an address this holder already holds succeeds and reports Adopted.
+func (a *Allocator) Reserve(ctx context.Context, holder, address string) (Result, error) {
+	if err := a.validate(); err != nil {
+		return Result{}, err
+	}
+	if holder == "" {
+		return Result{}, fmt.Errorf("a mesh address claim needs a holder")
+	}
+	if !meship.Contains(address, a.MeshCIDR) {
+		return Result{}, fmt.Errorf("the mesh address %s is not one %s can hand out", address, a.MeshCIDR)
+	}
+	result, claimed, err := a.claim(ctx, holder, address, -1)
+	if err != nil {
+		return Result{}, err
+	}
+	if !claimed {
+		return Result{}, fmt.Errorf("%w: %s", ErrInUse, address)
+	}
+	return result, nil
+}
+
 // Allocate returns the address peerName holds, claiming one if it holds none.
 //
 // It prefers, in order, a claim peerName already holds, then preferred if it
 // is usable and free, then the walk from the hashed address. Holding the
 // existing claim first is what makes a re-run of an interrupted enrolment
 // land on the same address instead of consuming a second one.
-func (a *Allocator) Allocate(ctx context.Context, peerName, preferred string) (Result, error) {
+func (a *Allocator) Allocate(ctx context.Context, request Request) (Result, error) {
 	if err := a.validate(); err != nil {
 		return Result{}, err
+	}
+	if request.Holder == "" {
+		return Result{}, fmt.Errorf("a mesh address claim needs a holder")
 	}
 	capacity, err := meship.Capacity(a.MeshCIDR)
 	if err != nil {
 		return Result{}, err
 	}
-	hashed, err := meship.IPForName(peerName, a.MeshCIDR)
+	hashed, err := meship.IPForName(request.hashName(), a.MeshCIDR)
 	if err != nil {
 		return Result{}, err
 	}
 
-	if held, found, err := a.heldClaim(ctx, peerName, preferred); err != nil {
+	if held, found, err := a.heldClaim(ctx, request); err != nil {
 		return Result{}, err
 	} else if found {
 		held.Moved = held.Address != hashed
 		return held, nil
 	}
 
-	if preferred != "" && meship.Contains(preferred, a.MeshCIDR) {
-		result, claimed, err := a.claim(ctx, peerName, preferred, -1)
+	if request.Preferred != "" && meship.Contains(request.Preferred, a.MeshCIDR) {
+		result, claimed, err := a.claim(ctx, request.Holder, request.Preferred, -1)
 		if err != nil {
 			return Result{}, err
 		}
@@ -128,11 +191,11 @@ func (a *Allocator) Allocate(ctx context.Context, peerName, preferred string) (R
 
 	probed := min(probeLimit, capacity)
 	for attempt := range probed {
-		address, err := meship.IPForNameAttempt(peerName, a.MeshCIDR, attempt)
+		address, err := meship.IPForNameAttempt(request.hashName(), a.MeshCIDR, attempt)
 		if err != nil {
 			return Result{}, err
 		}
-		result, claimed, err := a.claim(ctx, peerName, address, attempt)
+		result, claimed, err := a.claim(ctx, request.Holder, address, attempt)
 		if err != nil {
 			return Result{}, err
 		}
@@ -145,14 +208,14 @@ func (a *Allocator) Allocate(ctx context.Context, peerName, preferred string) (R
 		// The walk is a permutation, so every address has been tried.
 		return Result{}, a.exhausted(capacity)
 	}
-	return a.allocateFromFreeList(ctx, peerName, capacity)
+	return a.allocateFromFreeList(ctx, request, capacity)
 }
 
 // allocateFromFreeList takes over once enough candidates have come back taken
 // to suggest the pool is dense. One list turns the rest of the search exact,
 // so the last free address costs a bounded number of calls rather than one per
 // occupied address.
-func (a *Allocator) allocateFromFreeList(ctx context.Context, peerName string, capacity int) (Result, error) {
+func (a *Allocator) allocateFromFreeList(ctx context.Context, request Request, capacity int) (Result, error) {
 	claims, err := a.list(ctx, "")
 	if err != nil {
 		return Result{}, err
@@ -164,14 +227,14 @@ func (a *Allocator) allocateFromFreeList(ctx context.Context, peerName string, c
 		}
 	}
 	for attempt := range capacity {
-		address, err := meship.IPForNameAttempt(peerName, a.MeshCIDR, attempt)
+		address, err := meship.IPForNameAttempt(request.hashName(), a.MeshCIDR, attempt)
 		if err != nil {
 			return Result{}, err
 		}
 		if _, occupied := taken[address]; occupied {
 			continue
 		}
-		result, claimed, err := a.claim(ctx, peerName, address, attempt)
+		result, claimed, err := a.claim(ctx, request.Holder, address, attempt)
 		if err != nil {
 			return Result{}, err
 		}
@@ -187,16 +250,15 @@ func (a *Allocator) allocateFromFreeList(ctx context.Context, peerName string, c
 // claim attempts to take address. It reports claimed=false only when somebody
 // else holds it.
 func (a *Allocator) claim(ctx context.Context, peerName, address string, attempt int) (Result, bool, error) {
-	leases := a.Client.CoordinationV1().Leases(a.namespace())
-	_, err := leases.Create(ctx, a.leaseFor(peerName, address, attempt), metav1.CreateOptions{})
+	created, err := a.Store.Create(ctx, a.leaseFor(peerName, address, attempt))
 	if err == nil {
-		return Result{Address: address, Attempt: attempt}, true, nil
+		return Result{Address: address, ClaimName: created.Name, ClaimUID: created.UID, Attempt: attempt}, true, nil
 	}
 	if !apierrors.IsAlreadyExists(err) {
 		return Result{}, false, fmt.Errorf("claim the mesh address %s for %q: %w", address, peerName, err)
 	}
 
-	existing, err := leases.Get(ctx, ClaimName(a.MeshName, address), metav1.GetOptions{})
+	existing, err := a.Store.Get(ctx, ClaimName(a.MeshName, address))
 	if apierrors.IsNotFound(err) {
 		// Released between the create and the read. Report it as taken
 		// rather than retrying: claiming an address we do not hold would be
@@ -209,26 +271,26 @@ func (a *Allocator) claim(ctx context.Context, peerName, address string, attempt
 	if holderOf(existing) != peerName {
 		return Result{}, false, nil
 	}
-	return Result{Address: address, Attempt: attempt, Adopted: true}, true, nil
+	return Result{Address: address, ClaimName: existing.Name, ClaimUID: existing.UID, Attempt: attempt, Adopted: true}, true, nil
 }
 
 // heldClaim returns the claim peerName already holds, releasing any duplicate.
-func (a *Allocator) heldClaim(ctx context.Context, peerName, preferred string) (Result, bool, error) {
-	claims, err := a.list(ctx, peerLabel+"="+labelSafe(peerName))
+func (a *Allocator) heldClaim(ctx context.Context, request Request) (Result, bool, error) {
+	claims, err := a.list(ctx, peerLabel+"="+labelSafe(request.Holder))
 	if err != nil {
 		return Result{}, false, err
 	}
 	mine := make([]coordinationv1.Lease, 0, 1)
 	for i := range claims {
 		// The label is truncated and so ambiguous; the holder is authoritative.
-		if holderOf(&claims[i]) == peerName && claims[i].Annotations[addressAnnotation] != "" {
+		if holderOf(&claims[i]) == request.Holder && claims[i].Annotations[addressAnnotation] != "" {
 			mine = append(mine, claims[i])
 		}
 	}
 	if len(mine) == 0 {
 		return Result{}, false, nil
 	}
-	sort.Slice(mine, func(i, j int) bool { return betterClaim(&mine[i], &mine[j], preferred) })
+	sort.Slice(mine, func(i, j int) bool { return betterClaim(&mine[i], &mine[j], request.Preferred) })
 	keep := &mine[0]
 	for i := 1; i < len(mine); i++ {
 		if err := a.deleteClaim(ctx, &mine[i]); err != nil {
@@ -236,9 +298,11 @@ func (a *Allocator) heldClaim(ctx context.Context, peerName, preferred string) (
 		}
 	}
 	return Result{
-		Address: keep.Annotations[addressAnnotation],
-		Attempt: attemptOf(keep),
-		Adopted: true,
+		Address:   keep.Annotations[addressAnnotation],
+		ClaimName: keep.Name,
+		ClaimUID:  keep.UID,
+		Attempt:   attemptOf(keep),
+		Adopted:   true,
 	}, true, nil
 }
 
@@ -246,16 +310,16 @@ func (a *Allocator) heldClaim(ctx context.Context, peerName, preferred string) (
 // pool instead of waiting out the reaper's grace period. It never touches a
 // claim somebody else holds: an enrolment torn down after its address was
 // reassigned must not take the new holder's claim with it.
-func (a *Allocator) Release(ctx context.Context, peerName string) error {
+func (a *Allocator) Release(ctx context.Context, holder string) error {
 	if err := a.validate(); err != nil {
 		return err
 	}
-	claims, err := a.list(ctx, peerLabel+"="+labelSafe(peerName))
+	claims, err := a.list(ctx, peerLabel+"="+labelSafe(holder))
 	if err != nil {
 		return err
 	}
 	for i := range claims {
-		if holderOf(&claims[i]) != peerName {
+		if holderOf(&claims[i]) != holder {
 			continue
 		}
 		if err := a.deleteClaim(ctx, &claims[i]); err != nil {
@@ -266,10 +330,7 @@ func (a *Allocator) Release(ctx context.Context, peerName string) error {
 }
 
 func (a *Allocator) deleteClaim(ctx context.Context, claim *coordinationv1.Lease) error {
-	uid := claim.UID
-	err := a.Client.CoordinationV1().Leases(a.namespace()).Delete(ctx, claim.Name, metav1.DeleteOptions{
-		Preconditions: &metav1.Preconditions{UID: &uid},
-	})
+	err := a.Store.Delete(ctx, claim.Name, claim.UID)
 	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		return fmt.Errorf("release the claim on the mesh address %s: %w", claim.Annotations[addressAnnotation], err)
 	}
@@ -281,11 +342,11 @@ func (a *Allocator) list(ctx context.Context, extra string) ([]coordinationv1.Le
 	if extra != "" {
 		selector += "," + extra
 	}
-	claims, err := a.Client.CoordinationV1().Leases(a.namespace()).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	claims, err := a.Store.List(ctx, selector)
 	if err != nil {
-		return nil, fmt.Errorf("list WireKube mesh address claims in %s: %w", a.namespace(), err)
+		return nil, fmt.Errorf("list WireKube mesh address claims in %s: %w", a.Store.Namespace(), err)
 	}
-	return claims.Items, nil
+	return claims, nil
 }
 
 func (a *Allocator) leaseFor(peerName, address string, attempt int) *coordinationv1.Lease {
@@ -297,7 +358,7 @@ func (a *Allocator) leaseFor(peerName, address string, attempt int) *coordinatio
 	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ClaimName(a.MeshName, address),
-			Namespace: a.namespace(),
+			Namespace: a.Store.Namespace(),
 			Labels: map[string]string{
 				claimLabel: claimValue,
 				meshLabel:  a.MeshName,
@@ -322,16 +383,9 @@ func (a *Allocator) exhausted(capacity int) error {
 		ErrExhausted, a.MeshCIDR, capacity)
 }
 
-func (a *Allocator) namespace() string {
-	if a.Namespace != "" {
-		return a.Namespace
-	}
-	return DefaultNamespace
-}
-
 func (a *Allocator) validate() error {
-	if a.Client == nil {
-		return fmt.Errorf("no Kubernetes client configured for mesh address claims")
+	if a.Store == nil {
+		return fmt.Errorf("no Lease store configured for mesh address claims")
 	}
 	if a.MeshName == "" {
 		return fmt.Errorf("no WireKubeMesh name configured for mesh address claims")

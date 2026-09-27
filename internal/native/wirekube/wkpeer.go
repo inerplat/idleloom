@@ -451,7 +451,7 @@ func UpdatePeerStatus(ctx context.Context, client dynamic.Interface, state State
 	return nil
 }
 
-func rollbackNewWireKubeEnrollment(ctx context.Context, client dynamic.Interface, peer, claim *unstructured.Unstructured, state State, peerCreated, claimCreated bool) error {
+func rollbackNewWireKubeEnrollment(ctx context.Context, client dynamic.Interface, peer *unstructured.Unstructured, claim meshIPClaim, state State, peerCreated, claimCreated bool) error {
 	var values []error
 	if peerCreated && peer != nil && peer.GetUID() != "" {
 		uid := peer.GetUID()
@@ -460,11 +460,8 @@ func rollbackNewWireKubeEnrollment(ctx context.Context, client dynamic.Interface
 		}
 		values = append(values, deletePeerIdentity(ctx, client, state))
 	}
-	if claimCreated && claim != nil && claim.GetUID() != "" {
-		uid := claim.GetUID()
-		if err := client.Resource(IPClaimsGVR).Namespace(ipClaimNamespace).Delete(ctx, claim.GetName(), metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &uid}}); err != nil && !apierrors.IsNotFound(err) {
-			values = append(values, fmt.Errorf("rollback mesh IP claim Lease/%s: %w", claim.GetName(), err))
-		}
+	if claimCreated {
+		values = append(values, rollbackMeshIPClaim(ctx, client, claim))
 	}
 	return errors.Join(values...)
 }
