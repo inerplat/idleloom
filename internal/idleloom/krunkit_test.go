@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -233,8 +234,19 @@ func TestValidateRejectsNonEmptyUnmarkedPlannedDirectory(t *testing.T) {
 	}
 }
 
+// longRunningCommand names a process that stays alive long enough to be
+// terminated, on whichever platform the test runs.
+func longRunningCommand() (string, []string) {
+	if runtime.GOOS == "windows" {
+		// ping counts down one reply per second, so 31 echoes is about 30s.
+		return "ping", []string{"-n", "31", "127.0.0.1"}
+	}
+	return "sleep", []string{"30"}
+}
+
 func TestTerminatePIDWaitsForProcessExit(t *testing.T) {
-	command := detachedCommand("sleep", "30")
+	name, args := longRunningCommand()
+	command := detachedCommand(name, args...)
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +254,7 @@ func TestTerminatePIDWaitsForProcessExit(t *testing.T) {
 	if err := command.Process.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if err := terminatePID(pid, "sleep", 2*time.Second); err != nil {
+	if err := terminatePID(pid, name, 2*time.Second); err != nil {
 		t.Fatalf("terminatePID: %v", err)
 	}
 	if !processHasExited(pid) {
