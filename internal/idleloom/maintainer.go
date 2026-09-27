@@ -233,19 +233,37 @@ type maintainerLock struct {
 	file *os.File
 }
 
+// maintainerLockProbeWindow bounds how long acquiring the lock tolerates
+// contention before concluding a maintainer really is running.
+//
+// maintainerLockHeld answers "is it held?" the only way an advisory lock
+// allows: by taking it and letting go. That brief hold is indistinguishable
+// from a running maintainer to anyone acquiring at the same moment, and
+// startMaintainer probes immediately before the maintainer it spawned
+// acquires. Retrying past a probe costs nothing — a real maintainer holds the
+// lock for its whole life, so it is still reported — the window only has to
+// outlast a probe, which holds it for microseconds.
+const maintainerLockProbeWindow = 250 * time.Millisecond
+
 func acquireMaintainerLock(statePath string) (*maintainerLock, error) {
 	file, err := os.OpenFile(maintainerLockFile(statePath), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open certificate maintainer lock: %w", err)
 	}
-	locked, err := filelock.TryLock(file)
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("lock certificate maintainer: %w", err), file.Close())
+	deadline := time.Now().Add(maintainerLockProbeWindow)
+	for {
+		locked, err := filelock.TryLock(file)
+		if err != nil {
+			return nil, errors.Join(fmt.Errorf("lock certificate maintainer: %w", err), file.Close())
+		}
+		if locked {
+			return &maintainerLock{file: file}, nil
+		}
+		if time.Now().After(deadline) {
+			return nil, errors.Join(fmt.Errorf("certificate maintainer is already running"), file.Close())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if !locked {
-		return nil, errors.Join(fmt.Errorf("certificate maintainer is already running"), file.Close())
-	}
-	return &maintainerLock{file: file}, nil
 }
 
 func (l *maintainerLock) Close() error {
