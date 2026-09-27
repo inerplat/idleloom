@@ -58,9 +58,27 @@ kubectl get wirekubepeer NAME -o wide
 The node's `InternalIP` and the first entry of the peer's `allowedIPs` are the
 same address.
 
-Two node names can hash to the same mesh address. Enrollment checks the
-existing peers and refuses rather than taking an address already in use; pick a
-different node name if that happens.
+Two node names can hash to the same mesh address. What happens then depends on
+the mesh:
+
+- `spec.addressAllocation: allocator` — WireKube arbitrates addresses, so
+  enrollment claims a free one and tells you it did. The node name no longer
+  fixes the address; read it back from the node rather than deriving it.
+- anything else (the default) — nothing arbitrates, so taking the address would
+  leave two peers advertising the same `/32`. Enrollment refuses instead. Pick a
+  different node name, or switch the mesh over:
+
+  ```sh
+  kubectl patch wirekubemesh default --type=merge \
+    -p '{"spec":{"addressAllocation":"allocator"}}'
+  ```
+
+  Do not switch until every WireKube agent populates
+  `WireKubePeer.status.meshIP`; an older agent recomputes the hash on every
+  upsert and would drag an allocated peer back onto the contested address.
+
+`--dry-run` reports the address the worker would take, and on an arbitrating
+mesh whether it is already claimed, without claiming it.
 
 ## Linux host
 

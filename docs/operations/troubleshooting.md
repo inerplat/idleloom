@@ -121,7 +121,16 @@ kubectl get wirekubepeer NAME -o jsonpath='{.spec.allowedIPs}'
 ```
 
 The node's `InternalIP` must equal the first entry of the peer's
-`allowedIPs` — both are the mesh address derived from the node name. A host
+`allowedIPs`. On a mesh with `spec.addressAllocation: allocator` that address
+is whatever the claim settled on, which is not always the one the node name
+hashes to:
+
+```sh
+kubectl -n wirekube-system get leases -l wirekube.io/claim=address \
+  -o custom-columns=ADDRESS:.metadata.annotations.wirekube\\.io/address,HOLDER:.spec.holderIdentity
+```
+
+A host
 address there instead (`10.0.2.2`, `192.168.x.x`) means the worker installed
 a bundle that let kubelet detect its own address. Confirm the address is
 held locally, then re-enrol:
