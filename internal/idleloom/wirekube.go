@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
@@ -114,6 +115,9 @@ func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 	if err != nil {
 		return "", err
 	}
+	if err := checkExternalPeerClaims(ctx, client, address, meshCIDR); err != nil {
+		return "", err
+	}
 	raw, err := client.Discovery().RESTClient().Get().AbsPath("/apis/wirekube.io/v1alpha1/wirekubepeers").Do(ctx).Raw()
 	if err != nil {
 		return "", fmt.Errorf("list WireKube peers to check the worker address: %w", err)
@@ -142,4 +146,77 @@ func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 		}
 	}
 	return address, nil
+}
+
+// checkExternalPeerClaims refuses an address a Native Metal host has taken.
+//
+// A WireKubeExternalPeer reserves its address before the WireKubePeer that
+// carries it exists, so scanning peers alone would let a worker take an
+// address "idlectl join" had already claimed and leave both advertising it.
+// The resource is absent on installations that never enrolled one, which is
+// not an error.
+func checkExternalPeerClaims(ctx context.Context, client kubernetes.Interface, address, meshCIDR string) error {
+	raw, err := client.Discovery().RESTClient().Get().AbsPath("/apis/wirekube.io/v1alpha1/wirekubeexternalpeers").Do(ctx).Raw()
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("list WireKube external peers to check the worker address: %w", err)
+	}
+	var peers struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+			Spec struct {
+				DisplayName string `json:"displayName"`
+			} `json:"spec"`
+			Status struct {
+				AssignedMeshIP string `json:"assignedMeshIP"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &peers); err != nil {
+		return fmt.Errorf("decode WireKube external peers: %w", err)
+	}
+	claims := make([]externalPeerClaim, 0, len(peers.Items))
+	for _, peer := range peers.Items {
+		claims = append(claims, externalPeerClaim{
+			Name:           peer.Metadata.Name,
+			DisplayName:    peer.Spec.DisplayName,
+			AssignedMeshIP: peer.Status.AssignedMeshIP,
+		})
+	}
+	return conflictingExternalPeer(claims, address, meshCIDR)
+}
+
+// externalPeerClaim is the part of a WireKubeExternalPeer that can collide
+// with a worker's address.
+type externalPeerClaim struct {
+	Name           string
+	DisplayName    string
+	AssignedMeshIP string
+}
+
+// conflictingExternalPeer reports the external peer, if any, that already
+// holds address or would take it.
+func conflictingExternalPeer(claims []externalPeerClaim, address, meshCIDR string) error {
+	for _, claim := range claims {
+		if assigned := strings.TrimSuffix(claim.AssignedMeshIP, "/32"); assigned == address {
+			return fmt.Errorf("the mesh address %s is already assigned to WireKubeExternalPeer/%s; enrol this worker under a different name", address, claim.Name)
+		}
+		if claim.DisplayName == "" {
+			continue
+		}
+		// A peer that has not been assigned an address yet will take the one
+		// its display name hashes to, so a pending claim collides too.
+		pending, err := meship.AddressForName(claim.DisplayName, meshCIDR)
+		if err != nil {
+			return fmt.Errorf("derive the address of WireKubeExternalPeer/%s: %w", claim.Name, err)
+		}
+		if pending == address {
+			return fmt.Errorf("the mesh address %s collides with pending WireKubeExternalPeer/%s; enrol this worker under a different name", address, claim.Name)
+		}
+	}
+	return nil
 }

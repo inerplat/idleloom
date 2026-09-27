@@ -292,7 +292,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		}
 	}()
 
-	bundlePath, cleanupBundle, err := CreateWorkerBundle(workerBundleConfig(state, cluster, token.Value, kubeletPath))
+	bundlePath, cleanupBundle, err := CreateWorkerBundle(a.workerBundleConfig(state, cluster, token.Value, kubeletPath))
 	if err != nil {
 		return err
 	}
@@ -431,7 +431,7 @@ func (a *App) Start(ctx context.Context, statePath string, override ClusterOverr
 			return err
 		}
 	}
-	a.step(a.lifecycleStepMessage("Starting"))
+	a.step(a.lifecycleStepMessage("Starting", false))
 	startNotBefore := state.CreatedAt
 	if err := a.Runtime.Start(ctx, &state.Runtime); err != nil {
 		return err
@@ -658,7 +658,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 		if err := validateCredentialProviders(state.CredentialProviderBins, state.CredentialProviderConfig, state.CredentialProviderEnv, a.Runtime.GuestArch()); err != nil {
 			return fmt.Errorf("cannot rebuild the interrupted worker bundle: %w", err)
 		}
-		bundlePath, cleanupBundle, err := CreateWorkerBundle(workerBundleConfig(*state, cluster, token.Value, kubeletPath))
+		bundlePath, cleanupBundle, err := CreateWorkerBundle(a.workerBundleConfig(*state, cluster, token.Value, kubeletPath))
 		if err != nil {
 			return err
 		}
@@ -728,8 +728,8 @@ func (a *App) preflightStepMessage() string {
 // node address, so a worker that finished enrolling through a resume
 // re-registered with its own detected address instead of the mesh one. Both
 // now read the same saved state.
-func workerBundleConfig(state State, cluster *Cluster, token, kubeletPath string) BundleConfig {
-	return BundleConfig{
+func (a *App) workerBundleConfig(state State, cluster *Cluster, token, kubeletPath string) BundleConfig {
+	config := BundleConfig{
 		NodeName:      state.NodeName,
 		Taint:         state.Taint,
 		Server:        cluster.Server,
@@ -739,13 +739,19 @@ func workerBundleConfig(state State, cluster *Cluster, token, kubeletPath string
 		ClusterDNS:    cluster.ClusterDNS,
 		ClusterDomain: cluster.ClusterDomain,
 		KubeletPath:   kubeletPath,
-		NodeIP:        state.Runtime.GuestIP,
 
 		RegistryMirrors:          state.RegistryMirrors,
 		CredentialProviderBins:   state.CredentialProviderBins,
 		CredentialProviderConfig: state.CredentialProviderConfig,
 		CredentialProviderEnv:    state.CredentialProviderEnv,
 	}
+	// Only the in-place backends pin the address. A krunkit VM owns its
+	// subnet and detecting the address in the guest stays correct even if
+	// gvproxy ever hands out a different one than was recorded.
+	if !a.Runtime.Backend().ProvisionsVM() {
+		config.NodeIP = state.Runtime.GuestIP
+	}
+	return config
 }
 
 // plannedSubject names what enrollment would have created, for a message
@@ -759,12 +765,17 @@ func (a *App) plannedSubject() string {
 
 // lifecycleStepMessage names a start, stop, or delete step for the active
 // backend. Only krunkit has a VM to act on; the in-place backends act on the
-// worker's services inside an environment that outlives them.
-func (a *App) lifecycleStepMessage(verb string) string {
+// worker's services inside an environment that outlives them. local marks the
+// steps that deliberately skip the cluster.
+func (a *App) lifecycleStepMessage(verb string, local bool) string {
+	subject := "worker"
 	if a.Runtime.Backend().ProvisionsVM() {
-		return verb + " the krunkit worker VM"
+		subject = "krunkit worker VM"
 	}
-	return verb + " the worker"
+	if local {
+		return verb + " the local " + subject
+	}
+	return verb + " the " + subject
 }
 
 // createStepMessage names the provisioning step for the active backend.
@@ -916,7 +927,7 @@ func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverri
 		return err
 	}
 	if localOnly {
-		a.step(a.lifecycleStepMessage("Stopping the local"))
+		a.step(a.lifecycleStepMessage("Stopping", true))
 		if err := a.Runtime.Stop(ctx, state.Runtime); err != nil {
 			return err
 		}
@@ -964,7 +975,7 @@ func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverri
 		}
 		return fmt.Errorf("worker still has active workload pods: %s; drain or remove them before stopping", strings.Join(busy, ", "))
 	}
-	a.step(a.lifecycleStepMessage("Stopping"))
+	a.step(a.lifecycleStepMessage("Stopping", false))
 	if err := a.Runtime.Stop(ctx, state.Runtime); err != nil {
 		return err
 	}
@@ -993,7 +1004,7 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 		return err
 	}
 	if localOnly {
-		a.step("Deleting the local krunkit worker VM")
+		a.step(a.lifecycleStepMessage("Deleting", true))
 		state.Phase = PhaseLocalDeleting
 		if err := SaveState(resolvedPath, state); err != nil {
 			return err
@@ -1085,7 +1096,7 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 			}
 			return errors.Join(err, stateErr, schedulingErr)
 		}
-		a.step(a.lifecycleStepMessage("Deleting"))
+		a.step(a.lifecycleStepMessage("Deleting", false))
 		if err := a.Runtime.Delete(ctx, state.Runtime); err != nil {
 			return err
 		}

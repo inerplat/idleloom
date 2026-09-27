@@ -669,9 +669,16 @@ func TestInvokedNameAcceptsTheWindowsExecutableSuffix(t *testing.T) {
 		"/usr/local/bin/idlectl",
 		"idlectl",
 	} {
-		if got := strings.ToLower(invokedName(argv0)); got != "idlectl" {
+		// Compared the way main does. Lowercasing here instead would hide a
+		// case-sensitive comparison, which is how this bug survived once.
+		if got := invokedName(argv0); !strings.EqualFold(got, "idlectl") {
 			t.Errorf("invokedName(%q) = %q, want idlectl", argv0, got)
 		}
+	}
+	// Windows filenames are case-insensitive, so the guard in main must be
+	// too: cmd.exe reports argv[0] as the user typed it.
+	if !strings.EqualFold(invokedName("IDLECTL.EXE"), "idlectl") {
+		t.Error("an uppercase Windows invocation is not recognised as idlectl")
 	}
 	// The reserved service names must still be recognised, and an unrelated
 	// name must still be rejected.

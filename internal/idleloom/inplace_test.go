@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -53,7 +55,8 @@ func TestInPlacePlanRequiresANodeAddress(t *testing.T) {
 func TestInPlaceCreateHoldsTheNodeAddressBeforeKubelet(t *testing.T) {
 	exec := &recordingExec{}
 	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux, Arch: "amd64", Out: io.Discard, Err: io.Discard}
-	state := RuntimeState{NodeName: "worker-a", RuntimeDir: t.TempDir(), GuestIP: "198.18.18.42"}
+	// Create makes the directory itself and refuses one that already exists.
+	state := RuntimeState{NodeName: "worker-a", RuntimeDir: filepath.Join(t.TempDir(), "runtime"), GuestIP: "198.18.18.42"}
 	if err := runtime.Create(context.Background(), &state); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -82,10 +85,24 @@ func TestInPlaceInstallBundleRemovesTheBundleEvenWhenInstallFails(t *testing.T) 
 	if len(exec.sent) != 1 || exec.sent[0][0] != "/tmp/bundle.tar" {
 		t.Fatalf("bundle was not copied into the guest: %v", exec.sent)
 	}
+	// The bundle carries a bootstrap token, so it must not be staged in a
+	// world-writable directory where any local user can pre-create the name.
+	if destination := exec.sent[0][1]; !strings.HasPrefix(destination, stagingDir+"/") {
+		t.Errorf("bundle staged at %s, outside the private staging directory", destination)
+	}
+	staged := false
+	for _, argv := range exec.runs {
+		if strings.Join(argv, " ") == "install -d -m 0700 "+stagingDir {
+			staged = true
+		}
+	}
+	if !staged {
+		t.Error("the staging directory is not created with a private mode first")
+	}
 	script := exec.allScripts()
 	// The bundle carries a bootstrap token, so it must not survive a failed
 	// install. An "&& rm" chain would leave it behind.
-	if !strings.Contains(script, "|| status=$?") || !strings.Contains(script, "rm -f /tmp/idleloom-bundle.tar\nexit $status") {
+	if !strings.Contains(script, "|| status=$?") || !strings.Contains(script, "rm -f "+stagingDir+"/bundle.tar\nexit $status") {
 		t.Errorf("bundle is not removed unconditionally:\n%s", script)
 	}
 }
@@ -239,7 +256,8 @@ func TestWaitReadyDoesNotRequireKubelet(t *testing.T) {
 func TestPreflightAcceptsUbuntuAndDebianDerivatives(t *testing.T) {
 	for _, release := range []string{
 		"NAME=\"Ubuntu\"\nID=ubuntu\nID_LIKE=debian\n",
-		"ID=debian\nID_LIKE=\"debian\"\n",
+		// Debian itself sets ID=debian and no ID_LIKE at all.
+		"PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nNAME=\"Debian GNU/Linux\"\nID=debian\n",
 		"ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n",
 	} {
 		exec := &recordingExec{replies: map[string]string{
@@ -268,5 +286,34 @@ func TestPreflightRejectsANonDebianDistribution(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "apt-get") {
 		t.Errorf("error does not explain why: %v", err)
+	}
+}
+
+// TestInPlaceRefusesARuntimeDirectoryItDidNotCreate guards against erasing a
+// user's data: Delete removes the runtime directory recursively once its
+// marker validates, so Create must never adopt one that already exists.
+func TestInPlaceRefusesARuntimeDirectoryItDidNotCreate(t *testing.T) {
+	existing := t.TempDir()
+	keep := filepath.Join(existing, "important.txt")
+	if err := os.WriteFile(keep, []byte("not idleloom's"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := InPlaceRuntime{Exec: &recordingExec{}, Kind: RuntimeLinux, Out: io.Discard, Err: io.Discard}
+
+	_, err := runtime.Plan(context.Background(), RuntimeConfig{
+		NodeName:   "worker-a",
+		RuntimeDir: existing,
+		Network:    RuntimeNetwork{GuestIP: "198.18.18.42"},
+	})
+	if err == nil {
+		t.Fatal("Plan adopted a directory that already exists")
+	}
+
+	state := RuntimeState{NodeName: "worker-a", RuntimeDir: existing, GuestIP: "198.18.18.42"}
+	if err := runtime.Create(context.Background(), &state); err == nil {
+		t.Fatal("Create adopted a directory that already exists")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Errorf("the pre-existing file was disturbed: %v", err)
 	}
 }

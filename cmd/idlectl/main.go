@@ -136,7 +136,7 @@ func main() {
 	if handled {
 		return
 	}
-	if invokedName(os.Args[0]) != "idlectl" {
+	if !strings.EqualFold(invokedName(os.Args[0]), "idlectl") {
 		_, _ = fmt.Fprintf(os.Stderr, "unsupported executable name %q: this binary must be invoked as idlectl; the internal service names are reserved for installed launchd services\n", filepath.Base(os.Args[0]))
 		os.Exit(2)
 	}
