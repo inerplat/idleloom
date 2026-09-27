@@ -10,23 +10,29 @@ import (
 	"path/filepath"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/filelock"
+
+	"github.com/inerplat/idleloom/internal/syncdir"
 )
 
 type State struct {
-	NodeName             string       `json:"nodeName"`
-	KubeconfigPath       string       `json:"kubeconfigPath"`
-	Context              string       `json:"context"`
-	Network              string       `json:"network"`
-	Taint                string       `json:"taint,omitempty"`
-	TaintConfigured      bool         `json:"taintConfigured,omitempty"`
-	TokenTTLSeconds      int64        `json:"tokenTTLSeconds,omitempty"`
-	NetworkLease         string       `json:"networkLease,omitempty"`
-	NetworkLeaseUID      string       `json:"networkLeaseUID,omitempty"`
-	NetworkReservationID string       `json:"networkReservationID,omitempty"`
-	Runtime              RuntimeState `json:"runtime"`
-	Phase                string       `json:"phase"`
-	CreatedAt            time.Time    `json:"createdAt"`
+	NodeName             string `json:"nodeName"`
+	KubeconfigPath       string `json:"kubeconfigPath"`
+	Context              string `json:"context"`
+	Network              string `json:"network"`
+	Taint                string `json:"taint,omitempty"`
+	TaintConfigured      bool   `json:"taintConfigured,omitempty"`
+	TokenTTLSeconds      int64  `json:"tokenTTLSeconds,omitempty"`
+	NetworkLease         string `json:"networkLease,omitempty"`
+	NetworkLeaseUID      string `json:"networkLeaseUID,omitempty"`
+	NetworkReservationID string `json:"networkReservationID,omitempty"`
+	// Distribution records the WSL2 distribution this worker was enrolled on,
+	// so later lifecycle commands act on it rather than the machine's current
+	// default distribution.
+	Distribution string       `json:"distribution,omitempty"`
+	Runtime      RuntimeState `json:"runtime"`
+	Phase        string       `json:"phase"`
+	CreatedAt    time.Time    `json:"createdAt"`
 	// RegistryMirrors and the credential provider host paths are persisted so
 	// an interrupted enrollment can rebuild the worker bundle on resume. Only
 	// paths are stored, never secret file contents.
@@ -51,12 +57,12 @@ func AcquireStateLock(ctx context.Context, statePath string) (*stateLock, error)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return &stateLock{file: file}, nil
-		}
-		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
+		locked, err := filelock.TryLock(file)
+		if err != nil {
 			return nil, errors.Join(fmt.Errorf("lock Idleloom state: %w", err), file.Close())
+		}
+		if locked {
+			return &stateLock{file: file}, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -70,7 +76,7 @@ func (l *stateLock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
+	unlockErr := filelock.Unlock(l.file)
 	closeErr := l.file.Close()
 	if unlockErr != nil {
 		return unlockErr
@@ -94,6 +100,14 @@ type RuntimeState struct {
 	MemoryMB      int    `json:"memoryMB"`
 	DiskMB        int    `json:"diskMB"`
 	Planned       bool   `json:"planned,omitempty"`
+}
+
+// HoldsNetworkReservation reports whether this worker owns a cluster-wide
+// subnet lease. Only the VM-provisioning backends take one: an in-place worker
+// derives its node address from the WireKube mesh, which needs no lease
+// because the address is a function of the node name.
+func (s State) HoldsNetworkReservation() bool {
+	return s.NetworkReservationID != ""
 }
 
 func DefaultStatePath() (string, error) {
@@ -141,17 +155,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace file: %w", err)
 	}
-	directory, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open parent directory: %w", err)
-	}
-	if err := directory.Sync(); err != nil {
-		return errors.Join(fmt.Errorf("sync parent directory: %w", err), directory.Close())
-	}
-	if err := directory.Close(); err != nil {
-		return fmt.Errorf("close parent directory: %w", err)
-	}
-	return nil
+	return syncdir.Sync(dir)
 }
 
 func EnsureStatePathAvailable(path string) error {
@@ -183,7 +187,7 @@ func LoadState(path string) (State, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return State{}, fmt.Errorf("no Idleloom worker exists on this Mac (state file %s not found); create one with \"idlectl create worker NAME\". If this Mac is a Native Metal host, use \"idlectl delete host NAME\" instead", path)
+			return State{}, fmt.Errorf("no Idleloom worker exists on this host (state file %s not found); create one with \"idlectl create worker NAME\". If this is a Native Metal host, use \"idlectl delete host NAME\" instead", path)
 		}
 		return State{}, fmt.Errorf("read state %s: %w", path, err)
 	}

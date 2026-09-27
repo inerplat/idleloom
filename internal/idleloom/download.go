@@ -16,7 +16,24 @@ import (
 
 var kubernetesVersionPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 
-func DownloadKubelet(ctx context.Context, version string) (string, error) {
+// supportedGuestArches are the Linux architectures Kubernetes publishes
+// kubelet builds for that Idleloom can enrol.
+var supportedGuestArches = map[string]struct{}{"amd64": {}, "arm64": {}}
+
+func validateGuestArch(arch string) error {
+	if _, ok := supportedGuestArches[arch]; !ok {
+		return fmt.Errorf("unsupported worker architecture %q; Idleloom enrols linux/amd64 and linux/arm64 workers", arch)
+	}
+	return nil
+}
+
+// DownloadKubelet fetches the kubelet matching the cluster for the worker's
+// guest architecture. krunkit workers are linux/arm64; the in-place backends
+// run on whatever the host is, which is linux/amd64 in practice.
+func DownloadKubelet(ctx context.Context, version, arch string) (string, error) {
+	if err := validateGuestArch(arch); err != nil {
+		return "", err
+	}
 	normalized, err := normalizeKubernetesVersion(version)
 	if err != nil {
 		return "", err
@@ -29,12 +46,12 @@ func DownloadKubelet(ctx context.Context, version string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("find user cache directory: %w", err)
 	}
-	dir := filepath.Join(cacheRoot, "idleloom", "kubernetes", version, "linux-arm64")
+	dir := filepath.Join(cacheRoot, "idleloom", "kubernetes", version, "linux-"+arch)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create kubelet cache: %w", err)
 	}
 	destination := filepath.Join(dir, "kubelet")
-	baseURL := "https://dl.k8s.io/release/" + version + "/bin/linux/arm64/kubelet"
+	baseURL := "https://dl.k8s.io/release/" + version + "/bin/linux/" + arch + "/kubelet"
 	expected, err := fetchChecksum(ctx, baseURL+".sha256")
 	if err != nil {
 		return "", err

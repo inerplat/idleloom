@@ -2,7 +2,6 @@ package devruntime
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,10 +9,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/procgroup"
 )
 
 // MLXServeConfig starts mlx_lm.server, the OpenAI-compatible HTTP server that
@@ -69,7 +67,7 @@ func StartMLXServe(ctx context.Context, config MLXServeConfig) (*MLXServeProcess
 		"-m", "mlx_lm.server", "--model", config.Layout.Model, "--host", host, "--port", port)
 	command.Dir = config.Layout.Work
 	command.Env = runnerEnv(config.Layout.Work)
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	procgroup.SetGroup(command)
 	stderr := &boundedBuffer{limit: maxStderrBytes}
 	command.Stdout = stderr
 	command.Stderr = stderr
@@ -172,7 +170,7 @@ func (p *MLXServeProcess) Stop() error {
 	if transport, ok := p.client.Transport.(*http.Transport); ok {
 		transport.CloseIdleConnections()
 	}
-	if err := unix.Kill(-pid, unix.SIGKILL); err != nil && !errors.Is(err, unix.ESRCH) {
+	if err := procgroup.Kill(pid); err != nil {
 		return fmt.Errorf("kill MLX server process group: %w", err)
 	}
 	select {

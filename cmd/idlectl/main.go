@@ -52,7 +52,7 @@ import (
 	"sigs.k8s.io/yaml"
 )
 
-const usageText = `idlectl manages Idleloom compute on this Mac.
+const usageText = `idlectl manages Idleloom compute on this machine.
 
 Native Metal — run macOS workloads on this Mac and project observability-only Nodes:
   idlectl join HOST [flags]
@@ -60,7 +60,7 @@ Native Metal — run macOS workloads on this Mac and project observability-only 
   idlectl recipe (list | show NAME@VERSION | render NAME@VERSION --name RUN) [flags]
   idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]
 
-Worker — run a schedulable Kubernetes Node in a Linux VM on this Mac:
+Worker — run a schedulable Kubernetes Node on this machine:
   idlectl create worker NAME [flags]
   idlectl start worker [NAME] [flags]
   idlectl stop worker [NAME] [flags]
@@ -122,7 +122,7 @@ var newWireKubeLifecycle = func(ctx context.Context, kubeconfig, kubeContext str
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	handled, internalErr := runInternalBinary(ctx, filepath.Base(os.Args[0]), os.Args[1:])
+	handled, internalErr := runInternalBinary(ctx, invokedName(os.Args[0]), os.Args[1:])
 	if !handled && internalErr == nil {
 		handled, internalErr = runInternalCommand(ctx, os.Args[1:])
 	}
@@ -136,7 +136,7 @@ func main() {
 	if handled {
 		return
 	}
-	if filepath.Base(os.Args[0]) != "idlectl" {
+	if !strings.EqualFold(invokedName(os.Args[0]), "idlectl") {
 		_, _ = fmt.Fprintf(os.Stderr, "unsupported executable name %q: this binary must be invoked as idlectl; the internal service names are reserved for installed launchd services\n", filepath.Base(os.Args[0]))
 		os.Exit(2)
 	}
@@ -217,6 +217,19 @@ func versionText() string {
 	return fmt.Sprintf("idlectl %s (%s, %s, %s/%s)", version, commit, buildDate, runtime.GOOS, runtime.GOARCH)
 }
 
+// invokedName is the program name without the executable suffix a platform
+// adds. A Windows build is necessarily idlectl.exe, and comparing the raw
+// base name rejected it outright — the binary refused to run at all there.
+// The reserved internal service names never carry a suffix, so trimming one
+// cannot let a name through that would otherwise be refused.
+func invokedName(argv0 string) string {
+	name := filepath.Base(argv0)
+	if suffix := filepath.Ext(name); strings.EqualFold(suffix, ".exe") {
+		name = name[:len(name)-len(suffix)]
+	}
+	return name
+}
+
 func runInternalBinary(ctx context.Context, binary string, args []string) (bool, error) {
 	if strings.HasPrefix(binary, "io.idleloom.link.") {
 		return true, runLink(ctx, args)
@@ -267,7 +280,7 @@ func runMaintain(ctx context.Context, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	return idleloom.NewApp(os.Stdout, os.Stderr).Maintain(ctx, *statePath)
+	return idleloom.NewApp(os.Stdout, os.Stderr, workerOptionsFromState(*statePath)).Maintain(ctx, *statePath)
 }
 
 func runJoin(ctx context.Context, args []string) error {
@@ -1125,7 +1138,7 @@ func runGet(ctx context.Context, args []string) error {
 	}
 	if resourceName == resourceWorkers {
 		if *namespace != "" || *allNamespaces {
-			return fmt.Errorf("workers are local to this Mac; do not use --namespace or --all-namespaces")
+			return fmt.Errorf("workers are local to this machine; do not use --namespace or --all-namespaces")
 		}
 		return getWorkers(ctx, os.Stdout, *kubeconfig, *kubeContext, *statePath, name, *output)
 	}

@@ -4,8 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -100,13 +100,6 @@ func TestGVProxyConfigUsesStaticGuestIdentity(t *testing.T) {
 		if !strings.Contains(config, expected) {
 			t.Errorf("gvproxy configuration is missing %q:\n%s", expected, config)
 		}
-	}
-}
-
-func TestRuntimeProcessesStartInTheirOwnSession(t *testing.T) {
-	command := detachedCommand("true")
-	if command.SysProcAttr == nil || !command.SysProcAttr.Setsid {
-		t.Fatal("runtime process is not detached into its own session")
 	}
 }
 
@@ -241,8 +234,19 @@ func TestValidateRejectsNonEmptyUnmarkedPlannedDirectory(t *testing.T) {
 	}
 }
 
+// longRunningCommand names a process that stays alive long enough to be
+// terminated, on whichever platform the test runs.
+func longRunningCommand() (string, []string) {
+	if runtime.GOOS == "windows" {
+		// ping counts down one reply per second, so 31 echoes is about 30s.
+		return "ping", []string{"-n", "31", "127.0.0.1"}
+	}
+	return "sleep", []string{"30"}
+}
+
 func TestTerminatePIDWaitsForProcessExit(t *testing.T) {
-	command := detachedCommand("sleep", "30")
+	name, args := longRunningCommand()
+	command := detachedCommand(name, args...)
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -250,11 +254,10 @@ func TestTerminatePIDWaitsForProcessExit(t *testing.T) {
 	if err := command.Process.Release(); err != nil {
 		t.Fatal(err)
 	}
-	if err := terminatePID(pid, "sleep", 2*time.Second); err != nil {
+	if err := terminatePID(pid, name, 2*time.Second); err != nil {
 		t.Fatalf("terminatePID: %v", err)
 	}
-	process, _ := os.FindProcess(pid)
-	if process != nil && process.Signal(syscall.Signal(0)) == nil && !processIsZombie(pid) {
+	if !processHasExited(pid) {
 		t.Fatalf("process %d is still running after terminatePID", pid)
 	}
 }

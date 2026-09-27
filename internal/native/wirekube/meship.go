@@ -12,38 +12,16 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
+
+	"github.com/inerplat/idleloom/internal/meship"
 )
 
 const ipClaimNamespace = "idleloom-system"
 
+// meshIPForName derives the deterministic mesh address for a name. Workers
+// and Native hosts have to agree on it, so both go through one allocator.
 func meshIPForName(name, meshCIDR string) (string, error) {
-	_, network, err := net.ParseCIDR(meshCIDR)
-	if err != nil {
-		return "", fmt.Errorf("invalid mesh CIDR %q: %w", meshCIDR, err)
-	}
-	base := network.IP.To4()
-	if base == nil {
-		return "", fmt.Errorf("mesh CIDR must be IPv4")
-	}
-	ones, bits := network.Mask.Size()
-	if bits != 32 || ones > 30 {
-		return "", fmt.Errorf("mesh CIDR is too small")
-	}
-	size := uint32(1) << uint(bits-ones)
-	const (
-		fnvOffset = uint32(2166136261)
-		fnvPrime  = uint32(16777619)
-	)
-	hash := fnvOffset
-	for index := 0; index < len(name); index++ {
-		hash ^= uint32(name[index])
-		hash *= fnvPrime
-	}
-	offset := hash%(size-2) + 1
-	baseValue := uint32(base[0])<<24 | uint32(base[1])<<16 | uint32(base[2])<<8 | uint32(base[3])
-	value := baseValue + offset
-	ip := net.IPv4(byte(value>>24), byte(value>>16), byte(value>>8), byte(value))
-	return ip.String() + "/32", nil
+	return meship.IPForName(name, meshCIDR)
 }
 
 func validateMeshIPAvailability(ctx context.Context, client dynamic.Interface, peerName, displayName, meshCIDR string) (string, error) {

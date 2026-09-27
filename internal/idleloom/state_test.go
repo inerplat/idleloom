@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/inerplat/idleloom/internal/syncdir"
 )
 
 func TestStateRoundTrip(t *testing.T) {
@@ -117,5 +119,31 @@ func TestLoadStateRejectsDifferentRuntimeOwner(t *testing.T) {
 	}
 	if _, err := LoadState(path); err == nil {
 		t.Fatal("state accepted a runtime owned by another node")
+	}
+}
+
+// TestAtomicWriteFileWorksInADirectoryItDidNotCreate exercises the durability
+// step that differs by platform: Unix flushes the directory entry, Windows
+// cannot and must not try. The write has to succeed either way.
+func TestAtomicWriteFileWorksInADirectoryItDidNotCreate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	if err := atomicWriteFile(path, []byte("first\n"), 0o600); err != nil {
+		t.Fatalf("first write: %v", err)
+	}
+	// Replacing an existing file is the case that matters: every state save
+	// after enrollment takes this path.
+	if err := atomicWriteFile(path, []byte("second\n"), 0o600); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "second\n" {
+		t.Errorf("file contents = %q", data)
+	}
+	if err := syncdir.Sync(dir); err != nil {
+		t.Errorf("syncdir.Sync: %v", err)
 	}
 }

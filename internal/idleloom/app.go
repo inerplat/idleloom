@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -47,6 +46,8 @@ type InitOptions struct {
 	StatePath      string
 	DryRun         bool
 	// RegistryMirrors are raw HOST=URL specifications parsed and validated at
+	// Distribution names the WSL2 distribution to enroll on a Windows host.
+	Distribution string
 	// Init time. CredentialProvider* are host paths validated before any
 	// side effect (including under --dry-run).
 	RegistryMirrors          []string
@@ -60,36 +61,44 @@ type App struct {
 	Err                      io.Writer
 	Now                      func() time.Time
 	Runtime                  WorkerRuntime
-	DownloadKubelet          func(context.Context, string) (string, error)
+	DownloadKubelet          func(context.Context, string, string) (string, error)
 	SaveImage                func(context.Context, string, []string, string) error
 	ApproveKubeletServingCSR func(context.Context, *Cluster, string, string, time.Time, bool, time.Duration) error
 	StartMaintainer          func(context.Context, string, io.Writer) error
 	StepIndex                int
 }
 
-func NewApp(out, errOut io.Writer) *App {
-	runner := ExecRunner{}
+// NewApp builds the worker application with the backend for this host:
+// krunkit on macOS, the host itself on Linux, and a WSL2 distribution on
+// Windows. WorkerOptions carries the settings only some backends read.
+func NewApp(out, errOut io.Writer, opts WorkerOptions) *App {
 	return &App{
-		Out: out,
-		Err: errOut,
-		Now: time.Now,
-		Runtime: KrunkitRuntime{
-			Runner: runner,
-			Out:    out,
-			Err:    errOut,
-		},
+		Out:       out,
+		Err:       errOut,
+		Now:       time.Now,
+		Runtime:   defaultRuntime(ExecRunner{}, out, errOut, opts),
 		SaveImage: SaveImage,
 	}
 }
 
+// WorkerOptions are host-level settings chosen before a cluster is contacted.
+type WorkerOptions struct {
+	// Distribution names the WSL2 distribution to enrol. It is ignored off
+	// Windows, and defaults to the machine's default distribution.
+	Distribution string
+}
+
+// ProvisionsVM reports whether this host's backend builds a virtual machine.
+// The CPU, memory, and disk settings describe that machine, so they are only
+// meaningful — and only worth asking about — when there is one.
+func (a *App) ProvisionsVM() bool {
+	return a.Runtime.Backend().ProvisionsVM()
+}
+
 func (a *App) Init(ctx context.Context, opts InitOptions) error {
-	if err := validateInitOptions(opts); err != nil {
+	if err := validateInitOptions(opts, a.Runtime.Backend()); err != nil {
 		return err
 	}
-	if runtime.GOOS != "darwin" || runtime.GOARCH != "arm64" {
-		return fmt.Errorf("the krunkit worker backend currently requires macOS on Apple Silicon")
-	}
-
 	mirrors, mirrorWarnings, err := parseRegistryMirrors(opts.RegistryMirrors)
 	if err != nil {
 		return err
@@ -97,11 +106,11 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	for _, warning := range mirrorWarnings {
 		_, _ = fmt.Fprintf(a.Err, "warning: %s\n", warning)
 	}
-	if err := validateCredentialProviders(opts.CredentialProviderBins, opts.CredentialProviderConfig, opts.CredentialProviderEnv); err != nil {
+	if err := validateCredentialProviders(opts.CredentialProviderBins, opts.CredentialProviderConfig, opts.CredentialProviderEnv, a.Runtime.GuestArch()); err != nil {
 		return err
 	}
 
-	a.step("Checking the Apple Silicon host")
+	a.step(a.preflightStepMessage())
 	if err := a.Runtime.Preflight(ctx); err != nil {
 		return err
 	}
@@ -171,10 +180,14 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		return err
 	}
 	state := State{
-		NodeName:        opts.NodeName,
-		KubeconfigPath:  cluster.KubeconfigPath,
-		Context:         cluster.Context,
-		Network:         opts.Network,
+		NodeName:       opts.NodeName,
+		KubeconfigPath: cluster.KubeconfigPath,
+		Context:        cluster.Context,
+		Network:        opts.Network,
+		// What the runtime bound to, which is the resolved default when the
+		// caller named no distribution. Recording the empty string would let
+		// a later delete follow whatever the default had become.
+		Distribution:    a.Runtime.Environment(),
 		Taint:           opts.Taint,
 		TaintConfigured: true,
 		TokenTTLSeconds: durationSecondsCeil(opts.TokenTTL),
@@ -187,38 +200,58 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		CredentialProviderConfig: opts.CredentialProviderConfig,
 		CredentialProviderEnv:    opts.CredentialProviderEnv,
 	}
-	reservationID, err := NewNetworkReservationID()
-	if err != nil {
-		return err
-	}
-	state.NetworkReservationID = reservationID
-	if err := SaveState(statePath, state); err != nil {
-		return errors.Join(err, removeStateFile(statePath))
-	}
-
-	a.step("Reserving an isolated worker network")
-	runtimeNetwork, networkLease, networkLeaseUID, err := ReserveRuntimeNetwork(ctx, cluster.Client, opts.NodeName, state.NetworkReservationID)
-	if err != nil {
-		return fmt.Errorf("%w; reservation intent was saved to %s for recovery", err, statePath)
-	}
-	state.NetworkLease = networkLease
-	state.NetworkLeaseUID = networkLeaseUID
-	state.Runtime = RuntimeState{
-		NodeName:   opts.NodeName,
-		MACAddress: runtimeNetwork.MAC,
-		Subnet:     runtimeNetwork.Subnet,
-		GatewayIP:  runtimeNetwork.GatewayIP,
-		GuestIP:    runtimeNetwork.GuestIP,
-		HostIP:     runtimeNetwork.HostIP,
-	}
-	if err := SaveState(statePath, state); err != nil {
-		releaseErr := ReleaseRuntimeNetwork(context.Background(), cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID)
-		if releaseErr != nil {
-			return errors.Join(err, fmt.Errorf("release network reservation: %w; recovery state remains at %s", releaseErr, statePath))
+	var runtimeNetwork RuntimeNetwork
+	if a.Runtime.Backend().ProvisionsVM() {
+		reservationID, err := NewNetworkReservationID()
+		if err != nil {
+			return err
 		}
-		return errors.Join(err, removeStateFile(statePath))
+		state.NetworkReservationID = reservationID
+		if err := SaveState(statePath, state); err != nil {
+			return errors.Join(err, removeStateFile(statePath))
+		}
+
+		a.step("Reserving an isolated worker network")
+		network, networkLease, networkLeaseUID, err := ReserveRuntimeNetwork(ctx, cluster.Client, opts.NodeName, state.NetworkReservationID)
+		if err != nil {
+			return fmt.Errorf("%w; reservation intent was saved to %s for recovery", err, statePath)
+		}
+		runtimeNetwork = network
+		state.NetworkLease = networkLease
+		state.NetworkLeaseUID = networkLeaseUID
+		state.Runtime = RuntimeState{
+			NodeName:   opts.NodeName,
+			MACAddress: runtimeNetwork.MAC,
+			Subnet:     runtimeNetwork.Subnet,
+			GatewayIP:  runtimeNetwork.GatewayIP,
+			GuestIP:    runtimeNetwork.GuestIP,
+			HostIP:     runtimeNetwork.HostIP,
+		}
+		if err := SaveState(statePath, state); err != nil {
+			releaseErr := ReleaseRuntimeNetwork(context.Background(), cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID)
+			if releaseErr != nil {
+				return errors.Join(err, fmt.Errorf("release network reservation: %w; recovery state remains at %s", releaseErr, statePath))
+			}
+			return errors.Join(err, removeStateFile(statePath))
+		}
+	} else {
+		// An in-place worker shares a network stack Idleloom does not own, so
+		// its address cannot come from a private subnet. WireKube already
+		// derives a unique overlay address from the node name; taking the node
+		// IP from there keeps the address stable, collision-checked, and
+		// routable by every mesh peer without a cluster-wide lease.
+		a.step("Deriving the worker mesh address")
+		address, err := ReserveMeshAddress(ctx, cluster.Client, opts.NodeName, wireKube.MeshCIDR)
+		if err != nil {
+			return errors.Join(err, removeStateFile(statePath))
+		}
+		runtimeNetwork = RuntimeNetwork{GuestIP: address, Subnet: wireKube.MeshCIDR}
+		state.Runtime = RuntimeState{NodeName: opts.NodeName, GuestIP: address, Subnet: wireKube.MeshCIDR}
+		if err := SaveState(statePath, state); err != nil {
+			return errors.Join(err, removeStateFile(statePath))
+		}
 	}
-	_, _ = fmt.Fprintf(a.Out, "  Guest:   %s (%s)\n", runtimeNetwork.GuestIP, runtimeNetwork.Subnet)
+	_, _ = fmt.Fprintf(a.Out, "  Node IP: %s (%s)\n", runtimeNetwork.GuestIP, runtimeNetwork.Subnet)
 
 	plannedRuntime, err := a.Runtime.Plan(ctx, RuntimeConfig{
 		NodeName: opts.NodeName, CPUs: opts.CPUs, MemoryMB: opts.MemoryMB,
@@ -240,7 +273,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		return errors.Join(err, removeStateFile(statePath))
 	}
 
-	a.step("Creating the krunkit worker VM")
+	a.step(a.createStepMessage())
 	if err := a.Runtime.Create(ctx, &state.Runtime); err != nil {
 		saveErr := SaveState(statePath, state)
 		return errors.Join(fmt.Errorf("%w; recovery state was saved to %s", err, statePath), saveErr)
@@ -262,22 +295,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		}
 	}()
 
-	bundlePath, cleanupBundle, err := CreateWorkerBundle(BundleConfig{
-		NodeName:      opts.NodeName,
-		Taint:         opts.Taint,
-		Server:        cluster.Server,
-		TLSServerName: cluster.TLSServerName,
-		CAData:        cluster.CAData,
-		Token:         token.Value,
-		ClusterDNS:    cluster.ClusterDNS,
-		ClusterDomain: cluster.ClusterDomain,
-		KubeletPath:   kubeletPath,
-
-		RegistryMirrors:          mirrors,
-		CredentialProviderBins:   opts.CredentialProviderBins,
-		CredentialProviderConfig: opts.CredentialProviderConfig,
-		CredentialProviderEnv:    opts.CredentialProviderEnv,
-	})
+	bundlePath, cleanupBundle, err := CreateWorkerBundle(a.workerBundleConfig(state, cluster, token.Value, kubeletPath))
 	if err != nil {
 		return err
 	}
@@ -290,7 +308,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	if err := waitForNode(ctx, cluster, opts.NodeName, opts.Timeout); err != nil {
 		return err
 	}
-	if err := labelNode(ctx, cluster, opts.NodeName, opts.Network); err != nil {
+	if err := labelNode(ctx, cluster, opts.NodeName, opts.Network, a.Runtime.Backend()); err != nil {
 		return err
 	}
 	a.step("Approving the kubelet serving certificate")
@@ -376,8 +394,10 @@ func (a *App) Start(ctx context.Context, statePath string, override ClusterOverr
 	if err != nil {
 		return err
 	}
-	if err := ValidateRuntimeNetworkReservation(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime); err != nil {
-		return err
+	{
+		if err := ValidateNetworkReservationIfHeld(ctx, cluster.Client, state); err != nil {
+			return err
+		}
 	}
 	if state.Phase == PhaseEnrolling {
 		return a.resumeEnrollment(ctx, resolvedPath, &state, cluster, timeout)
@@ -414,7 +434,7 @@ func (a *App) Start(ctx context.Context, statePath string, override ClusterOverr
 			return err
 		}
 	}
-	a.step("Starting the krunkit worker VM")
+	a.step(a.lifecycleStepMessage("Starting", false))
 	startNotBefore := state.CreatedAt
 	if err := a.Runtime.Start(ctx, &state.Runtime); err != nil {
 		return err
@@ -580,7 +600,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 		return fmt.Errorf("an enrolling worker state is required")
 	}
 	if state.Runtime.Planned {
-		return fmt.Errorf("worker enrollment stopped before the VM was created; delete the local state with \"idlectl delete worker %s --local-only --force --state %s\", then run \"idlectl create worker\" again", state.NodeName, statePath)
+		return fmt.Errorf("worker enrollment stopped before %s was prepared; delete the local state with \"idlectl delete worker %s --local-only --force --state %s\", then run \"idlectl create worker\" again", a.plannedSubject(), state.NodeName, statePath)
 	}
 	_, nodeErr := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
 	if nodeErr != nil && !apierrors.IsNotFound(nodeErr) {
@@ -638,18 +658,10 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 				_, _ = fmt.Fprintf(a.Err, "warning: %v\n", err)
 			}
 		}()
-		if err := validateCredentialProviders(state.CredentialProviderBins, state.CredentialProviderConfig, state.CredentialProviderEnv); err != nil {
+		if err := validateCredentialProviders(state.CredentialProviderBins, state.CredentialProviderConfig, state.CredentialProviderEnv, a.Runtime.GuestArch()); err != nil {
 			return fmt.Errorf("cannot rebuild the interrupted worker bundle: %w", err)
 		}
-		bundlePath, cleanupBundle, err := CreateWorkerBundle(BundleConfig{
-			NodeName: state.NodeName, Taint: state.Taint, Server: cluster.Server,
-			TLSServerName: cluster.TLSServerName, CAData: cluster.CAData, Token: token.Value,
-			ClusterDNS: cluster.ClusterDNS, ClusterDomain: cluster.ClusterDomain, KubeletPath: kubeletPath,
-			RegistryMirrors:          state.RegistryMirrors,
-			CredentialProviderBins:   state.CredentialProviderBins,
-			CredentialProviderConfig: state.CredentialProviderConfig,
-			CredentialProviderEnv:    state.CredentialProviderEnv,
-		})
+		bundlePath, cleanupBundle, err := CreateWorkerBundle(a.workerBundleConfig(*state, cluster, token.Value, kubeletPath))
 		if err != nil {
 			return err
 		}
@@ -662,7 +674,7 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 	if err := waitForNode(ctx, cluster, state.NodeName, timeout); err != nil {
 		return err
 	}
-	if err := labelNode(ctx, cluster, state.NodeName, state.Network); err != nil {
+	if err := labelNode(ctx, cluster, state.NodeName, state.Network, a.Runtime.Backend()); err != nil {
 		return err
 	}
 	a.step("Approving the kubelet serving certificate")
@@ -700,14 +712,96 @@ func (a *App) resumeEnrollment(ctx context.Context, statePath string, state *Sta
 	return nil
 }
 
-func (a *App) downloadKubelet(ctx context.Context, version string) (string, error) {
-	if a.DownloadKubelet != nil {
-		return a.DownloadKubelet(ctx, version)
+// preflightStepMessage names the preflight step for the active backend.
+func (a *App) preflightStepMessage() string {
+	switch a.Runtime.Backend() {
+	case RuntimeKrunkit:
+		return "Checking the Apple Silicon host"
+	case RuntimeWSL2:
+		return "Checking the WSL2 environment"
+	default:
+		return "Checking the host"
 	}
-	return DownloadKubelet(ctx, version)
 }
 
-// LoadImage loads local container image(s) directly into the worker VM's
+// workerBundleConfig describes the bundle for a worker.
+//
+// Enrollment and the resume path both install one, and they have to agree on
+// every field. They did not: the resume path rebuilt the bundle without the
+// node address, so a worker that finished enrolling through a resume
+// re-registered with its own detected address instead of the mesh one. Both
+// now read the same saved state.
+func (a *App) workerBundleConfig(state State, cluster *Cluster, token, kubeletPath string) BundleConfig {
+	config := BundleConfig{
+		NodeName:      state.NodeName,
+		Taint:         state.Taint,
+		Server:        cluster.Server,
+		TLSServerName: cluster.TLSServerName,
+		CAData:        cluster.CAData,
+		Token:         token,
+		ClusterDNS:    cluster.ClusterDNS,
+		ClusterDomain: cluster.ClusterDomain,
+		KubeletPath:   kubeletPath,
+
+		RegistryMirrors:          state.RegistryMirrors,
+		CredentialProviderBins:   state.CredentialProviderBins,
+		CredentialProviderConfig: state.CredentialProviderConfig,
+		CredentialProviderEnv:    state.CredentialProviderEnv,
+	}
+	// Only the in-place backends pin the address. A krunkit VM owns its
+	// subnet and detecting the address in the guest stays correct even if
+	// gvproxy ever hands out a different one than was recorded.
+	if !a.Runtime.Backend().ProvisionsVM() {
+		config.NodeIP = state.Runtime.GuestIP
+	}
+	return config
+}
+
+// plannedSubject names what enrollment would have created, for a message
+// about an enrollment that stopped before it did.
+func (a *App) plannedSubject() string {
+	if a.Runtime.Backend().ProvisionsVM() {
+		return "the VM"
+	}
+	return "the host"
+}
+
+// lifecycleStepMessage names a start, stop, or delete step for the active
+// backend. Only krunkit has a VM to act on; the in-place backends act on the
+// worker's services inside an environment that outlives them. local marks the
+// steps that deliberately skip the cluster.
+func (a *App) lifecycleStepMessage(verb string, local bool) string {
+	subject := "worker"
+	if a.Runtime.Backend().ProvisionsVM() {
+		subject = "krunkit worker VM"
+	}
+	if local {
+		return verb + " the local " + subject
+	}
+	return verb + " the " + subject
+}
+
+// createStepMessage names the provisioning step for the active backend.
+func (a *App) createStepMessage() string {
+	switch a.Runtime.Backend() {
+	case RuntimeKrunkit:
+		return "Creating the krunkit worker VM"
+	case RuntimeWSL2:
+		return "Preparing the WSL2 worker environment"
+	default:
+		return "Preparing the host as a worker"
+	}
+}
+
+func (a *App) downloadKubelet(ctx context.Context, version string) (string, error) {
+	arch := a.Runtime.GuestArch()
+	if a.DownloadKubelet != nil {
+		return a.DownloadKubelet(ctx, version, arch)
+	}
+	return DownloadKubelet(ctx, version, arch)
+}
+
+// LoadImage loads local container image(s) directly into the worker's
 // containerd so Pods with imagePullPolicy IfNotPresent or Never can use them
 // without a registry. Either refs (exported with a container engine) or a
 // pre-saved --archive tar is uploaded and imported.
@@ -836,7 +930,7 @@ func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverri
 		return err
 	}
 	if localOnly {
-		a.step("Stopping the local krunkit worker VM")
+		a.step(a.lifecycleStepMessage("Stopping", true))
 		if err := a.Runtime.Stop(ctx, state.Runtime); err != nil {
 			return err
 		}
@@ -854,8 +948,10 @@ func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverri
 	if err != nil {
 		return err
 	}
-	if err := ValidateRuntimeNetworkReservation(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime); err != nil {
-		return err
+	{
+		if err := ValidateNetworkReservationIfHeld(ctx, cluster.Client, state); err != nil {
+			return err
+		}
 	}
 	node, err := cluster.Client.CoreV1().Nodes().Get(ctx, state.NodeName, metav1.GetOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
@@ -882,7 +978,7 @@ func (a *App) Stop(ctx context.Context, statePath string, override ClusterOverri
 		}
 		return fmt.Errorf("worker still has active workload pods: %s; drain or remove them before stopping", strings.Join(busy, ", "))
 	}
-	a.step("Stopping the krunkit worker VM")
+	a.step(a.lifecycleStepMessage("Stopping", false))
 	if err := a.Runtime.Stop(ctx, state.Runtime); err != nil {
 		return err
 	}
@@ -911,7 +1007,7 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 		return err
 	}
 	if localOnly {
-		a.step("Deleting the local krunkit worker VM")
+		a.step(a.lifecycleStepMessage("Deleting", true))
 		state.Phase = PhaseLocalDeleting
 		if err := SaveState(resolvedPath, state); err != nil {
 			return err
@@ -1003,7 +1099,7 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 			}
 			return errors.Join(err, stateErr, schedulingErr)
 		}
-		a.step("Deleting the krunkit worker VM")
+		a.step(a.lifecycleStepMessage("Deleting", false))
 		if err := a.Runtime.Delete(ctx, state.Runtime); err != nil {
 			return err
 		}
@@ -1019,8 +1115,10 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 			return fmt.Errorf("delete Kubernetes node %s: %w", state.NodeName, err)
 		}
 	}
-	if err := ReleaseRuntimeNetwork(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID); err != nil {
-		return err
+	if state.HoldsNetworkReservation() {
+		if err := ReleaseRuntimeNetwork(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID); err != nil {
+			return err
+		}
 	}
 	if err := cleanupMaintainerFiles(resolvedPath); err != nil {
 		return err
@@ -1053,24 +1151,29 @@ func removeStateFile(path string) error {
 	return nil
 }
 
-func validateInitOptions(opts InitOptions) error {
+func validateInitOptions(opts InitOptions, backend RuntimeKind) error {
 	if problems := validation.IsDNS1123Subdomain(opts.NodeName); len(problems) > 0 {
 		return fmt.Errorf("invalid node name %q: %v", opts.NodeName, problems)
 	}
-	if opts.CPUs < 2 {
-		return fmt.Errorf("at least 2 CPUs are required")
-	}
-	if opts.MemoryMB < 4096 {
-		return fmt.Errorf("at least 4096 MiB of memory is required by the krunkit GPU VM")
-	}
-	if opts.DiskMB < 6144 {
-		return fmt.Errorf("at least 6144 MiB of disk is required")
+	// Sizing describes a virtual machine Idleloom builds. An in-place worker
+	// runs in an environment that already exists and is sized elsewhere — by
+	// the host itself, or by .wslconfig — so these bounds do not apply.
+	if backend.ProvisionsVM() {
+		if opts.CPUs < 2 {
+			return fmt.Errorf("at least 2 CPUs are required")
+		}
+		if opts.MemoryMB < 4096 {
+			return fmt.Errorf("at least 4096 MiB of memory is required by the krunkit GPU VM")
+		}
+		if opts.DiskMB < 6144 {
+			return fmt.Errorf("at least 6144 MiB of disk is required")
+		}
 	}
 	if err := validateTaint(opts.Taint); err != nil {
 		return err
 	}
 	if opts.Network != NetworkWireKube {
-		return fmt.Errorf("network must be %q; direct routing is not supported by the gvproxy backend", NetworkWireKube)
+		return fmt.Errorf("network must be %q; Idleloom reaches workers through the WireKube mesh", NetworkWireKube)
 	}
 	if opts.Timeout <= 0 || opts.TokenTTL <= 0 {
 		return fmt.Errorf("timeouts must be positive")
@@ -1137,12 +1240,18 @@ func activeWorkloadPods(ctx context.Context, cluster *Cluster, nodeName string) 
 	return active, nil
 }
 
-func labelNode(ctx context.Context, cluster *Cluster, nodeName, network string) error {
+func labelNode(ctx context.Context, cluster *Cluster, nodeName, network string, backend RuntimeKind) error {
 	labels := map[string]string{
 		"app.kubernetes.io/managed-by": "idleloom",
 		"idleloom-worker":              "true",
-		"idleloom-runtime":             "krunkit",
-		"idleloom-accelerator":         "apple-vulkan",
+		"idleloom-runtime":             string(backend),
+	}
+	// Only the krunkit VM exposes Apple's GPU through the Vulkan DRA driver.
+	// An in-place worker sees whatever the host exposes to Linux directly, so
+	// accelerators there are discovered by the cluster's own device plugins
+	// rather than claimed by Idleloom.
+	if backend == RuntimeKrunkit {
+		labels["idleloom-accelerator"] = "apple-vulkan"
 	}
 	if network == NetworkWireKube {
 		labels["wirekube.io/vpn-enabled"] = "true"

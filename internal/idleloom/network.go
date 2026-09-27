@@ -119,6 +119,23 @@ func FindRuntimeNetworkReservation(ctx context.Context, client kubernetes.Interf
 	return runtimeNetworkFromIndex(nodeName, index), match.Name, string(match.UID), true, nil
 }
 
+// ValidateNetworkReservationIfHeld is the reservation check with the guard
+// that every caller needs attached to it.
+//
+// Only a VM backend reserves a subnet. An in-place worker takes its address
+// from the WireKube mesh and records no lease, so the check below reports
+// "reservation identity is incomplete" for one every time. Three of the four
+// lifecycle paths guarded against that separately and the fourth, the
+// certificate maintainer, did not — so its every pass failed before reaching
+// the CSR approval, silently, and would only have surfaced months later when
+// the serving certificate it was meant to be rotating expired.
+func ValidateNetworkReservationIfHeld(ctx context.Context, client kubernetes.Interface, state State) error {
+	if !state.HoldsNetworkReservation() {
+		return nil
+	}
+	return ValidateRuntimeNetworkReservation(ctx, client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime)
+}
+
 func ValidateRuntimeNetworkReservation(ctx context.Context, client kubernetes.Interface, leaseName, leaseUID, nodeName, reservationID string, runtime RuntimeState) error {
 	if leaseName == "" || leaseUID == "" || reservationID == "" {
 		return fmt.Errorf("worker network reservation identity is incomplete")

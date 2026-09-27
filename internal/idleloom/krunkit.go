@@ -17,10 +17,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
+	"github.com/inerplat/idleloom/internal/filelock"
 )
 
 const (
@@ -36,6 +35,16 @@ type KrunkitRuntime struct {
 	Out    io.Writer
 	Err    io.Writer
 }
+
+func (k KrunkitRuntime) Backend() RuntimeKind { return RuntimeKrunkit }
+
+// GuestArch is fixed: krunkit runs on Apple Silicon and boots an ARM64 Ubuntu
+// cloud image.
+func (k KrunkitRuntime) GuestArch() string { return "arm64" }
+
+// Environment is empty: this backend builds the VM it enrols, so there is no
+// pre-existing environment to pick between.
+func (k KrunkitRuntime) Environment() string { return "" }
 
 func (k KrunkitRuntime) Preflight(ctx context.Context) error {
 	for _, binary := range []string{"krunkit", "gvproxy", "qemu-img", "ssh", "scp", "ssh-keygen", "hdiutil"} {
@@ -347,7 +356,7 @@ func (k KrunkitRuntime) stopUnlocked(ctx context.Context, state RuntimeState) er
 		if err := requestVMStop(ctx, krunkitSocket(state)); err != nil {
 			process, _ := os.FindProcess(pid)
 			if process != nil {
-				_ = process.Signal(syscall.SIGTERM)
+				_ = requestProcessTermination(process)
 			}
 		}
 		if err := waitForPIDExit(ctx, pid, "krunkit", 30*time.Second); err != nil {
@@ -624,12 +633,11 @@ func krunkitArgs(state RuntimeState) []string {
 	}
 }
 
-func detachedCommand(name string, args ...string) *exec.Cmd {
-	command := exec.Command(name, args...)
-	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	return command
-}
-
+// renderCloudInit builds the first-boot configuration for a krunkit worker
+// VM. The base system is brought up by the same script the in-place backends
+// run directly, so a worker is prepared identically whichever backend built
+// it; cloud-init only adds what is specific to a fresh VM — the hostname, the
+// login Idleloom uses to reach it, and growing the root filesystem.
 func renderCloudInit(nodeName, publicKey string) string {
 	return fmt.Sprintf(`#cloud-config
 hostname: %s
@@ -650,46 +658,15 @@ users:
     ssh_authorized_keys:
       - %s
 write_files:
-  - path: /etc/modules-load.d/idleloom.conf
-    permissions: '0644'
-    content: |
-      overlay
-      br_netfilter
-  - path: /etc/sysctl.d/99-idleloom-kubernetes.conf
-    permissions: '0644'
-    content: |
-      net.ipv4.ip_forward = 1
-      net.bridge.bridge-nf-call-iptables = 1
-      net.bridge.bridge-nf-call-ip6tables = 1
   - path: /usr/local/sbin/idleloom-prepare
     permissions: '0755'
     content: |
-      #!/bin/bash
-      set -euo pipefail
-      swapoff -a
-      sed -i.bak '/[[:space:]]swap[[:space:]]/d' /etc/fstab
-      modprobe overlay
-      modprobe br_netfilter
-      sysctl --system >/dev/null
-      export DEBIAN_FRONTEND=noninteractive
-      apt-get update
-      apt-get install -y --no-install-recommends containerd containernetworking-plugins conntrack ebtables ethtool ipset iptables nfs-common open-iscsi socat
-      apt-get clean
-      install -d -m 0755 /opt/cni/bin
-      for plugin in /usr/lib/cni/*; do
-        [ -f "$plugin" ] || continue
-        ln -sf "$plugin" "/opt/cni/bin/${plugin##*/}"
-      done
-      install -d -m 0755 /etc/containerd
-      containerd config default > /etc/containerd/config.toml
-      sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
-      systemctl enable --now containerd.service iscsid.service
-      install -d -m 0755 /var/lib/idleloom
-      touch /var/lib/idleloom/.prepared
+      #!/bin/sh
+%s
 runcmd:
   - [/usr/local/sbin/idleloom-prepare]
 final_message: "Idleloom base system is ready"
-`, nodeName, publicKey)
+`, nodeName, publicKey, indentScript(renderPrepareScript(), "      "))
 }
 
 func downloadUbuntuImage(ctx context.Context) (string, error) {
@@ -958,31 +935,42 @@ func recoverRuntimeMetadata(state *RuntimeState) (bool, error) {
 	return true, nil
 }
 
-func validateRuntimeOwnership(state RuntimeState) error {
+// validateRuntimeMarker checks that the runtime directory is one Idleloom
+// created for this node. Every backend keeps a marker there; only the ones
+// that build a VM also own disk images beside it.
+func validateRuntimeMarker(state RuntimeState) (string, error) {
 	if state.NodeName == "" {
-		return fmt.Errorf("runtime state has no node name")
+		return "", fmt.Errorf("runtime state has no node name")
 	}
 	canonical, err := filepath.EvalSymlinks(state.RuntimeDir)
 	if err != nil {
-		return fmt.Errorf("resolve runtime directory %s: %w", state.RuntimeDir, err)
+		return "", fmt.Errorf("resolve runtime directory %s: %w", state.RuntimeDir, err)
 	}
 	canonical, err = filepath.Abs(canonical)
 	if err != nil {
-		return fmt.Errorf("resolve absolute runtime directory: %w", err)
+		return "", fmt.Errorf("resolve absolute runtime directory: %w", err)
 	}
 	data, err := os.ReadFile(filepath.Join(canonical, runtimeMarker))
 	if err != nil {
-		return fmt.Errorf("refusing to use runtime directory %s: its Idleloom ownership marker %s is missing or unreadable (%w); Idleloom only manages directories it marked at creation — if this directory is left over from an old worker, remove it manually, and run \"idlectl status\" to find the state file that references it", canonical, runtimeMarker, err)
+		return "", fmt.Errorf("refusing to use runtime directory %s: its Idleloom ownership marker %s is missing or unreadable (%w); Idleloom only manages directories it marked at creation — if this directory is left over from an old worker, remove it manually, and run \"idlectl status\" to find the state file that references it", canonical, runtimeMarker, err)
 	}
 	var marker runtimeMarkerData
 	if err := json.Unmarshal(data, &marker); err != nil {
-		return fmt.Errorf("decode runtime marker in %s: %w", canonical, err)
+		return "", fmt.Errorf("decode runtime marker in %s: %w", canonical, err)
 	}
 	if marker.NodeName != state.NodeName {
-		return fmt.Errorf("runtime directory %s belongs to node %q, not %q", canonical, marker.NodeName, state.NodeName)
+		return "", fmt.Errorf("runtime directory %s belongs to node %q, not %q", canonical, marker.NodeName, state.NodeName)
 	}
 	if marker.RuntimeDir != canonical || state.RuntimeDir != canonical {
-		return fmt.Errorf("runtime directory ownership mismatch: marker=%q state=%q canonical=%q", marker.RuntimeDir, state.RuntimeDir, canonical)
+		return "", fmt.Errorf("runtime directory ownership mismatch: marker=%q state=%q canonical=%q", marker.RuntimeDir, state.RuntimeDir, canonical)
+	}
+	return canonical, nil
+}
+
+func validateRuntimeOwnership(state RuntimeState) error {
+	canonical, err := validateRuntimeMarker(state)
+	if err != nil {
+		return err
 	}
 	expectedPaths := map[string]string{
 		"root disk":       filepath.Join(canonical, "root.qcow2"),
@@ -1018,12 +1006,12 @@ func acquireRuntimeLock(ctx context.Context, state RuntimeState, create bool) (*
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		err := unix.Flock(int(file.Fd()), unix.LOCK_EX|unix.LOCK_NB)
-		if err == nil {
-			return &runtimeLock{file: file}, nil
-		}
-		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
+		locked, err := filelock.TryLock(file)
+		if err != nil {
 			return nil, errors.Join(fmt.Errorf("lock runtime directory: %w", err), file.Close())
+		}
+		if locked {
+			return &runtimeLock{file: file}, nil
 		}
 		select {
 		case <-ctx.Done():
@@ -1037,7 +1025,7 @@ func (l *runtimeLock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	unlockErr := unix.Flock(int(l.file.Fd()), unix.LOCK_UN)
+	unlockErr := filelock.Unlock(l.file)
 	closeErr := l.file.Close()
 	if unlockErr != nil {
 		return unlockErr
@@ -1132,16 +1120,19 @@ func processFromPIDFile(path, executable string) (int, bool, error) {
 	if err != nil || pid <= 0 {
 		return 0, false, fmt.Errorf("invalid %s pid file %s", executable, path)
 	}
-	process, err := os.FindProcess(pid)
-	if err != nil || process.Signal(syscall.Signal(0)) != nil || processIsZombie(pid) {
+	if processHasExited(pid) {
 		return pid, false, nil
 	}
-	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
+	// Guard against PID reuse: a recycled PID that now belongs to an unrelated
+	// program must not be treated as a live runtime process. When the name
+	// cannot be read at all the process is reported as not running, which is
+	// the safe direction — callers then re-create rather than adopt it.
+	name, ok := processExecutableName(pid)
+	if !ok {
 		return pid, false, nil
 	}
-	if filepath.Base(strings.TrimSpace(string(output))) != executable {
-		return pid, false, fmt.Errorf("pid %d from %s belongs to %q, not %s", pid, path, strings.TrimSpace(string(output)), executable)
+	if filepath.Base(name) != executable {
+		return pid, false, fmt.Errorf("pid %d from %s belongs to %q, not %s", pid, path, name, executable)
 	}
 	return pid, true, nil
 }
@@ -1167,7 +1158,7 @@ func terminatePID(pid int, executable string, timeout time.Duration) error {
 	if err != nil {
 		return fmt.Errorf("find %s process %d: %w", executable, pid, err)
 	}
-	if err := process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := requestProcessTermination(process); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return fmt.Errorf("signal %s process %d: %w", executable, pid, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -1189,17 +1180,8 @@ func terminatePID(pid int, executable string, timeout time.Duration) error {
 
 func waitForPIDExit(ctx context.Context, pid int, executable string, timeout time.Duration) error {
 	return waitUntilFor(ctx, timeout, fmt.Sprintf("%s (pid %d) to exit", executable, pid), func() bool {
-		process, err := os.FindProcess(pid)
-		return err != nil || process.Signal(syscall.Signal(0)) != nil || processIsZombie(pid)
+		return processHasExited(pid)
 	})
-}
-
-func processIsZombie(pid int) bool {
-	output, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "state=").Output()
-	if err != nil {
-		return true
-	}
-	return strings.HasPrefix(strings.TrimSpace(string(output)), "Z")
 }
 
 func requestVMStop(ctx context.Context, socketPath string) error {
