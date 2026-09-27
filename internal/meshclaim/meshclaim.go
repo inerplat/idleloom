@@ -196,7 +196,7 @@ func (a *Allocator) claim(ctx context.Context, peerName, address string, attempt
 		return Result{}, false, fmt.Errorf("claim the mesh address %s for %q: %w", address, peerName, err)
 	}
 
-	existing, err := leases.Get(ctx, claimName(a.MeshName, address), metav1.GetOptions{})
+	existing, err := leases.Get(ctx, ClaimName(a.MeshName, address), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		// Released between the create and the read. Report it as taken
 		// rather than retrying: claiming an address we do not hold would be
@@ -296,7 +296,7 @@ func (a *Allocator) leaseFor(peerName, address string, attempt int) *coordinatio
 	}
 	lease := &coordinationv1.Lease{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      claimName(a.MeshName, address),
+			Name:      ClaimName(a.MeshName, address),
 			Namespace: a.namespace(),
 			Labels: map[string]string{
 				claimLabel: claimValue,
@@ -342,9 +342,9 @@ func (a *Allocator) validate() error {
 	return nil
 }
 
-// claimName is the Lease name that arbitrates address within mesh. It must
+// ClaimName is the Lease name that arbitrates address within mesh. It must
 // match wirekube/pkg/meshalloc.ClaimName exactly or the two never contend.
-func claimName(mesh, address string) string {
+func ClaimName(mesh, address string) string {
 	host := strings.TrimSuffix(address, "/32")
 	return "wirekube-" + mesh + "-" + strings.ReplaceAll(host, ".", "-")
 }
