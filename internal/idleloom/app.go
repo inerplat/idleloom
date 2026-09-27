@@ -88,6 +88,13 @@ type WorkerOptions struct {
 	Distribution string
 }
 
+// ProvisionsVM reports whether this host's backend builds a virtual machine.
+// The CPU, memory, and disk settings describe that machine, so they are only
+// meaningful — and only worth asking about — when there is one.
+func (a *App) ProvisionsVM() bool {
+	return a.Runtime.Backend().ProvisionsVM()
+}
+
 func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	if err := validateInitOptions(opts, a.Runtime.Backend()); err != nil {
 		return err
