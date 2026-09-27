@@ -39,7 +39,13 @@ kubectl delete -k "${IDLELOOM_REPO}/deploy/base" --ignore-not-found
 idlectl delete worker WORKER
 ```
 
-Idleloom does not uninstall WireKube.
+Idleloom does not uninstall WireKube. `delete worker` does release the worker's mesh address claim, so the address goes straight back into the pool:
+
+```sh
+kubectl -n wirekube-system get leases -l wirekube.io/claim=address
+```
+
+A claim left behind by a worker whose node is already gone is collected by WireKube on its own.
 
 ## Full lab uninstall
 
