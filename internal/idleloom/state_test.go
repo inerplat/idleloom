@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/inerplat/idleloom/internal/syncdir"
 )
 
 func TestStateRoundTrip(t *testing.T) {
@@ -141,7 +143,7 @@ func TestAtomicWriteFileWorksInADirectoryItDidNotCreate(t *testing.T) {
 	if string(data) != "second\n" {
 		t.Errorf("file contents = %q", data)
 	}
-	if err := syncDir(dir); err != nil {
-		t.Errorf("syncDir: %v", err)
+	if err := syncdir.Sync(dir); err != nil {
+		t.Errorf("syncdir.Sync: %v", err)
 	}
 }

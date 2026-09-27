@@ -376,6 +376,9 @@ func runJoin(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	for _, warning := range result.Warnings {
+		_, _ = fmt.Fprintln(os.Stderr, "warning:", warning)
+	}
 	_, _ = fmt.Fprintln(os.Stderr, "enrolled host; installing launchd services")
 	projectionKubeconfig := ""
 	if *projectionEnabled {

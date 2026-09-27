@@ -13,20 +13,22 @@ import (
 
 // recordingExec captures what a runtime would run instead of running it.
 type recordingExec struct {
-	scripts []string
-	runs    [][]string
-	sent    [][2]string
-	replies map[string]string
+	scripts  []string
+	runs     [][]string
+	sent     [][2]string
+	replies  map[string]string
+	failures map[string]error
 }
 
 func (r *recordingExec) Describe() string { return "the test guest" }
 
 func (r *recordingExec) Run(_ context.Context, stdout, _ io.Writer, argv ...string) error {
 	r.runs = append(r.runs, argv)
-	if reply, ok := r.replies[strings.Join(argv, " ")]; ok && stdout != nil {
+	command := strings.Join(argv, " ")
+	if reply, ok := r.replies[command]; ok && stdout != nil {
 		_, _ = io.WriteString(stdout, reply)
 	}
-	return nil
+	return r.failures[command]
 }
 
 func (r *recordingExec) Script(_ context.Context, _, _ io.Writer, script string) error {
@@ -56,7 +58,11 @@ func TestInPlaceCreateHoldsTheNodeAddressBeforeKubelet(t *testing.T) {
 	exec := &recordingExec{}
 	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux, Arch: "amd64", Out: io.Discard, Err: io.Discard}
 	// Create makes the directory itself and refuses one that already exists.
-	state := RuntimeState{NodeName: "worker-a", RuntimeDir: filepath.Join(t.TempDir(), "runtime"), GuestIP: "198.18.18.42"}
+	// The parent has to be canonical, because Create re-resolves the path and
+	// refuses one that moved under it: t.TempDir hands back /var/... on macOS,
+	// where /var is a symlink to /private/var, and an 8.3 short path on
+	// Windows. Plan does this for the real caller.
+	state := RuntimeState{NodeName: "worker-a", RuntimeDir: filepath.Join(canonicalTempDir(t), "runtime"), GuestIP: "198.18.18.42"}
 	if err := runtime.Create(context.Background(), &state); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -197,8 +203,9 @@ var errProbeRefused = errors.New("refused")
 func TestPreflightRejectsAHostWithoutCgroupV2(t *testing.T) {
 	exec := &failingExec{
 		recordingExec: recordingExec{replies: map[string]string{
-			"uname -s":            "Linux\n",
-			"cat /etc/os-release": "ID=ubuntu\n",
+			"uname -s":                    "Linux\n",
+			"systemctl is-system-running": "running\n",
+			"cat /etc/os-release":         "ID=ubuntu\n",
 		}},
 		failRunsContaining: "/sys/fs/cgroup/cgroup.controllers",
 	}
@@ -217,8 +224,9 @@ func TestPreflightRejectsAHostWithoutCgroupV2(t *testing.T) {
 func TestPreflightRejectsAHostWithoutTheDummyDriver(t *testing.T) {
 	exec := &failingExec{
 		recordingExec: recordingExec{replies: map[string]string{
-			"uname -s":            "Linux\n",
-			"cat /etc/os-release": "ID=ubuntu\n",
+			"uname -s":                    "Linux\n",
+			"systemctl is-system-running": "running\n",
+			"cat /etc/os-release":         "ID=ubuntu\n",
 		}},
 		failScriptsContaining: "type dummy",
 	}
@@ -261,8 +269,9 @@ func TestPreflightAcceptsUbuntuAndDebianDerivatives(t *testing.T) {
 		"ID=linuxmint\nID_LIKE=\"ubuntu debian\"\n",
 	} {
 		exec := &recordingExec{replies: map[string]string{
-			"uname -s":            "Linux\n",
-			"cat /etc/os-release": release,
+			"uname -s":                    "Linux\n",
+			"systemctl is-system-running": "running\n",
+			"cat /etc/os-release":         release,
 		}}
 		runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
 		if err := runtime.Preflight(context.Background()); err != nil {
@@ -276,8 +285,9 @@ func TestPreflightAcceptsUbuntuAndDebianDerivatives(t *testing.T) {
 // part-way and fail on a missing command, after changing the host.
 func TestPreflightRejectsANonDebianDistribution(t *testing.T) {
 	exec := &recordingExec{replies: map[string]string{
-		"uname -s":            "Linux\n",
-		"cat /etc/os-release": "NAME=\"Fedora Linux\"\nID=fedora\n",
+		"uname -s":                    "Linux\n",
+		"systemctl is-system-running": "running\n",
+		"cat /etc/os-release":         "NAME=\"Fedora Linux\"\nID=fedora\n",
 	}}
 	runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeLinux}
 	err := runtime.Preflight(context.Background())
@@ -315,5 +325,56 @@ func TestInPlaceRefusesARuntimeDirectoryItDidNotCreate(t *testing.T) {
 	}
 	if _, err := os.Stat(keep); err != nil {
 		t.Errorf("the pre-existing file was disturbed: %v", err)
+	}
+}
+
+// canonicalTempDir is t.TempDir with the platform's aliases resolved, which is
+// what Plan hands Create in production.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve the temporary directory: %v", err)
+	}
+	return resolved
+}
+
+// TestCheckSystemdIsRunningReadsTheState. The exit status cannot answer this:
+// is-system-running also exits non-zero when merely degraded. Nor can
+// "systemctl --version", which reports the installed client and succeeds with
+// nothing managing the system — which is exactly a WSL2 distribution that has
+// the package but no "systemd=true" in /etc/wsl.conf, and it would pass
+// preflight and then fail partway through enrollment.
+func TestCheckSystemdIsRunningReadsTheState(t *testing.T) {
+	for _, c := range []struct {
+		what   string
+		output string
+		failed bool
+		accept bool
+	}{
+		{"healthy", "running\n", false, true},
+		{"a unit failed somewhere on the host", "degraded\n", true, true},
+		{"still booting", "starting\n", true, true},
+		{"shutting down", "stopping\n", true, true},
+		{"rescue mode", "maintenance\n", true, true},
+		{"no systemd as PID 1", "System has not been booted with systemd as init system (PID 1). Can't operate.\nFailed to connect to bus: Host is down\noffline\n", true, false},
+		{"systemctl absent", "", true, false},
+		{"unknown", "unknown\n", true, false},
+	} {
+		exec := &recordingExec{replies: map[string]string{"systemctl is-system-running": c.output}}
+		if c.failed {
+			exec.failures = map[string]error{"systemctl is-system-running": errors.New("exit status 1")}
+		}
+		runtime := InPlaceRuntime{Exec: exec, Kind: RuntimeWSL2, Arch: "amd64"}
+		err := runtime.checkSystemdIsRunning(context.Background())
+		if c.accept && err != nil {
+			t.Errorf("%s: rejected: %v", c.what, err)
+		}
+		if !c.accept && err == nil {
+			t.Errorf("%s: accepted", c.what)
+		}
+		if !c.accept && err != nil && !strings.Contains(err.Error(), "wsl.conf") {
+			t.Errorf("%s: the error does not name the remedy: %v", c.what, err)
+		}
 	}
 }

@@ -127,6 +127,13 @@ func validateWireKubeStatus(status WireKubeStatus) error {
 	if !status.IncludeNodeInternalIP {
 		return fmt.Errorf("the WireKubeMesh default must set spec.autoAllowedIPs.includeNodeInternalIP=true")
 	}
+	if status.ArbitratesAddresses() && status.AgentNamespace == "" {
+		// More than one agent DaemonSet answered, so there is no telling which
+		// namespace holds the mesh address claims. Guessing the chart default
+		// would put this worker's claim somewhere WireKube never reads, where
+		// it arbitrates against nothing and two workers can take one address.
+		return fmt.Errorf("found WireKube agent DaemonSets in more than one namespace, so the namespace holding the mesh address claims is ambiguous; remove the stale installation before enrolling")
+	}
 	return nil
 }
 
@@ -271,12 +278,32 @@ func checkPeerAllowedIPs(ctx context.Context, client kubernetes.Interface, nodeN
 			continue
 		}
 		for _, allowed := range peer.Spec.AllowedIPs {
-			if strings.TrimSuffix(allowed, "/32") == address {
-				return fmt.Errorf("the mesh address %s derived from node name %q is already held by WireKubePeer/%s; enrol this worker under a different name, or set the WireKubeMesh spec.addressAllocation to \"allocator\" so WireKube assigns a free address instead", address, nodeName, peer.Metadata.Name)
+			if routeCovers(allowed, address) {
+				return fmt.Errorf("the mesh address %s derived from node name %q is already routed to WireKubePeer/%s as %s; enrol this worker under a different name, or set the WireKubeMesh spec.addressAllocation to \"allocator\" so WireKube assigns a free address instead", address, nodeName, peer.Metadata.Name, allowed)
 			}
 		}
 	}
 	return nil
+}
+
+// routeCovers reports whether an entry in a peer's allowedIPs would capture
+// traffic for address.
+//
+// Comparing for equality is not enough: a gateway peer advertises a CIDR, not
+// a /32, so a peer carrying the whole mesh range would look like no conflict
+// at all while in fact absorbing every address in it. WireGuard resolves
+// overlapping allowedIPs by longest prefix, so the worker would come up and
+// the route would simply belong to somebody else.
+func routeCovers(route, address string) bool {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return false
+	}
+	if bare := net.ParseIP(strings.TrimSpace(route)); bare != nil {
+		return bare.Equal(ip)
+	}
+	_, network, err := net.ParseCIDR(strings.TrimSpace(route))
+	return err == nil && network.Contains(ip)
 }
 
 // checkExternalPeerClaims refuses an address a Native Metal host has taken.

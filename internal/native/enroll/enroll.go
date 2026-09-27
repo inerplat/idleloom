@@ -64,6 +64,9 @@ type Result struct {
 	WireKubePeer         string
 	WireKubeAddress      string
 	ShellAccess          string
+	// Warnings are things the operator needs to see that did not stop the
+	// enrollment, such as the mesh address moving since the last one.
+	Warnings []string
 }
 
 type enrollmentIntent struct {
@@ -244,12 +247,14 @@ func Run(ctx context.Context, config Config) (Result, error) {
 		return Result{}, err
 	}
 	var wireKubeState nativewirekube.State
+	var warnings []string
 	if connectivity == nativewirekube.ConnectivityWireKube {
 		wireKubeState, err = nativewirekube.Enroll(ctx, nativewirekube.EnrollConfig{
 			Dynamic: config.Dynamic, Kubernetes: config.Kubernetes, REST: config.REST,
 			HostID: hostID, EnrollmentID: intent.Nonce, Namespace: namespace,
 			StateDirectory: stateDirectory, APIEndpoint: config.REST.Host,
 			TokenDuration: config.TokenDuration, WaitTimeout: time.Minute,
+			Warn: func(message string) { warnings = append(warnings, message) },
 		})
 		if err != nil {
 			return Result{}, fmt.Errorf("enroll WireKube connected leaf: %w", err)
@@ -297,7 +302,7 @@ func Run(ctx context.Context, config Config) (Result, error) {
 		AgentKubeconfig: agentPath, LinkKubeconfig: wireKubeState.LinkKubeconfig,
 		ExpiresAt: expires, Connectivity: connectivity,
 		WireKubePeer: wireKubeState.PeerName, WireKubeAddress: wireKubeState.AssignedMeshIP,
-		ShellAccess: shellAccess,
+		ShellAccess: shellAccess, Warnings: warnings,
 	}, nil
 }
 

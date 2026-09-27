@@ -112,6 +112,10 @@ type EnrollConfig struct {
 	APIEndpoint    string
 	TokenDuration  time.Duration
 	WaitTimeout    time.Duration
+	// Warn receives messages the operator needs but that are not failures,
+	// such as an address moving between enrollments. Enroll returns only the
+	// State, so without this they would have nowhere to go.
+	Warn func(string)
 }
 
 type RevokeConfig struct {
@@ -223,12 +227,12 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 	if err != nil {
 		return State{}, err
 	}
-	if state.AssignedMeshIP != "" && state.AssignedMeshIP != expectedAddress {
-		// Reenrolling onto a different address is legitimate — the old one was
-		// taken while this host was away — but it changes what the mesh routes
-		// to it, so it is not something to do quietly.
-		report.Warnings = append(report.Warnings,
-			fmt.Sprintf("the mesh address moved from %s to %s because the first was already claimed", state.AssignedMeshIP, expectedAddress))
+	if state.AssignedMeshIP != "" && state.AssignedMeshIP != expectedAddress && config.Warn != nil {
+		// Reenrolling onto a different address is legitimate: the old one was
+		// taken while this host was away. It changes what the mesh routes to
+		// this host though, so it is not something to do quietly.
+		config.Warn(fmt.Sprintf("the mesh address moved from %s to %s because the first was already claimed",
+			state.AssignedMeshIP, expectedAddress))
 	}
 	state.MeshIPClaimName = claim.Name
 	state.MeshIPClaimUID = claim.UID

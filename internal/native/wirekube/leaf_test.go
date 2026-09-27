@@ -614,3 +614,55 @@ func TestDiscoverAgentNamespaceIgnoresTheRelay(t *testing.T) {
 		t.Errorf("AgentNamespace = %q, want the agent's", report.AgentNamespace)
 	}
 }
+
+// TestEnrollReportsAnAddressMove. Re-enrolling onto a different address is
+// legitimate — the old one was taken while this host was away — but it changes
+// what the mesh routes here, so the operator has to be told. The warning used
+// to be appended to a DoctorReport that Enroll discards.
+func TestEnrollReportsAnAddressMove(t *testing.T) {
+	directory := t.TempDir()
+	state, err := loadOrCreateState(directory, "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.MeshCIDR = "172.31.240.0/20"
+	// The address this host last held, which somebody else has since taken.
+	held, err := meshIPForName(state.DisplayName, state.MeshCIDR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.AssignedMeshIP = held
+	if err := writeState(directory, state); err != nil {
+		t.Fatal(err)
+	}
+
+	mesh := testMesh(1)
+	if err := unstructured.SetNestedField(mesh.Object, "allocator", "spec", "addressAllocation"); err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(mesh, wirekubeAgentDaemonSet("wirekube-system"))
+	client.PrependReactor("create", PeersGVR.Resource, assignUID("peer-uid"))
+	squatter := &meshclaim.Allocator{
+		Store: meshclaim.Dynamic(client, "wirekube-system"), MeshName: defaultMeshName, MeshCIDR: state.MeshCIDR,
+	}
+	if _, err := squatter.Allocate(context.Background(), meshclaim.Request{Holder: "somebody-else", Preferred: held}); err != nil {
+		t.Fatal(err)
+	}
+
+	var warnings []string
+	config := testEnrollConfig(directory, client, newKubernetesTestClient())
+	config.Warn = func(message string) { warnings = append(warnings, message) }
+	got, err := Enroll(context.Background(), config)
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	if got.AssignedMeshIP == held {
+		t.Fatalf("took %s, which somebody-else holds", held)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("the address moved and nothing said so")
+	}
+	if !strings.Contains(warnings[0], held) || !strings.Contains(warnings[0], got.AssignedMeshIP) {
+		t.Errorf("the warning does not name both addresses: %q", warnings[0])
+	}
+}

@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/inerplat/idleloom/internal/syncdir"
 )
 
 var ErrDeviceBusy = errors.New("device is prepared for another ResourceClaim")
@@ -118,12 +120,5 @@ func (s *Store) persistLocked() error {
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return fmt.Errorf("replace state: %w", err)
 	}
-	dir, err := os.Open(filepath.Dir(s.path))
-	if err != nil {
-		return fmt.Errorf("open state directory: %w", err)
-	}
-	if err := dir.Sync(); err != nil {
-		return errors.Join(fmt.Errorf("sync state directory: %w", err), dir.Close())
-	}
-	return dir.Close()
+	return syncdir.Sync(filepath.Dir(s.path))
 }

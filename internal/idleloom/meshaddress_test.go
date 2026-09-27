@@ -346,3 +346,35 @@ func TestPreviewMeshAddressIgnoresTheWorkersOwnClaim(t *testing.T) {
 		t.Errorf("preview = %s, want the held %s", preview.Address, held.Address)
 	}
 }
+
+// TestCheckWireKubeRefusesAnAmbiguousAgentNamespace. Two agent DaemonSets mean
+// there is no telling which namespace holds the claims. The fallback to the
+// chart default is right when the agent simply is not visible, and wrong here:
+// it would put the claim somewhere WireKube never reads, where it arbitrates
+// against nothing and two workers can take one address.
+func TestCheckWireKubeRefusesAnAmbiguousAgentNamespace(t *testing.T) {
+	for _, c := range []struct {
+		allocation string
+		refuse     bool
+	}{
+		{"allocator", true},
+		// On a hash mesh no claim is made, so the namespace does not matter.
+		{"hash", false},
+	} {
+		status := WireKubeStatus{
+			Installed: true, IncludeNodeInternalIP: true,
+			AgentName: "wirekube-agent", AgentNamespace: "",
+			AddressAllocation: c.allocation,
+		}
+		err := validateWireKubeStatus(status)
+		if c.refuse && err == nil {
+			t.Errorf("addressAllocation=%q: accepted an ambiguous agent namespace", c.allocation)
+		}
+		if !c.refuse && err != nil {
+			t.Errorf("addressAllocation=%q: refused: %v", c.allocation, err)
+		}
+		if c.refuse && err != nil && !strings.Contains(err.Error(), "more than one namespace") {
+			t.Errorf("the error does not say what is wrong: %v", err)
+		}
+	}
+}

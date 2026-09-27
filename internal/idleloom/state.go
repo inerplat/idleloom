@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/inerplat/idleloom/internal/filelock"
+
+	"github.com/inerplat/idleloom/internal/syncdir"
 )
 
 type State struct {
@@ -163,7 +165,7 @@ func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace file: %w", err)
 	}
-	return syncDir(dir)
+	return syncdir.Sync(dir)
 }
 
 func EnsureStatePathAvailable(path string) error {
