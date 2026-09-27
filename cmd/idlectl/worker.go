@@ -58,9 +58,9 @@ func runCreateWorker(ctx context.Context, args []string) error {
 	flags := workerPFlags("create worker", createWorkerUsage)
 	kubeconfig := flags.String("kubeconfig", "", "kubeconfig used to enroll the worker")
 	contextName := flags.String("context", "", "kubeconfig context (defaults to current-context)")
-	cpus := flags.Int("cpus", 4, "worker CPU count")
-	memory := flags.String("memory", defaultMemory(), "worker memory, for example 8g")
-	disk := flags.String("disk", "40g", "worker disk size, for example 40g")
+	cpus := flags.Int("cpus", 4, "worker VM CPU count (macOS hosts only; ignored where the worker runs in place)")
+	memory := flags.String("memory", defaultMemory(), "worker VM memory, for example 8g (macOS hosts only; ignored where the worker runs in place)")
+	disk := flags.String("disk", "40g", "worker VM disk size, for example 40g (macOS hosts only; ignored where the worker runs in place)")
 	taint := flags.String("taint", "idleloom-dedicated=compute:NoSchedule", "taint registered on the dedicated worker; empty disables")
 	network := flags.String("network", idleloom.NetworkWireKube, "node network (currently wirekube)")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait per enrollment stage")
@@ -86,6 +86,8 @@ func runCreateWorker(ctx context.Context, args []string) error {
 		return usagef("a worker NAME is required with --yes or --dry-run; usage: %s", createWorkerUsage)
 	}
 
+	app := idleloom.NewApp(os.Stdout, os.Stderr, idleloom.WorkerOptions{Distribution: *distribution})
+
 	if !*yes && !*dryRun {
 		if !term.IsTerminal(int(os.Stdin.Fd())) {
 			return fmt.Errorf("interactive input is unavailable; pass --yes to accept defaults")
@@ -98,19 +100,24 @@ func runCreateWorker(ctx context.Context, args []string) error {
 				return err
 			}
 		}
-		if !explicit["cpus"] {
-			if *cpus, err = promptInt(ctx, reader, "CPU cores", *cpus); err != nil {
-				return err
+		// Sizing describes a VM Idleloom builds. An in-place worker runs in an
+		// environment that already exists and is sized elsewhere, so asking
+		// about it would invite the user to set something with no effect.
+		if app.ProvisionsVM() {
+			if !explicit["cpus"] {
+				if *cpus, err = promptInt(ctx, reader, "CPU cores", *cpus); err != nil {
+					return err
+				}
 			}
-		}
-		if !explicit["memory"] {
-			if *memory, err = prompt(ctx, reader, "Memory", *memory); err != nil {
-				return err
+			if !explicit["memory"] {
+				if *memory, err = prompt(ctx, reader, "Memory", *memory); err != nil {
+					return err
+				}
 			}
-		}
-		if !explicit["disk"] {
-			if *disk, err = prompt(ctx, reader, "Disk", *disk); err != nil {
-				return err
+			if !explicit["disk"] {
+				if *disk, err = prompt(ctx, reader, "Disk", *disk); err != nil {
+					return err
+				}
 			}
 		}
 		if !explicit["network"] {
@@ -118,7 +125,11 @@ func runCreateWorker(ctx context.Context, args []string) error {
 				return err
 			}
 		}
-		fmt.Printf("Worker: %s (%d CPUs, %s memory, %s disk, %s network)\n", name, *cpus, *memory, *disk, *network)
+		if app.ProvisionsVM() {
+			fmt.Printf("Worker: %s (%d CPUs, %s memory, %s disk, %s network)\n", name, *cpus, *memory, *disk, *network)
+		} else {
+			fmt.Printf("Worker: %s (%s network)\n", name, *network)
+		}
 		answer, err := prompt(ctx, reader, "Create this worker?", "yes")
 		if err != nil {
 			return err
@@ -145,7 +156,6 @@ func runCreateWorker(ctx context.Context, args []string) error {
 			return usagef("at least one --credential-provider-bin is required when configuring credential providers; usage: %s", createWorkerUsage)
 		}
 	}
-	app := idleloom.NewApp(os.Stdout, os.Stderr, idleloom.WorkerOptions{Distribution: *distribution})
 	return app.Init(ctx, idleloom.InitOptions{
 		KubeconfigPath: *kubeconfig,
 		Context:        *contextName,
