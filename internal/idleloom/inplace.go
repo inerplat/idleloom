@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -62,10 +63,40 @@ func (r InPlaceRuntime) Preflight(ctx context.Context) error {
 			return fmt.Errorf("%s has no running systemd, which kubelet requires; %s", r.Exec.Describe(), r.systemdHint())
 		}
 	}
+	if err := r.checkDebianFamily(ctx); err != nil {
+		return err
+	}
 	if err := r.checkCgroupV2(ctx); err != nil {
 		return err
 	}
 	return r.checkDummyInterface(ctx)
+}
+
+// checkDebianFamily refuses a distribution the prepare script cannot build on.
+//
+// That script installs containerd and the CNI plugins with apt-get, under
+// Debian's package names. On anything else it would run some way in and then
+// fail on a missing command, after having already changed the host.
+func (r InPlaceRuntime) checkDebianFamily(ctx context.Context) error {
+	var out bytes.Buffer
+	if err := r.Exec.Run(ctx, &out, io.Discard, "cat", "/etc/os-release"); err != nil {
+		return fmt.Errorf("read the distribution of %s: %w", r.Exec.Describe(), err)
+	}
+	release := out.String()
+	for _, line := range strings.Split(release, "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), "=")
+		if !found {
+			continue
+		}
+		value = strings.Trim(value, `"`)
+		if key == "ID" && value == "ubuntu" {
+			return nil
+		}
+		if key == "ID_LIKE" && slices.Contains(strings.Fields(value), "debian") {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s does not run Ubuntu or a Debian derivative; Idleloom installs the worker's containerd and CNI plugins with apt-get", r.Exec.Describe())
 }
 
 // checkCgroupV2 refuses a host still exposing the cgroup v1 hierarchy.
