@@ -82,3 +82,30 @@ func TestConflictingExternalPeerCoversBothKindsOfClaim(t *testing.T) {
 		t.Errorf("an uncontested address was rejected: %v", err)
 	}
 }
+
+// TestRouteCoversCatchesAWiderRoute. A gateway peer advertises a CIDR rather
+// than a /32, so comparing for equality would report no conflict against a
+// peer that is in fact absorbing the whole mesh range. WireGuard resolves
+// overlapping allowedIPs by longest prefix, so the worker would come up and
+// the route would quietly belong to somebody else.
+func TestRouteCoversCatchesAWiderRoute(t *testing.T) {
+	for _, c := range []struct {
+		route   string
+		address string
+		want    bool
+	}{
+		{"198.18.18.42/32", "198.18.18.42", true},
+		{"198.18.18.42", "198.18.18.42", true},
+		{"198.18.18.0/24", "198.18.18.42", true},
+		{"198.18.0.0/15", "198.18.18.42", true},
+		{"198.18.18.0/25", "198.18.18.200", false},
+		{"198.18.19.0/24", "198.18.18.42", false},
+		{"10.0.0.0/8", "198.18.18.42", false},
+		{"not-a-route", "198.18.18.42", false},
+		{"198.18.18.42/32", "not-an-address", false},
+	} {
+		if got := routeCovers(c.route, c.address); got != c.want {
+			t.Errorf("routeCovers(%q, %q) = %v, want %v", c.route, c.address, got, c.want)
+		}
+	}
+}

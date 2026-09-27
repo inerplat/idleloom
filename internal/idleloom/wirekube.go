@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -140,12 +141,32 @@ func ReserveMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 			continue
 		}
 		for _, allowed := range peer.Spec.AllowedIPs {
-			if strings.TrimSuffix(allowed, "/32") == address {
-				return "", fmt.Errorf("the mesh address %s derived from node name %q is already held by WireKubePeer/%s; enrol this worker under a different name", address, nodeName, peer.Metadata.Name)
+			if routeCovers(allowed, address) {
+				return "", fmt.Errorf("the mesh address %s derived from node name %q is already routed to WireKubePeer/%s as %s; enrol this worker under a different name", address, nodeName, peer.Metadata.Name, allowed)
 			}
 		}
 	}
 	return address, nil
+}
+
+// routeCovers reports whether an entry in a peer's allowedIPs would capture
+// traffic for address.
+//
+// Comparing for equality is not enough: a gateway peer advertises a CIDR, not
+// a /32, so a peer carrying the whole mesh range would look like no conflict
+// at all while in fact absorbing every address in it. WireGuard resolves
+// overlapping allowedIPs by longest prefix, so the worker would come up and
+// the route would simply belong to somebody else.
+func routeCovers(route, address string) bool {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return false
+	}
+	if bare := net.ParseIP(strings.TrimSpace(route)); bare != nil {
+		return bare.Equal(ip)
+	}
+	_, network, err := net.ParseCIDR(strings.TrimSpace(route))
+	return err == nil && network.Contains(ip)
 }
 
 // checkExternalPeerClaims refuses an address a Native Metal host has taken.
