@@ -38,8 +38,8 @@ func TestClaimWireFormatMatchesWireKube(t *testing.T) {
 		{"default", "198.18.18.74", "wirekube-default-198-18-18-74"},
 		{"prod", "10.0.0.1/32", "wirekube-prod-10-0-0-1"},
 	} {
-		if got := claimName(c.mesh, c.address); got != c.want {
-			t.Errorf("claimName(%q, %q) = %q, want %q", c.mesh, c.address, got, c.want)
+		if got := ClaimName(c.mesh, c.address); got != c.want {
+			t.Errorf("ClaimName(%q, %q) = %q, want %q", c.mesh, c.address, got, c.want)
 		}
 	}
 
