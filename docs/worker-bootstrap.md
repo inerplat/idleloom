@@ -28,7 +28,9 @@ The enrollment kubeconfig needs permission to:
 - read WireKube CRDs and DaemonSets when `--network=wirekube` is used;
 - create and delete `bootstrap.kubernetes.io/token` Secrets;
 - create or reconcile Idleloom bootstrap ClusterRoleBindings;
-- create and delete `coordination.k8s.io` Leases used for network allocation;
+- create and delete `coordination.k8s.io` Leases used for network allocation
+  (a krunkit worker reserves its private subnet in `kube-system`; an in-place
+  worker claims its mesh address in the namespace the WireKube agent runs in);
 - list and approve the enrolled node's `kubernetes.io/kubelet-serving` CSR;
 - read, label, cordon, and uncordon Nodes;
 - list Pods for safe worker shutdown.

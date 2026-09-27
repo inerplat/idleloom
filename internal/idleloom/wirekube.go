@@ -53,6 +53,25 @@ func (s WireKubeStatus) ArbitratesAddresses() bool {
 const defaultMeshName = "default"
 
 func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeStatus, error) {
+	status, err := ReadWireKube(ctx, client)
+	if err != nil {
+		return status, err
+	}
+	if err := validateWireKubeStatus(status); err != nil {
+		return status, err
+	}
+	return status, nil
+}
+
+// ReadWireKube reports what the mesh says without judging whether it is fit to
+// enrol into.
+//
+// Teardown needs the mesh name, CIDR and agent namespace to hand an address
+// claim back, and it needs them from a mesh that may well have stopped being
+// usable — the agent removed, Node InternalIPs switched off. Refusing to read
+// those out because the installation would fail a fresh enrollment would leak
+// the claim for no reason.
+func ReadWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeStatus, error) {
 	var status WireKubeStatus
 	raw, err := client.Discovery().RESTClient().Get().AbsPath("/apis/wirekube.io/v1alpha1/wirekubemeshes/default").Do(ctx).Raw()
 	if err != nil {
@@ -84,15 +103,19 @@ func CheckWireKube(ctx context.Context, client kubernetes.Interface) (WireKubeSt
 	if err != nil {
 		return status, fmt.Errorf("list DaemonSets while checking WireKube: %w", err)
 	}
+	// The agent's namespace is also where its address claims live, and a wrong
+	// answer there is silent: the claim would arbitrate against nothing. An
+	// ambiguous match is therefore treated as no match.
 	for _, daemonSet := range daemonSets.Items {
-		if strings.Contains(strings.ToLower(daemonSet.Name), "wirekube") {
-			status.AgentNamespace = daemonSet.Namespace
-			status.AgentName = daemonSet.Name
+		if !meshclaim.IsAgentDaemonSet(daemonSet.Name, daemonSet.Labels) {
+			continue
+		}
+		if status.AgentName != "" && status.AgentNamespace != daemonSet.Namespace {
+			status.AgentNamespace = ""
 			break
 		}
-	}
-	if err := validateWireKubeStatus(status); err != nil {
-		return status, err
+		status.AgentNamespace = daemonSet.Namespace
+		status.AgentName = daemonSet.Name
 	}
 	return status, nil
 }
@@ -351,25 +374,28 @@ func PreviewMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 		return MeshAddress{Address: address}, nil
 	}
 	// On an arbitrating mesh a taken address is not a failure, so the preview
-	// reports the move rather than refusing. It cannot say which address the
-	// real run would land on — that depends on what is free at the time — so
-	// it says only that this one is spoken for.
-	held, err := meshAddressIsClaimed(ctx, client, address, wireKube)
+	// reports that it is spoken for rather than refusing. It cannot say which
+	// address the real run would land on, because that depends on what is free
+	// at the time.
+	held, err := meshAddressHeldByAnother(ctx, client, nodeName, address, wireKube)
 	if err != nil {
 		return MeshAddress{}, err
 	}
 	return MeshAddress{Address: address, Moved: held}, nil
 }
 
-// meshAddressIsClaimed reports whether a claim already covers address.
-func meshAddressIsClaimed(ctx context.Context, client kubernetes.Interface, address string, wireKube WireKubeStatus) (bool, error) {
+// meshAddressHeldByAnother reports whether somebody other than nodeName holds
+// a claim on address. A worker's own claim does not count: re-running a dry
+// run against a worker that is already enrolled would otherwise report that
+// its address had been taken, by itself.
+func meshAddressHeldByAnother(ctx context.Context, client kubernetes.Interface, nodeName, address string, wireKube WireKubeStatus) (bool, error) {
 	name := meshclaim.ClaimName(wireKube.MeshName, address)
-	_, err := client.CoordinationV1().Leases(claimNamespace(wireKube.AgentNamespace)).Get(ctx, name, metav1.GetOptions{})
+	claim, err := client.CoordinationV1().Leases(claimNamespace(wireKube.AgentNamespace)).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("read the claim on the mesh address %s: %w", address, err)
 	}
-	return true, nil
+	return claim.Spec.HolderIdentity == nil || *claim.Spec.HolderIdentity != nodeName, nil
 }

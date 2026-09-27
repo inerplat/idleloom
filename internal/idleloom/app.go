@@ -262,7 +262,7 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		if err := SaveState(statePath, state); err != nil {
 			// The claim is already made; drop it rather than leaving an
 			// address held by a worker whose state file never landed.
-			return errors.Join(err, releaseMeshAddress(cluster, state, wireKube), removeStateFile(statePath))
+			return errors.Join(err, releaseWorkerReservations(cluster, state, wireKube), removeStateFile(statePath))
 		}
 	}
 	_, _ = fmt.Fprintf(a.Out, "  Node IP: %s (%s)\n", runtimeNetwork.GuestIP, runtimeNetwork.Subnet)
@@ -272,17 +272,15 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		DiskMB: opts.DiskMB, RuntimeDir: opts.RuntimeDir, Network: runtimeNetwork,
 	})
 	if err != nil {
-		releaseErr := ReleaseRuntimeNetwork(context.Background(), cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID)
-		if releaseErr != nil {
-			return errors.Join(err, fmt.Errorf("release network reservation: %w; recovery state remains at %s", releaseErr, statePath))
+		if releaseErr := releaseWorkerReservations(cluster, state, wireKube); releaseErr != nil {
+			return errors.Join(err, fmt.Errorf("release the worker reservation: %w; recovery state remains at %s", releaseErr, statePath))
 		}
 		return errors.Join(err, removeStateFile(statePath))
 	}
 	state.Runtime = plannedRuntime
 	if err := SaveState(statePath, state); err != nil {
-		releaseErr := ReleaseRuntimeNetwork(context.Background(), cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID)
-		if releaseErr != nil {
-			return errors.Join(err, fmt.Errorf("release network reservation: %w; recovery state remains at %s", releaseErr, statePath))
+		if releaseErr := releaseWorkerReservations(cluster, state, wireKube); releaseErr != nil {
+			return errors.Join(err, fmt.Errorf("release the worker reservation: %w; recovery state remains at %s", releaseErr, statePath))
 		}
 		return errors.Join(err, removeStateFile(statePath))
 	}
@@ -1139,7 +1137,9 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 		// here delays the address coming back rather than losing it. Say so
 		// and carry on: refusing to finish a teardown over it would leave the
 		// operator with a half-deleted worker.
-		wireKube, err := CheckWireKube(ctx, cluster.Client)
+		// Read the mesh rather than check it: an installation that would fail a
+		// fresh enrollment can still be holding this worker's address.
+		wireKube, err := ReadWireKube(ctx, cluster.Client)
 		if err != nil {
 			_, _ = fmt.Fprintf(a.Err, "warning: could not read the WireKube mesh to release the address claim for %s: %v; WireKube will reclaim it once the peer is gone\n", state.NodeName, err)
 		} else if err := ReleaseMeshAddress(ctx, cluster.Client, state.NodeName, wireKube); err != nil {
@@ -1420,13 +1420,33 @@ func (a *App) previewMeshAddress(ctx context.Context, cluster *Cluster, nodeName
 	return nil
 }
 
+// releaseWorkerReservations hands back whatever cluster-wide reservation this
+// worker has taken, on a failure path that is about to delete the state file
+// recording it.
+//
+// A VM backend holds a private subnet and an in-place backend holds a mesh
+// address claim; each holds exactly one, so the other call is a no-op. Doing
+// only the subnet half, as these paths used to, left an in-place worker's
+// address held with nothing left on disk that could ever release it.
+func releaseWorkerReservations(cluster *Cluster, state State, wireKube WireKubeStatus) error {
+	return errors.Join(
+		ReleaseRuntimeNetwork(context.Background(), cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID),
+		releaseMeshAddress(cluster, state, wireKube),
+	)
+}
+
 // releaseMeshAddress drops a claim made moments earlier, for the failure paths
 // between claiming the address and having a state file that records it.
 func releaseMeshAddress(cluster *Cluster, state State, wireKube WireKubeStatus) error {
 	if !state.HoldsMeshAddressClaim() {
 		return nil
 	}
-	if err := ReleaseMeshAddress(context.Background(), cluster.Client, state.NodeName, wireKube); err != nil {
+	// The caller's context is already failing, so this needs one of its own.
+	// It is bounded because it runs on the way out of a command that has
+	// already gone wrong, and WireKube reclaims the address regardless.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := ReleaseMeshAddress(ctx, cluster.Client, state.NodeName, wireKube); err != nil {
 		return fmt.Errorf("release the mesh address claim for %s: %w", state.NodeName, err)
 	}
 	return nil

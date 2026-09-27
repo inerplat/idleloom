@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -122,18 +121,28 @@ func claimNamespace(agentNamespace string) string {
 // DaemonSet rather than by a constant so that an installation in a namespace
 // other than the chart default still arbitrates against WireKube's own claims
 // instead of quietly keeping a private pool.
+//
+// An ambiguous answer is reported as none. Picking one of two candidates would
+// be a coin toss whose losing side is silent, and the caller warns and falls
+// back to the chart default, which is at least a namespace an operator can
+// check.
 func discoverAgentNamespace(ctx context.Context, client dynamic.Interface) string {
 	daemonSets, err := client.Resource(DaemonSetsGVR).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return ""
 	}
+	found := ""
 	for index := range daemonSets.Items {
 		item := &daemonSets.Items[index]
-		if strings.Contains(strings.ToLower(item.GetName()), "wirekube") {
-			return item.GetNamespace()
+		if !meshclaim.IsAgentDaemonSet(item.GetName(), item.GetLabels()) {
+			continue
 		}
+		if found != "" && found != item.GetNamespace() {
+			return ""
+		}
+		found = item.GetNamespace()
 	}
-	return ""
+	return found
 }
 
 // validateMeshIPAvailability reports the address displayName takes and refuses
@@ -372,7 +381,7 @@ func rollbackMeshIPClaim(ctx context.Context, client dynamic.Interface, claim me
 // a claim that vanished means something reclaimed the address and the peer
 // would be advertising one the mesh has given away. Where they are not, there
 // is no claim to lean on and the check is the same collision scan as before.
-func confirmMeshIPStillHeld(ctx context.Context, client dynamic.Interface, state State, report DoctorReport, address string) error {
+func confirmMeshIPStillHeld(ctx context.Context, client dynamic.Interface, state State, report DoctorReport, claim meshIPClaim, address string) error {
 	if !report.ArbitratesAddresses() {
 		current, err := validateMeshIPAvailability(ctx, client, state.PeerName, state.DisplayName, report.MeshCIDR)
 		if err != nil {
@@ -383,15 +392,19 @@ func confirmMeshIPStillHeld(ctx context.Context, client dynamic.Interface, state
 		}
 		return nil
 	}
-	claim, err := client.Resource(meshclaim.LeasesGVR).Namespace(meshclaim.DefaultNamespace).
-		Get(ctx, meshclaim.ClaimName(report.MeshName, address), metav1.GetOptions{})
+	// Read it back where it was written. Recomputing the namespace here would
+	// disagree with the create on any installation that does not run WireKube
+	// in the chart's default namespace, and the enrollment would roll itself
+	// back reporting a claim that never went missing.
+	lease, err := client.Resource(meshclaim.LeasesGVR).Namespace(claim.Namespace).
+		Get(ctx, claim.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return fmt.Errorf("the claim on mesh address %s disappeared during enrollment", address)
 	}
 	if err != nil {
 		return fmt.Errorf("confirm the claim on mesh address %s: %w", address, err)
 	}
-	holder, _, _ := unstructured.NestedString(claim.Object, "spec", "holderIdentity")
+	holder, _, _ := unstructured.NestedString(lease.Object, "spec", "holderIdentity")
 	if holder != state.PeerName {
 		return fmt.Errorf("the mesh address %s was claimed by %q during enrollment", address, holder)
 	}
