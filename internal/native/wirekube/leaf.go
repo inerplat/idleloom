@@ -255,7 +255,7 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 	if err := writeState(config.StateDirectory, state); err != nil {
 		return State{}, errors.Join(err, rollbackNewWireKubeEnrollment(ctx, config.Dynamic, peer, claim, state, peerCreated, claimCreated))
 	}
-	if err := confirmMeshIPStillHeld(ctx, config.Dynamic, state, report, expectedAddress); err != nil {
+	if err := confirmMeshIPStillHeld(ctx, config.Dynamic, state, report, claim, expectedAddress); err != nil {
 		return State{}, errors.Join(err, rollbackNewWireKubeEnrollment(ctx, config.Dynamic, peer, claim, state, peerCreated, claimCreated))
 	}
 	if err := ensurePeerIdentity(ctx, config.Kubernetes, state, config.HostID); err != nil {

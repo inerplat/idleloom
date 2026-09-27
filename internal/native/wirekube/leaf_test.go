@@ -543,6 +543,74 @@ func TestClaimMeshIPFallsBackToTheChartDefault(t *testing.T) {
 func wirekubeAgentDaemonSet(namespace string) *unstructured.Unstructured {
 	return &unstructured.Unstructured{Object: map[string]any{
 		"apiVersion": "apps/v1", "kind": "DaemonSet",
-		"metadata": map[string]any{"name": "wirekube-agent", "namespace": namespace},
+		"metadata": map[string]any{
+			"name": "wirekube-agent", "namespace": namespace,
+			"labels": map[string]any{
+				"app.kubernetes.io/name":      "wirekube",
+				"app.kubernetes.io/component": "agent",
+			},
+		},
 	}}
+}
+
+// TestConfirmMeshIPReadsTheClaimWhereItWasWritten. Recomputing the namespace
+// during the late re-check would disagree with the create on any installation
+// that does not run WireKube in the chart's default namespace, and the
+// enrollment would roll itself back over a claim that never went missing.
+func TestConfirmMeshIPReadsTheClaimWhereItWasWritten(t *testing.T) {
+	const namespace = "wirekube-prod"
+	client := newTestClient(testMesh(1), wirekubeAgentDaemonSet(namespace))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadOrCreateState(t.TempDir(), "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address, claim, _, err := claimMeshIP(context.Background(), client, state, report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Namespace == meshclaim.DefaultNamespace {
+		t.Fatalf("test vector is useless: the claim landed in %s anyway", claim.Namespace)
+	}
+	if err := confirmMeshIPStillHeld(context.Background(), client, state, report, claim, address); err != nil {
+		t.Errorf("the re-check failed against a claim that is right there: %v", err)
+	}
+}
+
+// TestDiscoverAgentNamespaceRefusesToGuess. Two candidates is a coin toss
+// whose losing side is silent, so it reports none and lets the caller warn.
+func TestDiscoverAgentNamespaceRefusesToGuess(t *testing.T) {
+	client := newTestClient(testMesh(1),
+		wirekubeAgentDaemonSet("wirekube-system"),
+		wirekubeAgentDaemonSet("wirekube-staging"))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentNamespace != "" {
+		t.Errorf("AgentNamespace = %q, want none when two installations are visible", report.AgentNamespace)
+	}
+}
+
+// TestDiscoverAgentNamespaceIgnoresTheRelay. A substring match on "wirekube"
+// would take the relay's namespace just as happily.
+func TestDiscoverAgentNamespaceIgnoresTheRelay(t *testing.T) {
+	relay := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "apps/v1", "kind": "DaemonSet",
+		"metadata": map[string]any{
+			"name": "wirekube-relay", "namespace": "wirekube-relay-ns",
+			"labels": map[string]any{"app.kubernetes.io/name": "wirekube-relay"},
+		},
+	}}
+	client := newTestClient(testMesh(1), relay, wirekubeAgentDaemonSet("wirekube-system"))
+	report, err := Inspect(context.Background(), client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.AgentNamespace != "wirekube-system" {
+		t.Errorf("AgentNamespace = %q, want the agent's", report.AgentNamespace)
+	}
 }
