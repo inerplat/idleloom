@@ -83,8 +83,8 @@ func TestReserveMeshAddressMovesOnAnArbitratingMesh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	squatter := &meshclaim.Allocator{Client: client, MeshName: "default", MeshCIDR: testMeshCIDR}
-	if _, err := squatter.Allocate(context.Background(), "squatter", contested); err != nil {
+	squatter := &meshclaim.Allocator{Store: meshclaim.Typed(client, ""), MeshName: "default", MeshCIDR: testMeshCIDR}
+	if _, err := squatter.Allocate(context.Background(), meshclaim.Request{Holder: "squatter", Preferred: contested}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -171,8 +171,8 @@ func TestPreviewMeshAddressReportsAContestedAddress(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	squatter := &meshclaim.Allocator{Client: client, MeshName: "default", MeshCIDR: testMeshCIDR}
-	if _, err := squatter.Allocate(context.Background(), "squatter", contested); err != nil {
+	squatter := &meshclaim.Allocator{Store: meshclaim.Typed(client, ""), MeshName: "default", MeshCIDR: testMeshCIDR}
+	if _, err := squatter.Allocate(context.Background(), meshclaim.Request{Holder: "squatter", Preferred: contested}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := PreviewMeshAddress(context.Background(), client, "worker1", allocatorMesh())
