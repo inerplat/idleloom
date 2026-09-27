@@ -77,12 +77,17 @@ sudo idlectl create worker evening-linux \
 
 Enrollment installs system services, so run it as root or through `sudo`.
 
-Requirements checked by `--dry-run`:
+`--dry-run` checks the host before anything is changed:
 
-- Ubuntu with systemd as PID 1
+- Linux running systemd
+- Ubuntu, or a distribution declaring `ID_LIKE=debian` — the worker's
+  containerd and CNI plugins are installed with `apt-get`
 - the unified cgroup v2 hierarchy at `/sys/fs/cgroup/cgroup.controllers`
 - a kernel that can create a `dummy` link
-- outbound reachability to the Kubernetes API and to `dl.k8s.io`
+
+It also reads the cluster, so it fails there if the Kubernetes API is
+unreachable. It does not check that `dl.k8s.io` is reachable; the kubelet
+download happens after the dry run.
 
 ## Windows host
 
