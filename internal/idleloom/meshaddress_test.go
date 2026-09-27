@@ -263,43 +263,86 @@ func clientServingPeers(t *testing.T, peers ...peerFixture) kubernetes.Interface
 // TestReserveMeshAddressClaimsInTheAgentNamespace. The claim only arbitrates
 // against WireKube's own if it lands in the same namespace; writing to the
 // chart default while WireKube runs elsewhere would give idlectl a private
-// pool that contends with nothing.
+// pool that contends with nothing. Reserve, preview and release all have to
+// agree on it, or a dry run reports a free address that is taken and teardown
+// leaks the claim.
 func TestReserveMeshAddressClaimsInTheAgentNamespace(t *testing.T) {
 	const namespace = "wirekube-prod"
 	client := fake.NewSimpleClientset()
 	wireKube := allocatorMesh()
 	wireKube.AgentNamespace = namespace
 
-	if _, err := ReserveMeshAddress(context.Background(), client, "worker1", wireKube); err != nil {
-		t.Fatal(err)
-	}
-	claims, err := client.CoordinationV1().Leases(namespace).List(context.Background(), metav1.ListOptions{})
+	// Somebody else holds the address worker1's name produces, in the agent's
+	// namespace. A preview that looked anywhere else would miss it.
+	contested, err := meship.IPForName("worker1", testMeshCIDR)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(claims.Items) != 1 {
-		t.Fatalf("%d claims in %s, want one", len(claims.Items), namespace)
+	squatter := &meshclaim.Allocator{Store: meshclaim.Typed(client, namespace), MeshName: "default", MeshCIDR: testMeshCIDR}
+	if _, err := squatter.Allocate(context.Background(), meshclaim.Request{Holder: "squatter", Preferred: contested}); err != nil {
+		t.Fatal(err)
 	}
-	if n := len(listLeases(t, client)); n != 0 {
-		t.Errorf("%d claims landed in %s as well", n, meshclaim.DefaultNamespace)
-	}
-	// And the preview and the release follow it too, or a dry run would report
-	// a free address that is taken and teardown would leak the claim.
 	preview, err := PreviewMeshAddress(context.Background(), client, "worker1", wireKube)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !preview.Moved {
-		t.Error("the preview did not see the claim it just made in the agent namespace")
+		t.Error("the preview did not read the agent namespace, so it missed a claim that is there")
 	}
-	if err := ReleaseMeshAddress(context.Background(), client, "worker1", wireKube); err != nil {
-		t.Fatal(err)
-	}
-	claims, err = client.CoordinationV1().Leases(namespace).List(context.Background(), metav1.ListOptions{})
+
+	got, err := ReserveMeshAddress(context.Background(), client, "worker1", wireKube)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(claims.Items) != 0 {
-		t.Errorf("%d claims left in %s after release", len(claims.Items), namespace)
+	if !got.Moved {
+		t.Error("worker1 did not report the move off the contested address")
+	}
+	if n := len(claimsIn(t, client, namespace)); n != 2 {
+		t.Fatalf("%d claims in %s, want the squatter's and worker1's", n, namespace)
+	}
+	if n := len(listLeases(t, client)); n != 0 {
+		t.Errorf("%d claims landed in %s as well", n, meshclaim.DefaultNamespace)
+	}
+
+	if err := ReleaseMeshAddress(context.Background(), client, "worker1", wireKube); err != nil {
+		t.Fatal(err)
+	}
+	remaining := claimsIn(t, client, namespace)
+	if len(remaining) != 1 {
+		t.Fatalf("%d claims after release, want the squatter's alone", len(remaining))
+	}
+}
+
+func claimsIn(t *testing.T, client kubernetes.Interface, namespace string) []string {
+	t.Helper()
+	leases, err := client.CoordinationV1().Leases(namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(leases.Items))
+	for i := range leases.Items {
+		names = append(names, leases.Items[i].Name)
+	}
+	return names
+}
+
+// TestPreviewMeshAddressIgnoresTheWorkersOwnClaim. A dry run re-run against a
+// worker that is already enrolled would otherwise report that its address had
+// been taken, by itself.
+func TestPreviewMeshAddressIgnoresTheWorkersOwnClaim(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	held, err := ReserveMeshAddress(context.Background(), client, "worker1", allocatorMesh())
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := PreviewMeshAddress(context.Background(), client, "worker1", allocatorMesh())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Moved {
+		t.Error("the preview reported the worker's own claim as somebody else's")
+	}
+	if preview.Address != held.Address {
+		t.Errorf("preview = %s, want the held %s", preview.Address, held.Address)
 	}
 }

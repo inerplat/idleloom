@@ -1,8 +1,8 @@
 # Mesh Addressing
 
-An in-place worker takes its Kubernetes node IP from the WireKube mesh. This page explains where that address comes from, what happens when two workers want the same one, and what you have to do about it.
+An in-place worker takes its Kubernetes node IP from the WireKube mesh.
 
-It applies to the `linux` and `wsl2` backends. A krunkit worker gets a private subnet Idleloom owns and reserves cluster-wide, and none of this applies to it.
+This page applies to the `linux` and `wsl2` backends. A krunkit worker gets a private subnet Idleloom owns and reserves cluster-wide, and none of this applies to it.
 
 ## Why the address comes from the mesh
 
@@ -20,20 +20,20 @@ What happens at that point is set by `WireKubeMesh.spec.addressAllocation`.
 
 | Value | On a collision |
 | --- | --- |
-| `hash` (default) | Nothing arbitrates. Enrollment refuses rather than let two peers advertise one address. |
+| `hash` (default) | Nothing arbitrates. `idlectl` enrollment refuses rather than let two peers advertise one address, but WireKube itself does not detect the collision, so two peers configured by other means will both hold the address. |
 | `allocator` | WireKube arbitrates through claims. Enrollment takes the next free address and says so. |
 
 ## The bootstrap cycle
 
 The address has to be on the host before kubelet starts, and the WireKube agent that would normally put it there is a DaemonSet Pod. That Pod needs the node registered, the node needs kubelet running, and kubelet needs the address. Nothing in that loop can go first.
 
-Idleloom breaks it with a systemd unit, `idleloom-node-address.service`, which holds the address on a dummy link and is ordered before kubelet. The WireKube agent later assigns the same address to its own tunnel device and reconciles nothing outside it, so the two coexist. This is the same arrangement a WireKube control-plane node already uses.
+Idleloom breaks it with a systemd unit, `idleloom-node-address.service`, which holds the address on a dummy link and is ordered before kubelet. The WireKube agent later assigns the same address to its own tunnel device and reconciles nothing outside it, so the two coexist.
 
 Loopback will not do instead. Cilium treats an address on `lo` as NodePort-capable and will SNAT service traffic to it, which sends replies to an address no peer can route back to.
 
 ## Claims
 
-On a mesh set to `allocator`, an address is backed by a `Lease` named after it, in the namespace the WireKube agent runs in:
+On a mesh set to `allocator`, an address is backed by a `Lease` named after it, in the namespace the WireKube agent runs in. That is `wirekube-system` by default, and `idlectl` finds it from the agent's DaemonSet rather than assuming it:
 
 ```sh
 kubectl -n wirekube-system get leases -l wirekube.io/claim=address \
@@ -42,7 +42,9 @@ kubectl -n wirekube-system get leases -l wirekube.io/claim=address \
 
 Creating that Lease is the arbitration. The API server admits one creator per name, so the second claimant learns it lost and walks to another candidate. There is no allocator process to run and nothing to keep in sync.
 
-`idlectl` claims under the node name before the worker boots, and the WireKube agent adopts the same claim when the worker joins. The claim carries an hour of grace for that gap: until the `WireKubePeer` exists, WireKube's reaper sees only an unheld claim, and without the grace it would hand the address to somebody else mid-enrollment.
+`idlectl` claims under the node name before the worker boots, and the WireKube agent adopts the same claim when the worker joins. Until the `WireKubePeer` exists, WireKube's reaper sees nothing but an unheld claim, and its own floor for that is 15 minutes — not enough to cover a download, a boot and a TLS bootstrap. `idlectl` therefore writes `spec.leaseDurationSeconds: 3600` into the claim, which the reaper honours in place of its default.
+
+The claim also records which candidate won, in the `wirekube.io/attempt` annotation. A fleet where that is routinely non-zero is close enough to full that the CIDR wants widening.
 
 `idlectl delete worker` releases the claim. If the release fails the command still finishes and prints a warning; WireKube's reaper collects the claim once the peer is gone.
 
@@ -57,7 +59,7 @@ kubectl get wirekubepeer NAME -o jsonpath='{.spec.allowedIPs}'
 
 The node's `InternalIP` and the first entry of the peer's `allowedIPs` are the same address. If they differ, see [Troubleshooting](operations/troubleshooting.md).
 
-`--dry-run` reports the address a worker would take, and whether it is already claimed, without claiming it.
+`--dry-run` reports the address a worker would try for, and whether somebody else already holds it, without claiming anything. It cannot report the address the real run would settle on, because that depends on what is free at the time.
 
 ## Switching a mesh to the allocator
 
@@ -71,9 +73,11 @@ Every row of the first command has to be populated before you run the second. `s
 
 Switching moves nobody. The first candidate the allocator tries is the hashed address, and a peer already advertising something else has that honoured ahead of it.
 
+Switching back to `hash` is equally safe, and does not put anybody back on a hashed address: agents keep honouring `status.meshIP`. The claims stop being consulted and are collected as their holders go away.
+
 ## Exhaustion
 
-When every address in the mesh CIDR is claimed, enrollment fails and says so. Nothing frees up on its own, so the only fix is to widen `spec.meshCIDR`. Watch for it well before then:
+When every address in the mesh CIDR is claimed, enrollment fails and says so. Nothing frees up on its own, so the only fix is to widen `spec.meshCIDR`. Collisions, and so renumbering, start long before that, so watch the pool rather than waiting for the failure:
 
 | Metric | Meaning |
 | --- | --- |
@@ -81,4 +85,12 @@ When every address in the mesh CIDR is claimed, enrollment fails and says so. No
 | `wirekube_mesh_addresses_allocated` | Addresses currently claimed |
 | `wirekube_mesh_addresses_free` | Addresses still available |
 
-Collisions, and so renumbering, begin long before the pool is full.
+The series are published by WireKube's leader-elected sweep, so exactly one agent Pod exposes them, and only for a mesh set to `allocator`.
+
+## Permissions
+
+Claiming needs `create`, `get`, `list` and `delete` on `coordination.k8s.io/leases` in the namespace the WireKube agent runs in. That is a different namespace from the `kube-system` Leases a krunkit worker uses to reserve its private subnet, so a kubeconfig scoped narrowly enough to enrol a krunkit worker will not enrol an in-place one on an arbitrating mesh.
+
+## When the state file and the cluster disagree
+
+`idlectl` records `meshAddressClaimed` in the worker state file. If `delete worker` warns that it could not release the claim, the address is still held and the state file is gone, so nothing local can release it. Either delete the Lease by hand, or leave it: WireKube reclaims it once no peer answers for the holder.
