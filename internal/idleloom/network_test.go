@@ -124,3 +124,43 @@ func formatNetworkIndex(index uint32) string {
 	}
 	return string(value)
 }
+
+// TestValidateNetworkReservationIfHeldSkipsAnInPlaceWorker. An in-place worker
+// records no lease, so the unguarded check reports "reservation identity is
+// incomplete" for one every single time. Three lifecycle paths carried that
+// guard separately and the certificate maintainer did not, which meant every
+// maintenance pass returned before approving a CSR — invisibly, until the
+// serving certificate it was meant to be rotating expired.
+func TestValidateNetworkReservationIfHeldSkipsAnInPlaceWorker(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	inPlace := State{NodeName: "worker-a", Runtime: RuntimeState{GuestIP: "198.18.18.42"}}
+	if inPlace.HoldsNetworkReservation() {
+		t.Fatal("test vector is useless: this state holds a reservation")
+	}
+	if err := ValidateNetworkReservationIfHeld(context.Background(), client, inPlace); err != nil {
+		t.Errorf("an in-place worker was asked for a reservation it never takes: %v", err)
+	}
+	// And the unguarded call is exactly what the guard exists to avoid.
+	if err := ValidateRuntimeNetworkReservation(context.Background(), client,
+		inPlace.NetworkLease, inPlace.NetworkLeaseUID, inPlace.NodeName, inPlace.NetworkReservationID, inPlace.Runtime); err == nil {
+		t.Error("the unguarded check accepted a state with no reservation, so the guard is pointless")
+	}
+}
+
+// TestValidateNetworkReservationIfHeldStillChecksAVMWorker keeps the guard
+// from becoming a way to skip the check altogether.
+func TestValidateNetworkReservationIfHeldStillChecksAVMWorker(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	vm := State{
+		NodeName:             "worker-a",
+		NetworkLease:         "idleloom-network-00abc",
+		NetworkLeaseUID:      "lease-uid",
+		NetworkReservationID: "reservation-id",
+	}
+	if !vm.HoldsNetworkReservation() {
+		t.Fatal("test vector is useless: this state holds no reservation")
+	}
+	if err := ValidateNetworkReservationIfHeld(context.Background(), client, vm); err == nil {
+		t.Error("a VM worker's missing reservation went unreported")
+	}
+}

@@ -113,7 +113,7 @@ func (a *App) approveServingCSRsOnce(ctx context.Context, statePath string) erro
 	if err != nil {
 		return err
 	}
-	if err := ValidateRuntimeNetworkReservation(ctx, cluster.Client, state.NetworkLease, state.NetworkLeaseUID, state.NodeName, state.NetworkReservationID, state.Runtime); err != nil {
+	if err := ValidateNetworkReservationIfHeld(ctx, cluster.Client, state); err != nil {
 		return err
 	}
 	return ApproveKubeletServingCSR(ctx, cluster.Client, state.NodeName, state.Runtime.GuestIP, state.CreatedAt, false, 0)

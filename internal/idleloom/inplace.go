@@ -60,6 +60,10 @@ func (r InPlaceRuntime) ensureStagingDir(ctx context.Context) error {
 	return nil
 }
 
+// Environment is the distribution this worker is bound to, or empty on a
+// backend where there is only one environment to choose from.
+func (r InPlaceRuntime) Environment() string { return r.Exec.Environment() }
+
 func (r InPlaceRuntime) Preflight(ctx context.Context) error {
 	var out bytes.Buffer
 	if err := r.Exec.Run(ctx, &out, &out, "uname", "-s"); err != nil {
@@ -319,6 +323,20 @@ func (r InPlaceRuntime) Delete(ctx context.Context, state RuntimeState) error {
 	// parents.
 	script := `set -u
 systemctl disable --now kubelet.service 2>/dev/null || true
+# Stopping kubelet does not stop what it started: containerd shims are
+# detached on purpose, so every Pod the worker was running — the CNI, the
+# WireKube agent, user workloads — keeps running. On a VM backend the teardown
+# takes the whole machine with it; here there is nothing afterwards, and the
+# mounts and configuration those containers are using are deleted below.
+if command -v ctr >/dev/null 2>&1; then
+	for task in $(ctr -n k8s.io tasks ls -q 2>/dev/null); do
+		ctr -n k8s.io tasks kill -a -s SIGKILL "$task" 2>/dev/null || true
+		ctr -n k8s.io tasks delete --force "$task" 2>/dev/null || true
+	done
+	for container in $(ctr -n k8s.io containers ls -q 2>/dev/null); do
+		ctr -n k8s.io containers delete "$container" 2>/dev/null || true
+	done
+fi
 systemctl disable --now ` + nodeAddressUnit + ` 2>/dev/null || true
 rm -f /etc/systemd/system/kubelet.service /etc/systemd/system/` + nodeAddressUnit + `
 rm -f ` + nodeAddressScript + `
