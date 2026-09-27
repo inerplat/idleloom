@@ -20,10 +20,20 @@ jobs:
         include:
           - os: macos-14
             name: macOS (Apple Silicon)
+            exclude-packages: "^$"
           - os: ubuntu-24.04
             name: Linux
+            exclude-packages: "^$"
           - os: windows-2025
             name: Windows
+            # Native Metal is a macOS product: launchd services, MLX runtimes,
+            # sandbox profiles, POSIX file modes and symlink counts. Those
+            # packages happen to pass on Linux, so the Linux job keeps them
+            # honest, but asserting them on Windows would only measure how
+            # Windows differs. A Windows idlectl enrols a WSL2 worker and
+            # nothing else, so that is what is tested here. Everything still
+            # has to compile, which go build and the cross-compile job cover.
+            exclude-packages: /internal/native/
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     steps:
@@ -34,7 +44,9 @@ jobs:
           cache: true
       - run: go build ./...
       - run: go vet ./...
-      - run: go test ./... -count=1
+      - name: Test
+        shell: bash
+        run: go test $(go list ./... | grep -v -e '${{ matrix.exclude-packages }}') -count=1
 
   # The release builds linux/arm64 and windows/amd64 without a runner of that
   # shape, so prove they still compile before a tag depends on it.
