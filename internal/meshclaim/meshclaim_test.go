@@ -317,3 +317,13 @@ func countClaims(t *testing.T, a *Allocator) int {
 	}
 	return len(claims)
 }
+
+// TestAddressAllocationValuesMatchWireKube. These are WireKubeMesh spec
+// values, not Idleloom's; claiming on a mesh that does not arbitrate would put
+// the worker on an address WireKube's agent then overwrites.
+func TestAddressAllocationValuesMatchWireKube(t *testing.T) {
+	if AddressAllocationHash != "hash" || AddressAllocationAllocator != "allocator" {
+		t.Errorf("allocation modes = %q/%q, want hash/allocator",
+			AddressAllocationHash, AddressAllocationAllocator)
+	}
+}

@@ -1139,7 +1139,10 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 		// here delays the address coming back rather than losing it. Say so
 		// and carry on: refusing to finish a teardown over it would leave the
 		// operator with a half-deleted worker.
-		if err := ReleaseMeshAddress(ctx, cluster.Client, state.NodeName, meshAddressStatus(ctx, cluster)); err != nil {
+		wireKube, err := CheckWireKube(ctx, cluster.Client)
+		if err != nil {
+			_, _ = fmt.Fprintf(a.Err, "warning: could not read the WireKube mesh to release the address claim for %s: %v; WireKube will reclaim it once the peer is gone\n", state.NodeName, err)
+		} else if err := ReleaseMeshAddress(ctx, cluster.Client, state.NodeName, wireKube); err != nil {
 			_, _ = fmt.Fprintf(a.Err, "warning: could not release the mesh address claim for %s: %v; WireKube will reclaim it once the peer is gone\n", state.NodeName, err)
 		}
 	}
@@ -1415,19 +1418,6 @@ func (a *App) previewMeshAddress(ctx context.Context, cluster *Cluster, nodeName
 	}
 	_, _ = fmt.Fprintf(a.Out, "  Node IP: %s (%s)\n", preview.Address, wireKube.MeshCIDR)
 	return nil
-}
-
-// meshAddressStatus re-reads the mesh at teardown. The state file records that
-// a claim is held, not which mesh it lives in, and the mesh is the only place
-// that says whether addresses are arbitrated at all.
-func meshAddressStatus(ctx context.Context, cluster *Cluster) WireKubeStatus {
-	status, err := CheckWireKube(ctx, cluster.Client)
-	if err != nil {
-		// A mesh that no longer reads cannot have a claim released against
-		// it; the caller's warning path covers saying so.
-		return WireKubeStatus{}
-	}
-	return status
 }
 
 // releaseMeshAddress drops a claim made moments earlier, for the failure paths

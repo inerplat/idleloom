@@ -71,7 +71,7 @@ type DoctorReport struct {
 // ArbitratesAddresses reports whether the mesh resolves address collisions by
 // moving a peer rather than leaving both on the same /32.
 func (r DoctorReport) ArbitratesAddresses() bool {
-	return r.AddressAllocation == "allocator"
+	return r.AddressAllocation == meshclaim.AddressAllocationAllocator
 }
 
 type State struct {
@@ -92,6 +92,7 @@ type State struct {
 	MeshIPClaimName       string    `json:"meshIPClaimName,omitempty"`
 	MeshIPClaimUID        types.UID `json:"meshIPClaimUID,omitempty"`
 	MeshIPClaimNamespace  string    `json:"meshIPClaimNamespace,omitempty"`
+	MeshName              string    `json:"meshName,omitempty"`
 	PeerMode              string    `json:"peerMode,omitempty"`
 	RelayTransport        string    `json:"relayTransport,omitempty"`
 	RelayTokenAudience    string    `json:"relayTokenAudience,omitempty"`
@@ -232,6 +233,7 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 	state.MeshIPClaimName = claim.Name
 	state.MeshIPClaimUID = claim.UID
 	state.MeshIPClaimNamespace = claim.Namespace
+	state.MeshName = report.MeshName
 	state.AssignedMeshIP = expectedAddress
 	state.IngressPublicKey = ""
 	if err := writeState(config.StateDirectory, state); err != nil {
