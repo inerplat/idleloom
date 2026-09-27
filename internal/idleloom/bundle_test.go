@@ -200,9 +200,16 @@ func TestWorkerBundleConfigCarriesTheNodeAddress(t *testing.T) {
 		Runtime:  RuntimeState{NodeName: "worker-a", GuestIP: "198.18.18.207"},
 	}
 	cluster := &Cluster{Server: "https://example.invalid:6443", ClusterDNS: "10.96.0.10", ClusterDomain: "cluster.local"}
-	config := workerBundleConfig(state, cluster, "token", "/tmp/kubelet")
+	inPlace := &App{Runtime: InPlaceRuntime{Kind: RuntimeLinux}}
+	config := inPlace.workerBundleConfig(state, cluster, "token", "/tmp/kubelet")
 	if config.NodeIP != "198.18.18.207" {
 		t.Errorf("NodeIP = %q, want the worker's mesh address", config.NodeIP)
+	}
+	// A krunkit VM detects its own address instead, which stays correct even
+	// if gvproxy hands out a different one than was recorded.
+	krunkit := &App{Runtime: KrunkitRuntime{}}
+	if got := krunkit.workerBundleConfig(state, cluster, "token", "/tmp/kubelet").NodeIP; got != "" {
+		t.Errorf("krunkit bundle pins NodeIP = %q; it should detect its own", got)
 	}
 	if config.NodeName != "worker-a" || config.Taint != state.Taint {
 		t.Errorf("bundle config does not describe the worker: %+v", config)

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -43,7 +44,21 @@ const (
 	nodeAddressScript = "/usr/local/sbin/idleloom-node-address"
 	nodeAddressUnit   = "idleloom-node-address.service"
 	nodeAddressLink   = "idleloom0"
+
+	// stagingDir holds files on their way into the worker. It is deliberately
+	// not /tmp: the bundle carries a bootstrap token, and a fixed name in a
+	// world-writable directory lets any local user pre-create it — as a
+	// symlink, to redirect a root-owned write, or just to read the contents.
+	stagingDir = "/var/lib/idleloom/staging"
 )
+
+// ensureStagingDir creates the private directory transfers land in.
+func (r InPlaceRuntime) ensureStagingDir(ctx context.Context) error {
+	if err := r.Exec.Run(ctx, io.Discard, io.Discard, "install", "-d", "-m", "0700", stagingDir); err != nil {
+		return fmt.Errorf("create the staging directory on %s: %w", r.Exec.Describe(), err)
+	}
+	return nil
+}
 
 func (r InPlaceRuntime) Preflight(ctx context.Context) error {
 	var out bytes.Buffer
@@ -89,7 +104,7 @@ func (r InPlaceRuntime) checkDebianFamily(ctx context.Context) error {
 			continue
 		}
 		value = strings.Trim(value, `"`)
-		if key == "ID" && value == "ubuntu" {
+		if key == "ID" && (value == "ubuntu" || value == "debian") {
 			return nil
 		}
 		if key == "ID_LIKE" && slices.Contains(strings.Fields(value), "debian") {
@@ -158,6 +173,14 @@ func (r InPlaceRuntime) Plan(_ context.Context, cfg RuntimeConfig) (RuntimeState
 	if err != nil {
 		return RuntimeState{}, fmt.Errorf("resolve runtime directory: %w", err)
 	}
+	// Delete removes this directory recursively once its marker validates, so
+	// adopting one that already exists would put a directory Idleloom did not
+	// create on a path to being erased.
+	if _, err := os.Lstat(runtimeDir); err == nil {
+		return RuntimeState{}, fmt.Errorf("runtime directory already exists: %s, likely from an interrupted worker; if no worker is using it, remove the directory and rerun, or pass --runtime-dir", runtimeDir)
+	} else if !os.IsNotExist(err) {
+		return RuntimeState{}, fmt.Errorf("inspect runtime directory: %w", err)
+	}
 	return RuntimeState{
 		NodeName:   cfg.NodeName,
 		RuntimeDir: runtimeDir,
@@ -171,10 +194,28 @@ func (r InPlaceRuntime) Create(ctx context.Context, state *RuntimeState) error {
 	if state == nil {
 		return fmt.Errorf("runtime state is nil")
 	}
-	if err := os.MkdirAll(state.RuntimeDir, 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(state.RuntimeDir), 0o700); err != nil {
+		return fmt.Errorf("create runtime parent directory: %w", err)
+	}
+	// Mkdir rather than MkdirAll: the directory must not exist yet, because
+	// Delete removes it recursively.
+	if err := os.Mkdir(state.RuntimeDir, 0o700); err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("runtime directory already exists: %s, likely from an interrupted worker; if no worker is using it, remove the directory and rerun, or pass --runtime-dir", state.RuntimeDir)
+		}
 		return fmt.Errorf("create runtime directory: %w", err)
 	}
+	canonical, err := filepath.EvalSymlinks(state.RuntimeDir)
+	if err != nil {
+		_ = os.Remove(state.RuntimeDir)
+		return fmt.Errorf("resolve canonical runtime directory: %w", err)
+	}
+	if canonical != state.RuntimeDir {
+		_ = os.Remove(state.RuntimeDir)
+		return fmt.Errorf("planned runtime directory changed after creation: planned=%q canonical=%q", state.RuntimeDir, canonical)
+	}
 	if err := writeRuntimeMarker(*state); err != nil {
+		_ = os.Remove(state.RuntimeDir)
 		return err
 	}
 	state.Planned = false
@@ -205,7 +246,11 @@ func (r InPlaceRuntime) Start(ctx context.Context, state *RuntimeState) error {
 		return fmt.Errorf("runtime state is nil")
 	}
 	script := "set -eu\nsystemctl start " + nodeAddressUnit + "\nsystemctl start containerd.service\n" +
-		"if systemctl list-unit-files kubelet.service >/dev/null 2>&1; then systemctl start kubelet.service; fi\n"
+		// "systemctl cat" fails when the unit does not exist; list-unit-files
+		// exits 0 even with no match, so it cannot be used as a guard. The
+		// unit is absent when enrollment was interrupted before the bundle
+		// installed it, which is exactly when a resume runs this.
+		"if systemctl cat kubelet.service >/dev/null 2>&1; then systemctl start kubelet.service; fi\n"
 	if err := r.Exec.Script(ctx, r.Out, r.Err, script); err != nil {
 		return fmt.Errorf("start the worker on %s: %w", r.Exec.Describe(), err)
 	}
@@ -266,7 +311,10 @@ ip link delete ` + nodeAddressLink + ` 2>/dev/null || true
 }
 
 func (r InPlaceRuntime) InstallBundle(ctx context.Context, state RuntimeState, bundlePath string) error {
-	const destination = "/tmp/idleloom-bundle.tar"
+	const destination = stagingDir + "/bundle.tar"
+	if err := r.ensureStagingDir(ctx); err != nil {
+		return err
+	}
 	if err := r.Exec.Send(ctx, bundlePath, destination); err != nil {
 		return fmt.Errorf("copy worker bundle into %s: %w", r.Exec.Describe(), err)
 	}
@@ -287,7 +335,10 @@ exit $status
 }
 
 func (r InPlaceRuntime) LoadImage(ctx context.Context, _ RuntimeState, localTarPath string) error {
-	const destination = "/tmp/idleloom-image.tar"
+	const destination = stagingDir + "/image.tar"
+	if err := r.ensureStagingDir(ctx); err != nil {
+		return err
+	}
 	if err := r.Exec.Send(ctx, localTarPath, destination); err != nil {
 		return fmt.Errorf("copy image archive into %s: %w", r.Exec.Describe(), err)
 	}

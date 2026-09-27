@@ -84,14 +84,17 @@ func (l linuxExec) Script(ctx context.Context, stdout, stderr io.Writer, script 
 }
 
 func (l linuxExec) Send(ctx context.Context, localPath, guestPath string) error {
-	// "install -D" creates any missing parent directories and replaces the
-	// target atomically, so a partially written file is never left behind.
-	//
-	// The mode applies to the file only. Creating the parent separately with
-	// "install -d -m" would also apply it to a directory that already exists,
-	// which silently re-permissions shared paths — pointing this at /tmp on a
-	// Linux host turned it into a root-owned 0700 directory.
-	if err := l.Run(ctx, io.Discard, io.Discard, "install", "-D", "-m", "0600", localPath, guestPath); err != nil {
+	// mkdir -p creates the missing parents and leaves the mode of any that
+	// already exist alone. Creating them with "install -d -m" instead also
+	// re-permissioned existing directories — pointing that at /tmp on a Linux
+	// host turned it into a root-owned 0700 directory. "install -D" would do
+	// both steps at once, but -D is GNU-only and macOS has no such option.
+	if err := l.Run(ctx, io.Discard, io.Discard, "mkdir", "-p", guestDir(guestPath)); err != nil {
+		return fmt.Errorf("create %s on %s: %w", guestDir(guestPath), l.Describe(), err)
+	}
+	// install replaces the destination rather than writing through it, so a
+	// symlink planted at guestPath cannot redirect the write.
+	if err := l.Run(ctx, io.Discard, io.Discard, "install", "-m", "0600", localPath, guestPath); err != nil {
 		return fmt.Errorf("copy %s to %s on %s: %w", localPath, guestPath, l.Describe(), err)
 	}
 	return nil
@@ -157,8 +160,11 @@ func (w wslExec) Send(ctx context.Context, localPath, guestPath string) error {
 	defer func() { _ = file.Close() }()
 	// Standard input carries the file, so the copy script has to travel as an
 	// argument instead. umask runs before the redirection creates the file, so
-	// the contents are never briefly readable by other users on the guest.
+	// the contents are never briefly readable by other users on the guest, and
+	// the unlink first means a symlink planted at the destination cannot
+	// redirect a root-owned write through it.
 	script := "set -e; umask 077; mkdir -p " + shellQuote(guestDir(guestPath)) +
+		"; rm -f " + shellQuote(guestPath) +
 		"; cat > " + shellQuote(guestPath)
 	if err := w.Runner.RunWithInput(ctx, file, io.Discard, io.Discard,
 		wslBinary, w.args([]string{"/bin/sh", "-c", script})...); err != nil {
