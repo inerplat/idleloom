@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -62,8 +63,9 @@ func meshIPForName(name, meshCIDR string) (string, error) {
 // takes another. On one that does not, there is no second choice — every peer
 // takes the address its name hashes to — so a contested address is reported.
 func claimMeshIP(ctx context.Context, client dynamic.Interface, state State, report DoctorReport) (string, meshIPClaim, bool, error) {
+	namespace := claimNamespace(report.AgentNamespace)
 	allocator := &meshclaim.Allocator{
-		Store:    meshclaim.Dynamic(client, ""),
+		Store:    meshclaim.Dynamic(client, namespace),
 		MeshName: report.MeshName,
 		MeshCIDR: report.MeshCIDR,
 		Grace:    nativeEnrollmentGrace,
@@ -81,7 +83,7 @@ func claimMeshIP(ctx context.Context, client dynamic.Interface, state State, rep
 		return result.Address, meshIPClaim{
 			Name:      result.ClaimName,
 			UID:       result.ClaimUID,
-			Namespace: meshclaim.DefaultNamespace,
+			Namespace: namespace,
 		}, !result.Adopted, nil
 	}
 
@@ -102,8 +104,36 @@ func claimMeshIP(ctx context.Context, client dynamic.Interface, state State, rep
 	return result.Address, meshIPClaim{
 		Name:      result.ClaimName,
 		UID:       result.ClaimUID,
-		Namespace: meshclaim.DefaultNamespace,
+		Namespace: namespace,
 	}, !result.Adopted, nil
+}
+
+// claimNamespace is where WireKube keeps its address claims: the namespace its
+// agent runs in. Falling back to the chart default is the best that can be
+// done when the agent cannot be found, and is right for every default install.
+func claimNamespace(agentNamespace string) string {
+	if agentNamespace != "" {
+		return agentNamespace
+	}
+	return meshclaim.DefaultNamespace
+}
+
+// discoverAgentNamespace finds where the WireKube agent runs. It goes by the
+// DaemonSet rather than by a constant so that an installation in a namespace
+// other than the chart default still arbitrates against WireKube's own claims
+// instead of quietly keeping a private pool.
+func discoverAgentNamespace(ctx context.Context, client dynamic.Interface) string {
+	daemonSets, err := client.Resource(DaemonSetsGVR).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return ""
+	}
+	for index := range daemonSets.Items {
+		item := &daemonSets.Items[index]
+		if strings.Contains(strings.ToLower(item.GetName()), "wirekube") {
+			return item.GetNamespace()
+		}
+	}
+	return ""
 }
 
 // validateMeshIPAvailability reports the address displayName takes and refuses
@@ -184,8 +214,11 @@ func routeContainsIP(value string, expected net.IP) bool {
 // swept as well, because an installation upgraded from an older idlectl has a
 // claim there that nothing else will ever look at.
 func deleteMeshIPClaim(ctx context.Context, client dynamic.Interface, state State, timeout time.Duration) error {
+	// Teardown uses the namespace recorded at enrollment rather than
+	// rediscovering it: the WireKube installation may already be gone, and the
+	// claim is wherever it was made.
 	allocator := &meshclaim.Allocator{
-		Store:    meshclaim.Dynamic(client, ""),
+		Store:    meshclaim.Dynamic(client, state.MeshIPClaimNamespaceOrDefault()),
 		MeshName: defaultMeshName,
 		MeshCIDR: state.MeshCIDR,
 	}

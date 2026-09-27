@@ -203,9 +203,21 @@ func ReleaseMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 // and the cost of undershooting is an address reassigned mid-enrollment.
 const meshEnrollmentGrace = time.Hour
 
+// claimNamespace is where WireKube keeps its address claims: the namespace its
+// agent runs in. Idlectl has to write into that exact namespace — a claim
+// somewhere else arbitrates against nothing — so it uses the namespace
+// CheckWireKube already discovered from the agent DaemonSet rather than
+// assuming the chart default.
+func claimNamespace(agentNamespace string) string {
+	if agentNamespace != "" {
+		return agentNamespace
+	}
+	return meshclaim.DefaultNamespace
+}
+
 func meshAllocator(client kubernetes.Interface, wireKube WireKubeStatus) *meshclaim.Allocator {
 	return &meshclaim.Allocator{
-		Store:    meshclaim.Typed(client, ""),
+		Store:    meshclaim.Typed(client, wireKube.AgentNamespace),
 		MeshName: wireKube.MeshName,
 		MeshCIDR: wireKube.MeshCIDR,
 		Grace:    meshEnrollmentGrace,
@@ -372,7 +384,7 @@ func PreviewMeshAddress(ctx context.Context, client kubernetes.Interface, nodeNa
 // meshAddressIsClaimed reports whether a claim already covers address.
 func meshAddressIsClaimed(ctx context.Context, client kubernetes.Interface, address string, wireKube WireKubeStatus) (bool, error) {
 	name := meshclaim.ClaimName(wireKube.MeshName, address)
-	_, err := client.CoordinationV1().Leases(meshclaim.DefaultNamespace).Get(ctx, name, metav1.GetOptions{})
+	_, err := client.CoordinationV1().Leases(claimNamespace(wireKube.AgentNamespace)).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return false, nil
 	}
