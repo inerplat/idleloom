@@ -155,6 +155,17 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 	}
 
 	if opts.DryRun {
+		// The address is the one thing a dry run can get wrong without
+		// telling anybody: an in-place worker's node IP comes from the mesh,
+		// and on a mesh that does not arbitrate addresses a name collision is
+		// a hard failure that would otherwise only surface halfway through a
+		// real enrollment.
+		if !a.Runtime.Backend().ProvisionsVM() {
+			a.step("Checking the worker mesh address")
+			if err := a.previewMeshAddress(ctx, cluster, opts.NodeName, wireKube); err != nil {
+				return err
+			}
+		}
 		a.step("Planning the matching kubelet")
 		_, _ = fmt.Fprintf(a.Out, "  Dry run: would download kubelet %s and create worker %s\n", cluster.KubeletVersion, opts.NodeName)
 		return nil
@@ -238,14 +249,20 @@ func (a *App) Init(ctx context.Context, opts InitOptions) error {
 		// IP from there keeps the address stable, collision-checked, and
 		// routable by every mesh peer without a cluster-wide lease.
 		a.step("Deriving the worker mesh address")
-		address, err := ReserveMeshAddress(ctx, cluster.Client, opts.NodeName, wireKube.MeshCIDR)
+		mesh, err := ReserveMeshAddress(ctx, cluster.Client, opts.NodeName, wireKube)
 		if err != nil {
 			return errors.Join(err, removeStateFile(statePath))
 		}
-		runtimeNetwork = RuntimeNetwork{GuestIP: address, Subnet: wireKube.MeshCIDR}
-		state.Runtime = RuntimeState{NodeName: opts.NodeName, GuestIP: address, Subnet: wireKube.MeshCIDR}
+		if mesh.Moved {
+			_, _ = fmt.Fprintf(a.Err, "warning: the mesh address for node name %q was already taken; WireKube assigned %s instead\n", opts.NodeName, mesh.Address)
+		}
+		runtimeNetwork = RuntimeNetwork{GuestIP: mesh.Address, Subnet: wireKube.MeshCIDR}
+		state.Runtime = RuntimeState{NodeName: opts.NodeName, GuestIP: mesh.Address, Subnet: wireKube.MeshCIDR}
+		state.MeshAddressClaimed = mesh.Claimed
 		if err := SaveState(statePath, state); err != nil {
-			return errors.Join(err, removeStateFile(statePath))
+			// The claim is already made; drop it rather than leaving an
+			// address held by a worker whose state file never landed.
+			return errors.Join(err, releaseMeshAddress(cluster, state, wireKube), removeStateFile(statePath))
 		}
 	}
 	_, _ = fmt.Fprintf(a.Out, "  Node IP: %s (%s)\n", runtimeNetwork.GuestIP, runtimeNetwork.Subnet)
@@ -1117,6 +1134,15 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 			return err
 		}
 	}
+	if state.HoldsMeshAddressClaim() {
+		// WireKube's reaper collects an unheld claim on its own, so a failure
+		// here delays the address coming back rather than losing it. Say so
+		// and carry on: refusing to finish a teardown over it would leave the
+		// operator with a half-deleted worker.
+		if err := ReleaseMeshAddress(ctx, cluster.Client, state.NodeName, meshAddressStatus(ctx, cluster)); err != nil {
+			_, _ = fmt.Fprintf(a.Err, "warning: could not release the mesh address claim for %s: %v; WireKube will reclaim it once the peer is gone\n", state.NodeName, err)
+		}
+	}
 	if err := cleanupMaintainerFiles(resolvedPath); err != nil {
 		return err
 	}
@@ -1374,4 +1400,44 @@ func pollWithInterval(ctx context.Context, timeout, interval time.Duration, chec
 func (a *App) step(message string) {
 	a.StepIndex++
 	_, _ = fmt.Fprintf(a.Out, "\n[%d] %s...\n", a.StepIndex, message)
+}
+
+// previewMeshAddress prints what a dry run can tell the operator about the
+// worker's node address.
+func (a *App) previewMeshAddress(ctx context.Context, cluster *Cluster, nodeName string, wireKube WireKubeStatus) error {
+	preview, err := PreviewMeshAddress(ctx, cluster.Client, nodeName, wireKube)
+	if err != nil {
+		return err
+	}
+	if preview.Moved {
+		_, _ = fmt.Fprintf(a.Out, "  Node IP: %s is already claimed; WireKube would assign a free address instead\n", preview.Address)
+		return nil
+	}
+	_, _ = fmt.Fprintf(a.Out, "  Node IP: %s (%s)\n", preview.Address, wireKube.MeshCIDR)
+	return nil
+}
+
+// meshAddressStatus re-reads the mesh at teardown. The state file records that
+// a claim is held, not which mesh it lives in, and the mesh is the only place
+// that says whether addresses are arbitrated at all.
+func meshAddressStatus(ctx context.Context, cluster *Cluster) WireKubeStatus {
+	status, err := CheckWireKube(ctx, cluster.Client)
+	if err != nil {
+		// A mesh that no longer reads cannot have a claim released against
+		// it; the caller's warning path covers saying so.
+		return WireKubeStatus{}
+	}
+	return status
+}
+
+// releaseMeshAddress drops a claim made moments earlier, for the failure paths
+// between claiming the address and having a state file that records it.
+func releaseMeshAddress(cluster *Cluster, state State, wireKube WireKubeStatus) error {
+	if !state.HoldsMeshAddressClaim() {
+		return nil
+	}
+	if err := ReleaseMeshAddress(context.Background(), cluster.Client, state.NodeName, wireKube); err != nil {
+		return fmt.Errorf("release the mesh address claim for %s: %w", state.NodeName, err)
+	}
+	return nil
 }

@@ -24,6 +24,11 @@ type State struct {
 	NetworkLease         string `json:"networkLease,omitempty"`
 	NetworkLeaseUID      string `json:"networkLeaseUID,omitempty"`
 	NetworkReservationID string `json:"networkReservationID,omitempty"`
+	// MeshAddressClaimed records that this worker holds a cluster-wide claim
+	// on its mesh address, so teardown knows to hand it back. In-place workers
+	// take their node address from the WireKube mesh rather than from a
+	// private subnet, so they hold a claim instead of a network reservation.
+	MeshAddressClaimed bool `json:"meshAddressClaimed,omitempty"`
 	// Distribution records the WSL2 distribution this worker was enrolled on,
 	// so later lifecycle commands act on it rather than the machine's current
 	// default distribution.
@@ -106,6 +111,11 @@ type RuntimeState struct {
 // because the address is a function of the node name.
 func (s State) HoldsNetworkReservation() bool {
 	return s.NetworkReservationID != ""
+}
+
+// HoldsMeshAddressClaim reports whether teardown has a mesh address to release.
+func (s State) HoldsMeshAddressClaim() bool {
+	return s.MeshAddressClaimed
 }
 
 func DefaultStatePath() (string, error) {
