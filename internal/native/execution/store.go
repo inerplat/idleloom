@@ -11,6 +11,8 @@ import (
 	"sync"
 
 	"github.com/inerplat/idleloom/internal/filelock"
+
+	"github.com/inerplat/idleloom/internal/syncdir"
 )
 
 const (
@@ -343,15 +345,8 @@ func persist(path string, record Record) error {
 }
 
 func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return fmt.Errorf("open native execution state directory: %w", err)
-	}
-	if err := directory.Sync(); err != nil {
-		return errors.Join(fmt.Errorf("sync native execution state directory: %w", err), directory.Close())
-	}
-	if err := directory.Close(); err != nil {
-		return fmt.Errorf("close native execution state directory: %w", err)
+	if err := syncdir.Sync(path); err != nil {
+		return fmt.Errorf("sync native execution state directory: %w", err)
 	}
 	return nil
 }

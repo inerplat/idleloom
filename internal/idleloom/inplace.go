@@ -68,15 +68,8 @@ func (r InPlaceRuntime) Preflight(ctx context.Context) error {
 	if system := strings.TrimSpace(out.String()); system != "Linux" {
 		return fmt.Errorf("%s reports %q, but an Idleloom worker needs Linux", r.Exec.Describe(), system)
 	}
-	out.Reset()
-	if err := r.Exec.Run(ctx, &out, &out, "systemctl", "is-system-running", "--quiet"); err != nil {
-		// is-system-running exits non-zero while degraded, which is common and
-		// harmless. Only a total absence of systemd is fatal, so confirm by
-		// asking for its version instead of trusting the exit status.
-		out.Reset()
-		if versionErr := r.Exec.Run(ctx, &out, &out, "systemctl", "--version"); versionErr != nil {
-			return fmt.Errorf("%s has no running systemd, which kubelet requires; %s", r.Exec.Describe(), r.systemdHint())
-		}
+	if err := r.checkSystemdIsRunning(ctx); err != nil {
+		return err
 	}
 	if err := r.checkDebianFamily(ctx); err != nil {
 		return err
@@ -149,6 +142,45 @@ func (r InPlaceRuntime) checkDummyInterface(ctx context.Context) error {
 		return fmt.Errorf("%s cannot create a dummy network interface, which the worker node address needs: %w; %s. Load the kernel's dummy module and retry", r.Exec.Describe(), err, strings.TrimSpace(out.String()))
 	}
 	return nil
+}
+
+// runningSystemdStates are the is-system-running answers that mean systemd is
+// the service manager. "degraded" belongs here: a unit failed somewhere on the
+// host, which is common and is not this worker's problem.
+var runningSystemdStates = map[string]struct{}{
+	"running":      {},
+	"degraded":     {},
+	"starting":     {},
+	"stopping":     {},
+	"maintenance":  {},
+	"initializing": {},
+}
+
+// checkSystemdIsRunning refuses a host where systemd is not PID 1.
+//
+// The exit status alone cannot answer this, because is-system-running also
+// exits non-zero when it is merely degraded. Nor can "systemctl --version",
+// which prints the installed client's version and succeeds whether or not
+// anything is managing the system — a WSL2 distribution with the systemd
+// package installed but not enabled in /etc/wsl.conf passes that check and
+// then fails partway through enrollment, after the host has been changed.
+//
+// So read what it says instead. systemd answers with a state word; without a
+// manager to ask, systemctl says so on stderr and prints "offline" or nothing.
+func (r InPlaceRuntime) checkSystemdIsRunning(ctx context.Context) error {
+	var out bytes.Buffer
+	runErr := r.Exec.Run(ctx, &out, &out, "systemctl", "is-system-running")
+	for _, line := range strings.Split(out.String(), "\n") {
+		if _, ok := runningSystemdStates[strings.TrimSpace(line)]; ok {
+			return nil
+		}
+	}
+	detail := strings.TrimSpace(out.String())
+	if detail == "" && runErr != nil {
+		detail = runErr.Error()
+	}
+	return fmt.Errorf("%s has no running systemd, which kubelet requires: %s; %s",
+		r.Exec.Describe(), detail, r.systemdHint())
 }
 
 func (r InPlaceRuntime) systemdHint() string {
