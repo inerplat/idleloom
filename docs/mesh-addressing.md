@@ -46,7 +46,7 @@ Creating that Lease is the arbitration. The API server admits one creator per na
 
 The claim also records which candidate won, in the `wirekube.io/attempt` annotation. A fleet where that is routinely non-zero is close enough to full that the CIDR wants widening.
 
-`idlectl delete worker` releases the claim. If the release fails the command still finishes and prints a warning; WireKube's reaper collects the claim once the peer is gone.
+`idlectl delete worker` releases the claim, after waiting for the node's `WireKubePeer` to go. Deleting the node removes the peer by garbage collection, which is not instantaneous, and handing the address back while the peer still advertises it would let the next enrollment take it. If either step fails the command still finishes and prints a warning; WireKube's reaper collects the claim once the peer is gone.
 
 ## Reading the address back
 
@@ -77,7 +77,7 @@ Switching back to `hash` is equally safe, and does not put anybody back on a has
 
 ## Exhaustion
 
-When every address in the mesh CIDR is claimed, enrollment fails and says so. Nothing frees up on its own, so the only fix is to widen `spec.meshCIDR`. Collisions, and so renumbering, start long before that, so watch the pool rather than waiting for the failure:
+When every address in the mesh CIDR is claimed, worker enrollment fails and says so, and an external peer goes `Pending` and keeps retrying until the sweep frees one. Nothing frees up on its own, so the only fix is to widen `spec.meshCIDR`. Collisions, and so renumbering, start long before that, so watch the pool rather than waiting for the failure:
 
 | Metric | Meaning |
 | --- | --- |

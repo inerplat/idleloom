@@ -614,3 +614,95 @@ func TestDiscoverAgentNamespaceIgnoresTheRelay(t *testing.T) {
 		t.Errorf("AgentNamespace = %q, want the agent's", report.AgentNamespace)
 	}
 }
+
+// TestEnrollReportsAnAddressMove. Re-enrolling onto a different address is
+// legitimate — the old one was taken while this host was away — but it changes
+// what the mesh routes here, so the operator has to be told. The warning used
+// to be appended to a DoctorReport that Enroll discards.
+func TestEnrollReportsAnAddressMove(t *testing.T) {
+	directory := t.TempDir()
+	state, err := loadOrCreateState(directory, "idleloom-mac-one", "enrollment-one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.MeshCIDR = "172.31.240.0/20"
+	// The address this host last held, which somebody else has since taken.
+	held, err := meshIPForName(state.DisplayName, state.MeshCIDR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state.AssignedMeshIP = held
+	if err := writeState(directory, state); err != nil {
+		t.Fatal(err)
+	}
+
+	mesh := testMesh(1)
+	if err := unstructured.SetNestedField(mesh.Object, "allocator", "spec", "addressAllocation"); err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(mesh, wirekubeAgentDaemonSet("wirekube-system"))
+	client.PrependReactor("create", PeersGVR.Resource, assignUID("peer-uid"))
+	squatter := &meshclaim.Allocator{
+		Store: meshclaim.Dynamic(client, "wirekube-system"), MeshName: defaultMeshName, MeshCIDR: state.MeshCIDR,
+	}
+	if _, err := squatter.Allocate(context.Background(), meshclaim.Request{Holder: "somebody-else", Preferred: held}); err != nil {
+		t.Fatal(err)
+	}
+
+	var warnings []string
+	config := testEnrollConfig(directory, client, newKubernetesTestClient())
+	config.Warn = func(message string) { warnings = append(warnings, message) }
+	got, err := Enroll(context.Background(), config)
+	if err != nil {
+		t.Fatalf("Enroll: %v", err)
+	}
+	if got.AssignedMeshIP == held {
+		t.Fatalf("took %s, which somebody-else holds", held)
+	}
+	if len(warnings) == 0 {
+		t.Fatal("the address moved and nothing said so")
+	}
+	if !strings.Contains(warnings[0], held) || !strings.Contains(warnings[0], got.AssignedMeshIP) {
+		t.Errorf("the warning does not name both addresses: %q", warnings[0])
+	}
+}
+
+// TestEnrollRefusesAnUnknownClaimNamespace. Guessing the chart default is
+// right when there is one installation where the chart puts it. Here there is
+// no evidence of that, and a claim in the wrong namespace arbitrates against
+// nothing: two hosts take one address while both believe the allocator settled
+// it. Refusing is the smaller harm.
+func TestEnrollRefusesAnUnknownClaimNamespace(t *testing.T) {
+	mesh := testMesh(1)
+	if err := unstructured.SetNestedField(mesh.Object, "allocator", "spec", "addressAllocation"); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		what    string
+		objects []runtime.Object
+	}{
+		{"no agent visible", []runtime.Object{mesh}},
+		{"two installations", []runtime.Object{mesh,
+			wirekubeAgentDaemonSet("wirekube-system"), wirekubeAgentDaemonSet("wirekube-staging")}},
+	} {
+		client := newTestClient(c.objects...)
+		_, err := Enroll(context.Background(), testEnrollConfig(t.TempDir(), client, newKubernetesTestClient()))
+		if err == nil {
+			t.Errorf("%s: Enroll claimed an address anyway", c.what)
+			continue
+		}
+		if !strings.Contains(err.Error(), "namespace") {
+			t.Errorf("%s: the error does not say what is wrong: %v", c.what, err)
+		}
+	}
+}
+
+// TestEnrollProceedsOnAHashMesh with the same ambiguity, because nothing
+// claims there and the namespace does not decide anything.
+func TestEnrollProceedsOnAHashMesh(t *testing.T) {
+	client := newTestClient(testMesh(1))
+	client.PrependReactor("create", PeersGVR.Resource, assignUID("peer-uid"))
+	if _, err := Enroll(context.Background(), testEnrollConfig(t.TempDir(), client, newKubernetesTestClient())); err != nil {
+		t.Errorf("a hash mesh was refused over a namespace it does not use: %v", err)
+	}
+}

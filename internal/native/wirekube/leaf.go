@@ -112,6 +112,10 @@ type EnrollConfig struct {
 	APIEndpoint    string
 	TokenDuration  time.Duration
 	WaitTimeout    time.Duration
+	// Warn receives messages the operator needs but that are not failures,
+	// such as an address moving between enrollments. Enroll returns only the
+	// State, so without this they would have nowhere to go.
+	Warn func(string)
 }
 
 type RevokeConfig struct {
@@ -137,15 +141,6 @@ func Inspect(ctx context.Context, client dynamic.Interface) (DoctorReport, error
 	report.MeshCIDR, _, _ = unstructured.NestedString(mesh.Object, "spec", "meshCIDR")
 	report.AddressAllocation, _, _ = unstructured.NestedString(mesh.Object, "spec", "addressAllocation")
 	report.AgentNamespace = discoverAgentNamespace(ctx, client)
-	if report.AgentNamespace == "" && report.ArbitratesAddresses() {
-		// Falling back is right for a default install, but if WireKube is
-		// installed somewhere else the claim lands in a namespace nothing else
-		// reads, and two hosts could take the same address believing they had
-		// arbitrated. Say so rather than let it pass.
-		report.Warnings = append(report.Warnings, fmt.Sprintf(
-			"could not find the WireKube agent DaemonSet, so mesh address claims will be made in %s; "+
-				"confirm that is where WireKube runs", meshclaim.DefaultNamespace))
-	}
 	if err := validateMeshCIDR(report.MeshCIDR); err != nil {
 		return DoctorReport{}, err
 	}
@@ -219,16 +214,25 @@ func Enroll(ctx context.Context, config EnrollConfig) (State, error) {
 	state.PeerServiceAccount = peerServiceAccountName(state.PeerName)
 	state.MTU = report.MTU
 	state.AllowedDestinations = []string{report.MeshCIDR}
+	if report.ArbitratesAddresses() && report.AgentNamespace == "" {
+		// Guessing the chart default is right when there is simply one
+		// installation and it is where the chart puts it, but here there is no
+		// evidence of that: either no agent DaemonSet answered or several did,
+		// in different namespaces. A claim in the wrong namespace arbitrates
+		// against nothing, so two hosts would take one address while both
+		// believed the allocator had settled it. That is worse than refusing.
+		return State{}, fmt.Errorf("cannot tell which namespace holds WireKube's mesh address claims: found no single WireKube agent DaemonSet; remove any stale installation, or run idlectl where the agent is visible")
+	}
 	expectedAddress, claim, claimCreated, err := claimMeshIP(ctx, config.Dynamic, state, report)
 	if err != nil {
 		return State{}, err
 	}
-	if state.AssignedMeshIP != "" && state.AssignedMeshIP != expectedAddress {
-		// Reenrolling onto a different address is legitimate — the old one was
-		// taken while this host was away — but it changes what the mesh routes
-		// to it, so it is not something to do quietly.
-		report.Warnings = append(report.Warnings,
-			fmt.Sprintf("the mesh address moved from %s to %s because the first was already claimed", state.AssignedMeshIP, expectedAddress))
+	if state.AssignedMeshIP != "" && state.AssignedMeshIP != expectedAddress && config.Warn != nil {
+		// Reenrolling onto a different address is legitimate: the old one was
+		// taken while this host was away. It changes what the mesh routes to
+		// this host though, so it is not something to do quietly.
+		config.Warn(fmt.Sprintf("the mesh address moved from %s to %s because the first was already claimed",
+			state.AssignedMeshIP, expectedAddress))
 	}
 	state.MeshIPClaimName = claim.Name
 	state.MeshIPClaimUID = claim.UID
