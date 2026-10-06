@@ -1140,13 +1140,23 @@ func (a *App) Delete(ctx context.Context, statePath string, override ClusterOver
 		// here delays the address coming back rather than losing it. Say so
 		// and carry on: refusing to finish a teardown over it would leave the
 		// operator with a half-deleted worker.
+		//
 		// Read the mesh rather than check it: an installation that would fail a
 		// fresh enrollment can still be holding this worker's address.
 		wireKube, err := ReadWireKube(ctx, cluster.Client)
 		if err != nil {
 			_, _ = fmt.Fprintf(a.Err, "warning: could not read the WireKube mesh to release the address claim for %s: %v; WireKube will reclaim it once the peer is gone\n", state.NodeName, err)
-		} else if err := ReleaseMeshAddress(ctx, cluster.Client, state.NodeName, wireKube); err != nil {
-			_, _ = fmt.Fprintf(a.Err, "warning: could not release the mesh address claim for %s: %v; WireKube will reclaim it once the peer is gone\n", state.NodeName, err)
+		} else {
+			// The WireKubePeer goes when its Node does, but by garbage
+			// collection, which is asynchronous. Releasing the address while
+			// the peer is still advertising it lets the next enrollment take
+			// it and leaves two peers on one /32 until the collector catches
+			// up, so wait for the peer to actually go first.
+			if err := waitForPeerGone(ctx, cluster.Client, state.NodeName, meshPeerRemovalTimeout); err != nil {
+				_, _ = fmt.Fprintf(a.Err, "warning: %v; leaving the mesh address claim for WireKube to reclaim\n", err)
+			} else if err := ReleaseMeshAddress(ctx, cluster.Client, state.NodeName, wireKube); err != nil {
+				_, _ = fmt.Fprintf(a.Err, "warning: could not release the mesh address claim for %s: %v; WireKube will reclaim it once the peer is gone\n", state.NodeName, err)
+			}
 		}
 	}
 	if err := cleanupMaintainerFiles(resolvedPath); err != nil {

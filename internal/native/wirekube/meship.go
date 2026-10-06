@@ -72,7 +72,7 @@ func claimMeshIP(ctx context.Context, client dynamic.Interface, state State, rep
 
 	if report.ArbitratesAddresses() {
 		result, err := allocator.Allocate(ctx, meshclaim.Request{
-			Holder:    state.PeerName,
+			Holder:    meshclaim.HolderForPeer(state.PeerName),
 			Name:      state.DisplayName,
 			Preferred: state.AssignedMeshIP,
 		})
@@ -90,7 +90,7 @@ func claimMeshIP(ctx context.Context, client dynamic.Interface, state State, rep
 	if err != nil {
 		return "", meshIPClaim{}, false, err
 	}
-	result, err := allocator.Reserve(ctx, state.PeerName, expected)
+	result, err := allocator.Reserve(ctx, meshclaim.HolderForPeer(state.PeerName), expected)
 	if err != nil {
 		if errors.Is(err, meshclaim.ErrInUse) {
 			return "", meshIPClaim{}, false, fmt.Errorf(
@@ -232,7 +232,7 @@ func deleteMeshIPClaim(ctx context.Context, client dynamic.Interface, state Stat
 		MeshCIDR: state.MeshCIDR,
 	}
 	if state.MeshCIDR != "" {
-		if err := allocator.Release(ctx, state.PeerName); err != nil {
+		if err := allocator.Release(ctx, meshclaim.HolderForPeer(state.PeerName)); err != nil {
 			return err
 		}
 	}
@@ -242,7 +242,7 @@ func deleteMeshIPClaim(ctx context.Context, client dynamic.Interface, state Stat
 	if state.MeshIPClaimName == "" {
 		return nil
 	}
-	return waitForClaimGone(ctx, client, state.MeshIPClaimNamespaceOrDefault(), state.MeshIPClaimName, timeout)
+	return waitForClaimGone(ctx, client, state.MeshIPClaimNamespaceOrDefault(), state.MeshIPClaimName, state.MeshIPClaimUID, timeout)
 }
 
 // deleteLegacyMeshIPClaim removes a claim an older idlectl left in
@@ -315,17 +315,27 @@ func dashedAddress(address string) string {
 	return string(out)
 }
 
-func waitForClaimGone(ctx context.Context, client dynamic.Interface, namespace, name string, timeout time.Duration) error {
+// waitForClaimGone waits for this enrollment's claim to disappear.
+//
+// It matches on the recorded UID rather than the name. Release deliberately
+// leaves a claim held by somebody else alone, so if this host's claim was
+// reclaimed and another peer has since taken the same address, a name-only
+// wait would sit there until it timed out and leave local state behind — over
+// a claim that is already gone.
+func waitForClaimGone(ctx context.Context, client dynamic.Interface, namespace, name string, uid types.UID, timeout time.Duration) error {
 	if timeout <= 0 {
 		return nil
 	}
 	claims := client.Resource(meshclaim.LeasesGVR).Namespace(namespace)
 	err := wait.PollUntilContextTimeout(ctx, time.Second, timeout, true, func(ctx context.Context) (bool, error) {
-		_, getErr := claims.Get(ctx, name, metav1.GetOptions{})
+		claim, getErr := claims.Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(getErr) {
 			return true, nil
 		}
-		return false, getErr
+		if getErr != nil {
+			return false, getErr
+		}
+		return uid != "" && claim.GetUID() != uid, nil
 	})
 	if err != nil {
 		return fmt.Errorf("wait for mesh IP claim Lease/%s deletion: %w", name, err)
@@ -405,7 +415,7 @@ func confirmMeshIPStillHeld(ctx context.Context, client dynamic.Interface, state
 		return fmt.Errorf("confirm the claim on mesh address %s: %w", address, err)
 	}
 	holder, _, _ := unstructured.NestedString(lease.Object, "spec", "holderIdentity")
-	if holder != state.PeerName {
+	if holder != meshclaim.HolderForPeer(state.PeerName) {
 		return fmt.Errorf("the mesh address %s was claimed by %q during enrollment", address, holder)
 	}
 	return nil
