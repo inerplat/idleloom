@@ -20,6 +20,7 @@ const (
 	RuntimeProfileMLXTrainV1            = "mlx-train-v1"
 	RuntimeProfileShellV1               = "shell-v1"
 	ModelFamilyQwen35                   = "qwen3.5"
+	ModelFamilyMLX                      = "mlx"
 	ModelFamilyOllamaGGUF               = "ollama-gguf"
 	ModelFamilyGGUF                     = "gguf"
 	ArtifactFormatSafetensorsV1         = "mlx-safetensors-v1"
@@ -272,7 +273,7 @@ type IdleloomWorkloadList struct {
 }
 
 type IdleloomModelSpec struct {
-	// +kubebuilder:validation:Enum=qwen3.5;ollama-gguf;gguf
+	// +kubebuilder:validation:Enum=qwen3.5;mlx;ollama-gguf;gguf
 	Family string `json:"family"`
 	// +kubebuilder:validation:Enum=mlx-lm-v1;ollama-gguf-v1;llama-cpp-metal-v1
 	RuntimeProfile       string            `json:"runtimeProfile"`
@@ -286,7 +287,7 @@ type IdleloomModelSpec struct {
 	MaxConcurrentRequests int32 `json:"maxConcurrentRequests"`
 }
 
-// +kubebuilder:validation:XValidation:rule="(has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile) && has(self.signature)) || (!has(self.ociReference) && has(self.ollamaModel) && !has(self.ggufFile) && !has(self.signature)) || (!has(self.ociReference) && !has(self.ollamaModel) && has(self.ggufFile) && !has(self.signature))",message="exactly one artifact source is required; OCI artifacts require a signature and local GGUF sources are unsigned"
+// +kubebuilder:validation:XValidation:rule="(has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile) && !has(self.huggingFace) && has(self.signature)) || (!has(self.ociReference) && has(self.ollamaModel) && !has(self.ggufFile) && !has(self.huggingFace) && !has(self.signature)) || (!has(self.ociReference) && !has(self.ollamaModel) && has(self.ggufFile) && !has(self.huggingFace) && !has(self.signature)) || (!has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile) && has(self.huggingFace) && !has(self.signature))",message="exactly one artifact source is required; OCI artifacts require a signature and local GGUF and Hugging Face sources are unsigned"
 type ModelArtifact struct {
 	// OCIReference must be pinned by digest. Tags are not accepted.
 	// +kubebuilder:validation:Pattern=`^oci://[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$`
@@ -297,6 +298,10 @@ type ModelArtifact struct {
 	// GGUFFile is a filename under the host's managed llama.cpp model directory.
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf$`
 	GGUFFile string `json:"ggufFile,omitempty"`
+	// HuggingFace is an MLX safetensors repository pinned at one commit. The
+	// agent downloads it on first use and refuses it unless the files at that
+	// commit hash to ManifestDigest.
+	HuggingFace *HuggingFaceSource `json:"huggingFace,omitempty"`
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	ManifestDigest string `json:"manifestDigest"`
 	// +kubebuilder:validation:Enum=mlx-safetensors-v1;gguf-v1
@@ -305,6 +310,15 @@ type ModelArtifact struct {
 	// +kubebuilder:validation:Maximum=68719476736
 	SizeBytes int64            `json:"sizeBytes"`
 	Signature *SignaturePolicy `json:"signature,omitempty"`
+}
+
+type HuggingFaceSource struct {
+	// +kubebuilder:validation:MaxLength=192
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`
+	Repository string `json:"repository"`
+	// Revision must be a full commit SHA. Branches and tags move and are not accepted.
+	// +kubebuilder:validation:Pattern=`^[a-f0-9]{40}$`
+	Revision string `json:"revision"`
 }
 
 type SignaturePolicy struct {
@@ -359,7 +373,7 @@ type ModelMemoryProfile struct {
 // +kubebuilder:printcolumn:name="Runtime",type=string,JSONPath=`.spec.runtimeProfile`
 // +kubebuilder:validation:XValidation:rule="self.spec == oldSelf.spec",message="catalog model specs are immutable"
 // +kubebuilder:validation:XValidation:rule="quantity(self.spec.minimumUnifiedMemory).isGreaterThan(quantity('0'))",message="minimumUnifiedMemory must be positive"
-// +kubebuilder:validation:XValidation:rule="(self.spec.runtimeProfile == 'mlx-lm-v1' && self.spec.family == 'qwen3.5' && self.spec.artifact.format == 'mlx-safetensors-v1' && has(self.spec.artifact.ociReference)) || (self.spec.runtimeProfile == 'ollama-gguf-v1' && self.spec.family == 'ollama-gguf' && self.spec.artifact.format == 'gguf-v1' && has(self.spec.artifact.ollamaModel)) || (self.spec.runtimeProfile == 'llama-cpp-metal-v1' && self.spec.family == 'gguf' && self.spec.artifact.format == 'gguf-v1' && has(self.spec.artifact.ggufFile))",message="runtime profile, model family, and artifact source must match"
+// +kubebuilder:validation:XValidation:rule="(self.spec.runtimeProfile == 'mlx-lm-v1' && self.spec.family == 'qwen3.5' && self.spec.artifact.format == 'mlx-safetensors-v1' && has(self.spec.artifact.ociReference)) || (self.spec.runtimeProfile == 'mlx-lm-v1' && self.spec.family == 'mlx' && self.spec.artifact.format == 'mlx-safetensors-v1' && has(self.spec.artifact.huggingFace)) || (self.spec.runtimeProfile == 'ollama-gguf-v1' && self.spec.family == 'ollama-gguf' && self.spec.artifact.format == 'gguf-v1' && has(self.spec.artifact.ollamaModel)) || (self.spec.runtimeProfile == 'llama-cpp-metal-v1' && self.spec.family == 'gguf' && self.spec.artifact.format == 'gguf-v1' && has(self.spec.artifact.ggufFile))",message="runtime profile, model family, and artifact source must match"
 type IdleloomModel struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
@@ -404,15 +418,17 @@ type IdleloomHostStatus struct {
 }
 
 type HostModelStatus struct {
-	// +kubebuilder:validation:Enum=ollama-gguf-v1;llama-cpp-metal-v1
+	// +kubebuilder:validation:Enum=mlx-lm-v1;ollama-gguf-v1;llama-cpp-metal-v1
 	RuntimeProfile string `json:"runtimeProfile"`
-	// +kubebuilder:validation:Pattern=`^([a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}|[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf)$`
+	// Name is the Ollama model, the managed GGUF filename, or REPOSITORY@REVISION
+	// for a Hugging Face MLX model.
+	// +kubebuilder:validation:Pattern=`^([a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}|[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf|[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*@[a-f0-9]{40})$`
 	Name string `json:"name"`
 	// +kubebuilder:validation:Pattern=`^sha256:[a-f0-9]{64}$`
 	ManifestDigest string `json:"manifestDigest"`
-	// +kubebuilder:validation:Enum=qwen3.5;ollama-gguf;gguf
+	// +kubebuilder:validation:Enum=qwen3.5;mlx;ollama-gguf;gguf
 	Family string `json:"family"`
-	// +kubebuilder:validation:Enum=gguf-v1
+	// +kubebuilder:validation:Enum=gguf-v1;mlx-safetensors-v1
 	Format string `json:"format"`
 	// +kubebuilder:validation:Minimum=1
 	SizeBytes int64 `json:"sizeBytes"`
@@ -483,10 +499,10 @@ type NamespacedObjectReference struct {
 }
 
 // +kubebuilder:validation:XValidation:rule="has(self.server) != has(self.batch)",message="exactly one server or batch intent is required"
-// +kubebuilder:validation:XValidation:rule="(self.runtimeProfile == 'mlx-lm-v1' && self.family == 'qwen3.5' && self.artifact.format == 'mlx-safetensors-v1' && has(self.artifact.ociReference)) || (self.runtimeProfile == 'ollama-gguf-v1' && self.family == 'ollama-gguf' && self.artifact.format == 'gguf-v1' && has(self.artifact.ollamaModel)) || (self.runtimeProfile == 'llama-cpp-metal-v1' && self.family == 'gguf' && self.artifact.format == 'gguf-v1' && has(self.artifact.ggufFile))",message="resolved runtime profile, model family, and artifact source must match"
+// +kubebuilder:validation:XValidation:rule="(self.runtimeProfile == 'mlx-lm-v1' && self.family == 'qwen3.5' && self.artifact.format == 'mlx-safetensors-v1' && has(self.artifact.ociReference)) || (self.runtimeProfile == 'mlx-lm-v1' && self.family == 'mlx' && self.artifact.format == 'mlx-safetensors-v1' && has(self.artifact.huggingFace)) || (self.runtimeProfile == 'ollama-gguf-v1' && self.family == 'ollama-gguf' && self.artifact.format == 'gguf-v1' && has(self.artifact.ollamaModel)) || (self.runtimeProfile == 'llama-cpp-metal-v1' && self.family == 'gguf' && self.artifact.format == 'gguf-v1' && has(self.artifact.ggufFile))",message="resolved runtime profile, model family, and artifact source must match"
 type ResolvedModel struct {
 	CatalogRef ObjectReference `json:"catalogRef"`
-	// +kubebuilder:validation:Enum=qwen3.5;ollama-gguf;gguf
+	// +kubebuilder:validation:Enum=qwen3.5;mlx;ollama-gguf;gguf
 	Family string `json:"family"`
 	// +kubebuilder:validation:Enum=mlx-lm-v1;ollama-gguf-v1;llama-cpp-metal-v1
 	RuntimeProfile       string            `json:"runtimeProfile"`

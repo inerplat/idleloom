@@ -454,3 +454,88 @@ func validModel() IdleloomModel {
 func digest() string {
 	return "sha256:" + strings.Repeat("a", 64)
 }
+
+func TestValidateHuggingFaceMLXModel(t *testing.T) {
+	model := validHuggingFaceModel()
+	if err := ValidateModel(&model); err != nil {
+		t.Fatalf("ValidateModel: %v", err)
+	}
+	for name, mutate := range map[string]func(*IdleloomModel){
+		"branch revision":      func(m *IdleloomModel) { m.Spec.Artifact.HuggingFace.Revision = "main" },
+		"short revision":       func(m *IdleloomModel) { m.Spec.Artifact.HuggingFace.Revision = "0123abc" },
+		"uppercase revision":   func(m *IdleloomModel) { m.Spec.Artifact.HuggingFace.Revision = strings.Repeat("A", 40) },
+		"repository traversal": func(m *IdleloomModel) { m.Spec.Artifact.HuggingFace.Repository = "owner/../model" },
+		"repository no owner":  func(m *IdleloomModel) { m.Spec.Artifact.HuggingFace.Repository = "model" },
+		"repository dot start": func(m *IdleloomModel) { m.Spec.Artifact.HuggingFace.Repository = "owner/.model" },
+		"repository too long":  func(m *IdleloomModel) { m.Spec.Artifact.HuggingFace.Repository = "owner/" + strings.Repeat("m", 190) },
+		"missing digest":       func(m *IdleloomModel) { m.Spec.Artifact.ManifestDigest = "" },
+		"missing size":         func(m *IdleloomModel) { m.Spec.Artifact.SizeBytes = 0 },
+		"gguf format":          func(m *IdleloomModel) { m.Spec.Artifact.Format = ArtifactFormatGGUFV1 },
+		"missing format":       func(m *IdleloomModel) { m.Spec.Artifact.Format = "" },
+		"signed": func(m *IdleloomModel) {
+			m.Spec.Artifact.Signature = &SignaturePolicy{Issuer: "https://issuer.example", Subject: "publisher"}
+		},
+		"second source": func(m *IdleloomModel) {
+			m.Spec.Artifact.OCIReference = "oci://registry.example/models/qwen@" + digest()
+		},
+		"qwen family":    func(m *IdleloomModel) { m.Spec.Family = ModelFamilyQwen35 },
+		"ollama runtime": func(m *IdleloomModel) { m.Spec.RuntimeProfile = RuntimeProfileOllamaGGUFV1 },
+		"no source":      func(m *IdleloomModel) { m.Spec.Artifact.HuggingFace = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			model := validHuggingFaceModel()
+			mutate(&model)
+			if err := ValidateModel(&model); err == nil {
+				t.Fatal("ValidateModel accepted an invalid Hugging Face MLX model")
+			}
+		})
+	}
+	model = validModel()
+	model.Spec.Family = ModelFamilyMLX
+	if err := ValidateModel(&model); err == nil {
+		t.Fatal("ValidateModel accepted the mlx family with the locked OCI source")
+	}
+}
+
+func TestValidateHuggingFaceMLXAssignment(t *testing.T) {
+	model := validHuggingFaceModel()
+	assignment := IdleloomWorkloadAssignment{Spec: IdleloomWorkloadAssignmentSpec{
+		DesiredState: AssignmentDesiredRunning,
+		WorkloadRef:  WorkloadObjectReference{Namespace: "default", Name: "lfm", UID: types.UID("workload-uid"), Generation: 1},
+		HostRef:      ObjectReference{Name: "studio", UID: types.UID("host-uid")},
+		Model: &ResolvedModel{
+			CatalogRef: ObjectReference{Name: model.Name, UID: types.UID("model-uid")},
+			Family:     model.Spec.Family, RuntimeProfile: model.Spec.RuntimeProfile,
+			Artifact: model.Spec.Artifact, UnifiedMemoryRequest: model.Spec.MinimumUnifiedMemory,
+			MaxContextLength: model.Spec.MaxContextLength, MaxConcurrentRequests: model.Spec.MaxConcurrentRequests,
+			Batch: &WorkloadBatchInference{Prompt: "hello", MaxTokens: 8, TimeoutSeconds: 30},
+		},
+		ExecutionID: "123e4567-e89b-42d3-a456-426614174000", FencingEpoch: 1, LeaseDurationSeconds: 30,
+	}}
+	if err := ValidateAssignment(&assignment); err != nil {
+		t.Fatalf("ValidateAssignment: %v", err)
+	}
+	assignment.Spec.Model.Artifact.HuggingFace = &HuggingFaceSource{Repository: "owner/model", Revision: "v1.0"}
+	if err := ValidateAssignment(&assignment); err == nil {
+		t.Fatal("ValidateAssignment accepted a tag revision")
+	}
+}
+
+func validHuggingFaceModel() IdleloomModel {
+	return IdleloomModel{
+		ObjectMeta: metav1.ObjectMeta{Name: "lfm2-8b-mlx"},
+		Spec: IdleloomModelSpec{
+			Family:         ModelFamilyMLX,
+			RuntimeProfile: RuntimeProfileMLXLMV1,
+			Artifact: ModelArtifact{
+				HuggingFace:    &HuggingFaceSource{Repository: "mlx-community/LFM2-8B-A1B-4bit", Revision: strings.Repeat("0123456789", 4)},
+				ManifestDigest: digest(),
+				Format:         ArtifactFormatSafetensorsV1,
+				SizeBytes:      4 << 30,
+			},
+			MinimumUnifiedMemory:  MinimumUnifiedMemoryForModel(4<<30, 4096),
+			MaxContextLength:      4096,
+			MaxConcurrentRequests: 1,
+		},
+	}
+}

@@ -18,12 +18,15 @@ var (
 	ociReferencePattern = regexp.MustCompile(`^oci://[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$`)
 	ollamaModelPattern  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}$`)
 	ggufFilePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf$`)
+	hfRepositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$`)
+	hfRevisionPattern   = regexp.MustCompile(`^[a-f0-9]{40}$`)
 	runParameterPattern = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,62}$`)
 )
 
 const (
-	maxArtifactBytes = int64(64 << 30)
-	maxContextLength = int32(131072)
+	maxHFRepositoryLength = 192
+	maxArtifactBytes      = int64(64 << 30)
+	maxContextLength      = int32(131072)
 	// runtimeMemoryOverhead and contextMemoryPerToken feed the conservative
 	// estimate only. They are frozen: the locked catalog bakes their output
 	// into immutable specs. contextMemoryPerToken is sized for models without
@@ -119,14 +122,23 @@ func ValidateWorkload(workload *IdleloomWorkload) error {
 func ValidateModel(model *IdleloomModel) error {
 	var errs field.ErrorList
 	specPath := field.NewPath("spec")
-	if model.Spec.Family != ModelFamilyQwen35 && model.Spec.Family != ModelFamilyOllamaGGUF && model.Spec.Family != ModelFamilyGGUF {
-		errs = append(errs, field.NotSupported(specPath.Child("family"), model.Spec.Family, []string{ModelFamilyQwen35, ModelFamilyOllamaGGUF, ModelFamilyGGUF}))
+	if model.Spec.Family != ModelFamilyQwen35 && model.Spec.Family != ModelFamilyMLX && model.Spec.Family != ModelFamilyOllamaGGUF && model.Spec.Family != ModelFamilyGGUF {
+		errs = append(errs, field.NotSupported(specPath.Child("family"), model.Spec.Family, []string{ModelFamilyQwen35, ModelFamilyMLX, ModelFamilyOllamaGGUF, ModelFamilyGGUF}))
 	}
 	if model.Spec.RuntimeProfile != RuntimeProfileMLXLMV1 && model.Spec.RuntimeProfile != RuntimeProfileOllamaGGUFV1 && model.Spec.RuntimeProfile != RuntimeProfileLlamaCppMetalV1 {
 		errs = append(errs, field.NotSupported(specPath.Child("runtimeProfile"), model.Spec.RuntimeProfile, []string{RuntimeProfileMLXLMV1, RuntimeProfileOllamaGGUFV1, RuntimeProfileLlamaCppMetalV1}))
 	}
-	if model.Spec.RuntimeProfile == RuntimeProfileMLXLMV1 && model.Spec.Family != ModelFamilyQwen35 {
-		errs = append(errs, field.Invalid(specPath.Child("family"), model.Spec.Family, "mlx-lm-v1 requires qwen3.5"))
+	if model.Spec.RuntimeProfile == RuntimeProfileMLXLMV1 && model.Spec.Family != ModelFamilyQwen35 && model.Spec.Family != ModelFamilyMLX {
+		errs = append(errs, field.Invalid(specPath.Child("family"), model.Spec.Family, "mlx-lm-v1 requires qwen3.5 or mlx"))
+	}
+	if model.Spec.Family == ModelFamilyMLX && model.Spec.RuntimeProfile != RuntimeProfileMLXLMV1 {
+		errs = append(errs, field.Invalid(specPath.Child("runtimeProfile"), model.Spec.RuntimeProfile, "mlx requires mlx-lm-v1"))
+	}
+	if model.Spec.RuntimeProfile == RuntimeProfileMLXLMV1 && model.Spec.Family == ModelFamilyQwen35 && model.Spec.Artifact.HuggingFace != nil {
+		errs = append(errs, field.Invalid(specPath.Child("artifact", "huggingFace"), model.Spec.Artifact.HuggingFace, "qwen3.5 is the locked OCI model; use family mlx for a Hugging Face source"))
+	}
+	if model.Spec.Family == ModelFamilyMLX && model.Spec.Artifact.HuggingFace == nil {
+		errs = append(errs, field.Required(specPath.Child("artifact", "huggingFace"), "mlx requires a Hugging Face source pinned by commit"))
 	}
 	if model.Spec.RuntimeProfile == RuntimeProfileOllamaGGUFV1 && model.Spec.Family != ModelFamilyOllamaGGUF {
 		errs = append(errs, field.Invalid(specPath.Child("family"), model.Spec.Family, "ollama-gguf-v1 requires ollama-gguf"))
@@ -441,22 +453,32 @@ func validateArtifact(artifact ModelArtifact, runtimeProfile string, path *field
 	if artifact.GGUFFile != "" && !ggufFilePattern.MatchString(artifact.GGUFFile) {
 		errs = append(errs, field.Invalid(path.Child("ggufFile"), artifact.GGUFFile, "must be a safe GGUF filename without a path"))
 	}
+	if source := artifact.HuggingFace; source != nil {
+		if len(source.Repository) > maxHFRepositoryLength || !hfRepositoryPattern.MatchString(source.Repository) {
+			errs = append(errs, field.Invalid(path.Child("huggingFace", "repository"), source.Repository, "must be OWNER/NAME"))
+		}
+		if !hfRevisionPattern.MatchString(source.Revision) {
+			errs = append(errs, field.Invalid(path.Child("huggingFace", "revision"), source.Revision, "must be a full 40-character lowercase commit SHA; branches and tags are not accepted"))
+		}
+	}
 	sources := 0
-	for _, present := range []bool{artifact.OCIReference != "", artifact.OllamaModel != "", artifact.GGUFFile != ""} {
+	for _, present := range []bool{artifact.OCIReference != "", artifact.OllamaModel != "", artifact.GGUFFile != "", artifact.HuggingFace != nil} {
 		if present {
 			sources++
 		}
 	}
 	if sources != 1 {
-		errs = append(errs, field.Invalid(path, artifact, "exactly one OCI, Ollama, or direct GGUF source is required"))
+		errs = append(errs, field.Invalid(path, artifact, "exactly one OCI, Ollama, direct GGUF, or Hugging Face source is required"))
 	}
 	if !sha256Pattern.MatchString(artifact.ManifestDigest) {
 		errs = append(errs, field.Invalid(path.Child("manifestDigest"), artifact.ManifestDigest, "must be sha256:<64 lowercase hex characters>"))
 	}
 	switch runtimeProfile {
 	case RuntimeProfileMLXLMV1:
-		if artifact.OCIReference == "" || artifact.Format != ArtifactFormatSafetensorsV1 || artifact.Signature == nil {
-			errs = append(errs, field.Invalid(path, artifact, "mlx-lm-v1 requires a signed OCI mlx-safetensors-v1 artifact"))
+		signedOCI := artifact.OCIReference != "" && artifact.Signature != nil
+		unsignedHF := artifact.HuggingFace != nil && artifact.Signature == nil
+		if !signedOCI && !unsignedHF || artifact.Format != ArtifactFormatSafetensorsV1 {
+			errs = append(errs, field.Invalid(path, artifact, "mlx-lm-v1 requires a signed OCI or an unsigned Hugging Face mlx-safetensors-v1 artifact"))
 		}
 	case RuntimeProfileOllamaGGUFV1:
 		if artifact.OllamaModel == "" || artifact.Format != ArtifactFormatGGUFV1 || artifact.Signature != nil {
@@ -506,6 +528,11 @@ func EffectiveUnifiedMemoryRequest(workload resource.Quantity, model resource.Qu
 		return workload.DeepCopy()
 	}
 	return model.DeepCopy()
+}
+
+// HuggingFaceArtifactName is how hosts list a prepared Hugging Face model.
+func HuggingFaceArtifactName(source HuggingFaceSource) string {
+	return source.Repository + "@" + source.Revision
 }
 
 func ArtifactDigestFromOCIReference(reference string) (string, error) {

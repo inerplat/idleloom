@@ -67,12 +67,14 @@ spec:
                     family:
                       enum:
                       - qwen3.5
+                      - mlx
                       - ollama-gguf
                       - gguf
                       type: string
                     format:
                       enum:
                       - gguf-v1
+                      - mlx-safetensors-v1
                       type: string
                     manifestDigest:
                       pattern: ^sha256:[a-f0-9]{64}$
@@ -111,10 +113,11 @@ spec:
                       - trainedContextLength
                       type: object
                     name:
-                      pattern: ^([a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}|[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf)$
+                      pattern: ^([a-z0-9][a-z0-9._-]{0,127}:[a-z0-9][a-z0-9._-]{0,63}|[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf|[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*@[a-f0-9]{40})$
                       type: string
                     runtimeProfile:
                       enum:
+                      - mlx-lm-v1
                       - ollama-gguf-v1
                       - llama-cpp-metal-v1
                       type: string

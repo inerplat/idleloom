@@ -45,6 +45,19 @@ spec:
                   ggufFile:
                     pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,190}\.gguf$
                     type: string
+                  huggingFace:
+                    properties:
+                      repository:
+                        maxLength: 192
+                        pattern: ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$
+                        type: string
+                      revision:
+                        pattern: ^[a-f0-9]{40}$
+                        type: string
+                    required:
+                    - repository
+                    - revision
+                    type: object
                   manifestDigest:
                     pattern: ^sha256:[a-f0-9]{64}$
                     type: string
@@ -80,14 +93,19 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: exactly one artifact source is required; OCI artifacts
-                    require a signature and local GGUF sources are unsigned
+                    require a signature and local GGUF and Hugging Face sources are
+                    unsigned
                   rule: (has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile)
-                    && has(self.signature)) || (!has(self.ociReference) && has(self.ollamaModel)
-                    && !has(self.ggufFile) && !has(self.signature)) || (!has(self.ociReference)
-                    && !has(self.ollamaModel) && has(self.ggufFile) && !has(self.signature))
+                    && !has(self.huggingFace) && has(self.signature)) || (!has(self.ociReference)
+                    && has(self.ollamaModel) && !has(self.ggufFile) && !has(self.huggingFace)
+                    && !has(self.signature)) || (!has(self.ociReference) && !has(self.ollamaModel)
+                    && has(self.ggufFile) && !has(self.huggingFace) && !has(self.signature))
+                    || (!has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile)
+                    && has(self.huggingFace) && !has(self.signature))
               family:
                 enum:
                 - qwen3.5
+                - mlx
                 - ollama-gguf
                 - gguf
                 type: string
@@ -207,6 +225,8 @@ spec:
         - message: runtime profile, model family, and artifact source must match
           rule: (self.spec.runtimeProfile == 'mlx-lm-v1' && self.spec.family == 'qwen3.5'
             && self.spec.artifact.format == 'mlx-safetensors-v1' && has(self.spec.artifact.ociReference))
+            || (self.spec.runtimeProfile == 'mlx-lm-v1' && self.spec.family == 'mlx'
+            && self.spec.artifact.format == 'mlx-safetensors-v1' && has(self.spec.artifact.huggingFace))
             || (self.spec.runtimeProfile == 'ollama-gguf-v1' && self.spec.family ==
             'ollama-gguf' && self.spec.artifact.format == 'gguf-v1' && has(self.spec.artifact.ollamaModel))
             || (self.spec.runtimeProfile == 'llama-cpp-metal-v1' && self.spec.family

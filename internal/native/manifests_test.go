@@ -86,8 +86,15 @@ func TestNativeCRDsExposeOnlyTheRestrictedWorkloadIntent(t *testing.T) {
 	modelSpecProperties := nestedMap(t, modelSchema, "properties", "spec", "properties")
 	artifactSchema := nestedMap(t, modelSpecProperties, "artifact")
 	artifactProperties := nestedMap(t, artifactSchema, "properties")
-	assertKeys(t, artifactProperties, []string{"format", "ggufFile", "manifestDigest", "ociReference", "ollamaModel", "signature", "sizeBytes"})
+	assertKeys(t, artifactProperties, []string{"format", "ggufFile", "huggingFace", "manifestDigest", "ociReference", "ollamaModel", "signature", "sizeBytes"})
 	assertValidationRuleContains(t, artifactSchema, "has(self.ociReference) && !has(self.ollamaModel) && !has(self.ggufFile)")
+	assertValidationRuleContains(t, artifactSchema, "has(self.huggingFace) && !has(self.signature)")
+	huggingFaceProperties := nestedMap(t, artifactProperties, "huggingFace", "properties")
+	assertKeys(t, huggingFaceProperties, []string{"repository", "revision"})
+	if revision := nestedMap(t, huggingFaceProperties, "revision"); revision["pattern"] != "^[a-f0-9]{40}$" {
+		t.Fatalf("Hugging Face revision schema = %#v, want a full commit SHA", revision)
+	}
+	assertValidationRuleContains(t, modelSchema, "self.spec.family == 'mlx' && self.spec.artifact.format == 'mlx-safetensors-v1' && has(self.spec.artifact.huggingFace)")
 	host := decodeObjects(t, filepath.Join(crdDir, "ai.idleloom.io_idleloomhosts.yaml"))[0]
 	hostSchema := crdSchema(t, host)
 	assertValidationRule(t, hostSchema, "self.metadata.name == 'host'")
