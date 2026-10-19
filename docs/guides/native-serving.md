@@ -46,12 +46,17 @@ It tolerates Idleloom's default Worker taint.
 
 The host agent relays the WireKube address byte for byte to the runtime's own
 OpenAI-compatible server: `mlx_lm.server`, `llama-server`, or Ollama. Idleloom
-does not parse or rewrite requests, so the routes, streaming, and response
-length (`max_tokens`) are whatever that runtime provides.
+does not parse or rewrite requests, so the routes, streaming, and a
+request's own `max_tokens` are handled by that runtime.
 
 Idleloom starts `llama-server` with a single slot (`--parallel 1`) and Ollama
-with `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_QUEUE=1`; `mlx_lm.server` runs with
-its own defaults. A request beyond what the runtime accepts gets that runtime's
+with `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_QUEUE=1`. It starts `mlx_lm.server`
+with `--max-tokens` set to the model's `maxContextLength`, so a request that
+sends no `max_tokens` is not cut off at the server's built-in default of 512
+tokens. That flag limits only the output: unlike the other two runtimes,
+`mlx_lm.server` does not bound prompt plus output by the context length, so a
+client sending long prompts should set its own `max_tokens`. A request beyond
+what the runtime accepts gets that runtime's
 own response, because Idleloom neither queues requests nor answers with HTTP
 429.
 

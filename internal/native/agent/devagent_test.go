@@ -1381,6 +1381,9 @@ func TestEnsureProcessServesMLXThroughOwnServer(t *testing.T) {
 			},
 			StartMLXServe: func(_ context.Context, config devruntime.MLXServeConfig) (Process, error) {
 				mlxServeCalls++
+				if config.MaxTokens != 2048 {
+					t.Fatalf("MLX server MaxTokens = %d, want the model context length 2048", config.MaxTokens)
+				}
 				if err := config.OnSpawn(126); err != nil {
 					return nil, err
 				}

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 
@@ -20,10 +21,23 @@ import (
 type MLXServeConfig struct {
 	Layout Layout
 	// HFModel selects a prepared Hugging Face model instead of the locked one.
-	HFModel      *HFModel
+	HFModel *HFModel
+	// MaxTokens is the server's default output limit for requests that send
+	// no max_tokens. mlx_lm.server otherwise stops every such response at
+	// 512 tokens, which a reasoning model can spend before it answers.
+	MaxTokens    int
 	DeniedPaths  []string
 	ReadyTimeout time.Duration
 	OnSpawn      func(int) error
+}
+
+func mlxServeArgs(profilePath, python, modelDirectory, host, port string, maxTokens int) ([]string, error) {
+	if maxTokens < 1 {
+		return nil, fmt.Errorf("MLX server maxTokens must be positive, got %d", maxTokens)
+	}
+	return []string{"-f", profilePath, python, "-I", "-B",
+		"-m", "mlx_lm.server", "--model", modelDirectory, "--host", host, "--port", port,
+		"--max-tokens", strconv.Itoa(maxTokens)}, nil
 }
 
 // MLXServeProcess supervises a serving mlx_lm.server. It intentionally does
@@ -66,8 +80,11 @@ func StartMLXServe(ctx context.Context, config MLXServeConfig) (*MLXServeProcess
 		return nil, err
 	}
 	python := filepath.Join(config.Layout.Venv, "bin", "python")
-	command := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, python, "-I", "-B",
-		"-m", "mlx_lm.server", "--model", modelDirectory, "--host", host, "--port", port)
+	args, err := mlxServeArgs(profilePath, python, modelDirectory, host, port, config.MaxTokens)
+	if err != nil {
+		return nil, err
+	}
+	command := exec.Command("/usr/bin/sandbox-exec", args...)
 	command.Dir = config.Layout.Work
 	command.Env = runnerEnv(config.Layout.Work)
 	procgroup.SetGroup(command)
