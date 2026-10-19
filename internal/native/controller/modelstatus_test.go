@@ -170,3 +170,30 @@ func TestModelStatusKeepsProfileWhenNoHostReports(t *testing.T) {
 		t.Fatal("host churn dropped a previously measured profile")
 	}
 }
+
+func TestModelStatusIgnoresUnmeasurableMLXModels(t *testing.T) {
+	scheme := runtime.NewScheme()
+	digest := "sha256:" + strings.Repeat("b", 64)
+	model := memoryProfileModel("lfm", digest)
+	model.Spec.Family = nativev1alpha1.ModelFamilyMLX
+	model.Spec.RuntimeProfile = nativev1alpha1.RuntimeProfileMLXLMV1
+	model.Spec.Artifact = nativev1alpha1.ModelArtifact{
+		HuggingFace:    &nativev1alpha1.HuggingFaceSource{Repository: "owner/model", Revision: strings.Repeat("0123456789", 4)},
+		ManifestDigest: digest, Format: nativev1alpha1.ArtifactFormatSafetensorsV1, SizeBytes: 1 << 30,
+	}
+	host := memoryProfileHost("idleloom-host-a", digest, nil)
+	host.Status.AvailableModels[0] = nativev1alpha1.HostModelStatus{
+		RuntimeProfile: nativev1alpha1.RuntimeProfileMLXLMV1, Name: "owner/model@" + strings.Repeat("0123456789", 4),
+		ManifestDigest: digest, Family: nativev1alpha1.ModelFamilyMLX,
+		Format: nativev1alpha1.ArtifactFormatSafetensorsV1, SizeBytes: 1 << 30,
+	}
+	client := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(scheme, modelStatusListKinds(), asUnstructured(t, model, host)...)
+	reconciler := &Reconciler{Dynamic: client, Coordination: kubernetesfake.NewClientset().CoordinationV1()}
+	if err := reconciler.reconcileModelStatuses(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	updated := readModel(t, client, "lfm")
+	if updated.Status.MemoryProfile != nil || apiMeta.FindStatusCondition(updated.Status.Conditions, nativev1alpha1.ModelConditionMemoryProfileMeasured) != nil {
+		t.Fatalf("an MLX model was given header-measurement status: %#v", updated.Status)
+	}
+}

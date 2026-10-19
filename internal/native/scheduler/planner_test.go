@@ -573,3 +573,77 @@ func TestPinnedLocalModelMatchIgnoresMeasuredMemory(t *testing.T) {
 		t.Fatal("measured memory data leaked into the pinned model identity match")
 	}
 }
+
+func huggingFaceModel() nativev1alpha1.IdleloomModel {
+	model := testModel()
+	model.Name = "lfm2-8b-mlx"
+	model.Spec.Family = nativev1alpha1.ModelFamilyMLX
+	model.Spec.Artifact = nativev1alpha1.ModelArtifact{
+		HuggingFace: &nativev1alpha1.HuggingFaceSource{
+			Repository: "mlx-community/LFM2-8B-A1B-4bit", Revision: strings.Repeat("0123456789", 4),
+		},
+		ManifestDigest: "sha256:" + strings.Repeat("d", 64),
+		Format:         nativev1alpha1.ArtifactFormatSafetensorsV1, SizeBytes: 4_500_000_000,
+	}
+	model.Spec.MinimumUnifiedMemory = nativev1alpha1.MinimumUnifiedMemoryForModel(model.Spec.Artifact.SizeBytes, model.Spec.MaxContextLength)
+	return model
+}
+
+func TestHuggingFaceMLXModelSchedulesOnlyOnMLXFamilyHosts(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Model.CatalogRef = "lfm2-8b-mlx"
+	workload.Spec.Resources.UnifiedMemoryRequest = resource.MustParse("1Gi")
+	model := huggingFaceModel()
+	planner := Planner{Now: func() time.Time { return now }}
+
+	qwenOnly := testHost("qwen-only", "32Gi", now)
+	if _, err := planner.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{qwenOnly}); err == nil || !strings.Contains(err.Error(), "model family mlx is not supported") {
+		t.Fatalf("locked-only host error = %v", err)
+	}
+	familyWithoutRuntime := testHost("no-runtime", "32Gi", now)
+	familyWithoutRuntime.Status.RuntimeProfiles = []string{nativev1alpha1.RuntimeProfileLlamaCppMetalV1}
+	familyWithoutRuntime.Status.ModelFamilies = []string{nativev1alpha1.ModelFamilyMLX}
+	if _, err := planner.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{familyWithoutRuntime}); err == nil || !strings.Contains(err.Error(), "runtime mlx-lm-v1 is not supported") {
+		t.Fatalf("host without the MLX runtime error = %v", err)
+	}
+
+	// The host has not downloaded the model yet; it does so on first use.
+	mlxHost := testHost("mlx", "32Gi", now)
+	mlxHost.Status.ModelFamilies = []string{nativev1alpha1.ModelFamilyQwen35, nativev1alpha1.ModelFamilyMLX}
+	selected, err := planner.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{qwenOnly, familyWithoutRuntime, mlxHost})
+	if err != nil {
+		t.Fatalf("MLX host was rejected: %v", err)
+	}
+	if selected.Name != mlxHost.Name || selected.Namespace != mlxHost.Namespace {
+		t.Fatalf("selected %s/%s, want the MLX host", selected.Namespace, selected.Name)
+	}
+	assignment, err := planner.PlanAssignment(&workload, &model, mlxHost.DeepCopy(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := assignment.Spec.Model.Artifact.HuggingFace
+	if source == nil || *source != *model.Spec.Artifact.HuggingFace || assignment.Spec.Model.Family != nativev1alpha1.ModelFamilyMLX {
+		t.Fatalf("resolved model = %#v", assignment.Spec.Model)
+	}
+	if assignment.Spec.Model.UnifiedMemoryRequest.Cmp(model.Spec.MinimumUnifiedMemory) != 0 {
+		t.Fatalf("memory request = %s, want the declared minimum %s", assignment.Spec.Model.UnifiedMemoryRequest.String(), model.Spec.MinimumUnifiedMemory.String())
+	}
+
+	small := testHost("small", "8Gi", now)
+	small.Status.ModelFamilies = []string{nativev1alpha1.ModelFamilyMLX}
+	if _, err := planner.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{small}); err == nil || !strings.Contains(err.Error(), "less than request") {
+		t.Fatalf("undersized host error = %v", err)
+	}
+
+	locked := testModel()
+	lockedWorkload := testWorkload()
+	mlxOnly := testHost("mlx-only", "32Gi", now)
+	mlxOnly.Status.ModelFamilies = []string{nativev1alpha1.ModelFamilyMLX}
+	if _, err := planner.SelectHost(&lockedWorkload, &locked, []nativev1alpha1.IdleloomHost{mlxOnly}); err == nil || !strings.Contains(err.Error(), "model family qwen3.5 is not supported") {
+		t.Fatalf("locked model on an mlx-only host error = %v", err)
+	}
+	if _, err := planner.SelectHost(&lockedWorkload, &locked, []nativev1alpha1.IdleloomHost{mlxHost}); err != nil {
+		t.Fatalf("locked model was rejected on a host advertising both families: %v", err)
+	}
+}

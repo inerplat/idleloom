@@ -86,11 +86,13 @@ func TestSandboxProfileProtectsCredentials(t *testing.T) {
 	}
 	root := t.TempDir()
 	layout := NewLayout(root)
-	if err := os.MkdirAll(layout.Work, 0o700); err != nil {
-		t.Fatal(err)
+	for _, directory := range []string{layout.Work, layout.Model} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	credential := filepath.Join(root, "..", "agent.kubeconfig")
-	profile, err := sandboxProfile(layout, []string{credential}, "")
+	profile, err := sandboxProfile(layout, layout.Model, []string{credential}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

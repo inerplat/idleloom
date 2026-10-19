@@ -57,6 +57,7 @@ type DevAgentConfig struct {
 	ResolveOllama          func() (devruntime.OllamaRuntime, []devruntime.OllamaModel, error)
 	ResolveLlamaCpp        func() (devruntime.LlamaCppRuntime, []devruntime.LlamaCppModel, map[string]devruntime.GGUFMemoryProfile, error)
 	PrepareRuntime         func(context.Context, func(string)) (devruntime.Receipt, error)
+	PrepareHFModel         func(context.Context, devruntime.HFModel, func(string)) (devruntime.HFModelReceipt, error)
 	PrepareTrainingRuntime func(context.Context, func(string)) (devruntime.RuntimeReceipt, error)
 	KubeletBridge          *KubeletBridgeConfig
 }
@@ -241,12 +242,17 @@ func NewDevAgent(config DevAgentConfig) (*DevAgent, error) {
 			return llamaRuntime, models, profiles, err
 		}
 	}
-	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && (config.PrepareRuntime == nil || config.PrepareTrainingRuntime == nil) {
+	if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" && (config.PrepareRuntime == nil || config.PrepareHFModel == nil || config.PrepareTrainingRuntime == nil) {
 		python, pythonErr := devruntime.FindPython312("")
 		if platformErr := devruntime.CheckMLXPlatform(); platformErr == nil && pythonErr == nil {
 			if config.PrepareRuntime == nil {
 				config.PrepareRuntime = func(ctx context.Context, progress func(string)) (devruntime.Receipt, error) {
 					return (devruntime.Preparer{Root: config.Layout.Root, Python: python, Progress: progress}).Prepare(ctx)
+				}
+			}
+			if config.PrepareHFModel == nil {
+				config.PrepareHFModel = func(ctx context.Context, model devruntime.HFModel, progress func(string)) (devruntime.HFModelReceipt, error) {
+					return (devruntime.Preparer{Root: config.Layout.Root, Python: python, Progress: progress}).PrepareHFModel(ctx, model)
 				}
 			}
 			if config.PrepareTrainingRuntime == nil {
@@ -535,12 +541,21 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 	var ollamaModel devruntime.OllamaModel
 	var llamaRuntime devruntime.LlamaCppRuntime
 	var llamaModel devruntime.LlamaCppModel
+	var hfModel *devruntime.HFModel
 	runtimeVersion := ""
 	executable := filepath.Join(a.config.Layout.Venv, "bin", "python")
 	var err error
 	if assignment.Spec.Model != nil {
 		switch assignment.Spec.Model.RuntimeProfile {
 		case nativev1alpha1.RuntimeProfileMLXLMV1:
+			if assignment.Spec.Model.Family == nativev1alpha1.ModelFamilyMLX {
+				hfModel, err = a.prepareAssignedHFModel(ctx, assignment)
+				if err != nil {
+					return err
+				}
+				runtimeVersion = devruntime.RuntimeVersion
+				break
+			}
 			receipt, err = devruntime.VerifyFast(a.config.Layout)
 			if err != nil && a.config.PrepareRuntime != nil {
 				a.appendLog(a.now(), "preparing locked MLX runtime and model")
@@ -646,7 +661,7 @@ func (a *DevAgent) ensureProcess(ctx context.Context, assignment *nativev1alpha1
 	} else {
 		a.appendLog(a.now(), "starting shell process: isolation=%s network=%s", assignment.Spec.Shell.Isolation, assignment.Spec.Shell.Network)
 	}
-	process, err = a.startProcessWithLease(ctx, assignment, planned, nonce, ollamaRuntime, ollamaModel, llamaRuntime, llamaModel)
+	process, err = a.startProcessWithLease(ctx, assignment, planned, nonce, ollamaRuntime, ollamaModel, llamaRuntime, llamaModel, hfModel)
 	if err != nil {
 		a.appendLog(a.now(), "native process failed to start: %v", err)
 		if current := a.store.Current(); current != nil {
@@ -735,7 +750,7 @@ func (a *DevAgent) fenceSupersededExecution(ctx context.Context, assignment *nat
 	return nil
 }
 
-func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment, planned execution.Record, nonce string, ollamaRuntime devruntime.OllamaRuntime, ollamaModel devruntime.OllamaModel, llamaRuntime devruntime.LlamaCppRuntime, llamaModel devruntime.LlamaCppModel) (Process, error) {
+func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment, planned execution.Record, nonce string, ollamaRuntime devruntime.OllamaRuntime, ollamaModel devruntime.OllamaModel, llamaRuntime devruntime.LlamaCppRuntime, llamaModel devruntime.LlamaCppModel, hfModel *devruntime.HFModel) (Process, error) {
 	type result struct {
 		process Process
 		err     error
@@ -820,13 +835,13 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 			default:
 				if assignment.Spec.Model.Server != nil {
 					process, err = a.config.StartMLXServe(startupCtx, devruntime.MLXServeConfig{
-						Layout:       a.config.Layout,
+						Layout: a.config.Layout, HFModel: hfModel,
 						DeniedPaths:  []string{a.config.StateDirectory, a.config.KubeconfigPath},
 						ReadyTimeout: 5 * time.Minute, OnSpawn: onSpawn,
 					})
 				} else {
 					process, err = a.config.StartProcess(startupCtx, devruntime.ProcessConfig{
-						Layout: a.config.Layout, DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
+						Layout: a.config.Layout, HFModel: hfModel, DeniedPaths: []string{a.config.StateDirectory, a.config.KubeconfigPath},
 						ReadyTimeout: 5 * time.Minute, Nonce: nonce, OnSpawn: onSpawn,
 					})
 				}
@@ -896,49 +911,53 @@ func (a *DevAgent) refreshStartupLease(ctx context.Context, expected *nativev1al
 }
 
 func (a *DevAgent) prepareRuntimeWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) (devruntime.Receipt, error) {
-	type result struct {
-		receipt devruntime.Receipt
-		err     error
-	}
-	completed := make(chan result, 1)
-	prepareCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
-		receipt, err := a.config.PrepareRuntime(prepareCtx, func(message string) {
-			a.appendLog(a.now(), "prepare: %s", message)
-		})
-		completed <- result{receipt: receipt, err: err}
-	}()
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case result := <-completed:
-			return result.receipt, result.err
-		case <-ticker.C:
-			if err := a.refreshStartupLease(prepareCtx, assignment); err != nil {
-				cancel()
-				result := <-completed
-				return result.receipt, errors.Join(fmt.Errorf("refresh preparation assignment lease: %w", err), result.err)
-			}
-		case <-ctx.Done():
-			cancel()
-			result := <-completed
-			return result.receipt, errors.Join(ctx.Err(), result.err)
-		}
-	}
+	return prepareWithLease(ctx, a, assignment, "preparation assignment lease", a.config.PrepareRuntime)
 }
 
 func (a *DevAgent) prepareTrainingRuntimeWithLease(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) (devruntime.RuntimeReceipt, error) {
+	return prepareWithLease(ctx, a, assignment, "training runtime preparation lease", a.config.PrepareTrainingRuntime)
+}
+
+// prepareAssignedHFModel makes the assignment's Hugging Face model ready to
+// start, downloading it under the renewed startup lease on first use.
+func (a *DevAgent) prepareAssignedHFModel(ctx context.Context, assignment *nativev1alpha1.IdleloomWorkloadAssignment) (*devruntime.HFModel, error) {
+	artifact := assignment.Spec.Model.Artifact
+	if artifact.HuggingFace == nil || artifact.Format != nativev1alpha1.ArtifactFormatSafetensorsV1 {
+		return nil, fmt.Errorf("assignment for the mlx family is not a Hugging Face mlx-safetensors-v1 artifact")
+	}
+	model := devruntime.HFModel{
+		Repository: artifact.HuggingFace.Repository, Revision: artifact.HuggingFace.Revision,
+		ManifestDigest: artifact.ManifestDigest, SizeBytes: artifact.SizeBytes,
+	}
+	name := nativev1alpha1.HuggingFaceArtifactName(*artifact.HuggingFace)
+	receipt, err := devruntime.VerifyHFModelFast(a.config.Layout, model)
+	if err != nil && a.config.PrepareHFModel != nil {
+		a.appendLog(a.now(), "preparing locked MLX runtime and model %s", name)
+		receipt, err = prepareWithLease(ctx, a, assignment, "model preparation assignment lease", func(ctx context.Context, progress func(string)) (devruntime.HFModelReceipt, error) {
+			return a.config.PrepareHFModel(ctx, model, progress)
+		})
+	}
+	if err != nil {
+		return nil, fmt.Errorf("prepare MLX model %s: %w", name, err)
+	}
+	if !receipt.Serves(model) {
+		return nil, fmt.Errorf("prepared MLX model does not match the assignment")
+	}
+	return &model, nil
+}
+
+// prepareWithLease runs a long preparation step while keeping the startup
+// assignment lease fresh, and cancels it once the lease cannot be renewed.
+func prepareWithLease[T any](ctx context.Context, a *DevAgent, assignment *nativev1alpha1.IdleloomWorkloadAssignment, lease string, prepare func(context.Context, func(string)) (T, error)) (T, error) {
 	type result struct {
-		receipt devruntime.RuntimeReceipt
+		receipt T
 		err     error
 	}
 	completed := make(chan result, 1)
 	prepareCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
-		receipt, err := a.config.PrepareTrainingRuntime(prepareCtx, func(message string) {
+		receipt, err := prepare(prepareCtx, func(message string) {
 			a.appendLog(a.now(), "prepare: %s", message)
 		})
 		completed <- result{receipt: receipt, err: err}
@@ -953,7 +972,7 @@ func (a *DevAgent) prepareTrainingRuntimeWithLease(ctx context.Context, assignme
 			if err := a.refreshStartupLease(prepareCtx, assignment); err != nil {
 				cancel()
 				result := <-completed
-				return result.receipt, errors.Join(fmt.Errorf("refresh training runtime preparation lease: %w", err), result.err)
+				return result.receipt, errors.Join(fmt.Errorf("refresh %s: %w", lease, err), result.err)
 			}
 		case <-ctx.Done():
 			cancel()
@@ -1111,6 +1130,7 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 	readyStatus := metav1.ConditionFalse
 	readyReason := "DevelopmentRuntimeUnavailable"
 	readyMessage := "no Native runtime capability is available"
+	_, mlxRuntimeErr := devruntime.VerifyRuntimeFast(a.config.Layout)
 	if _, err := devruntime.VerifyFast(a.config.Layout); err == nil {
 		copy.Status.RuntimeProfiles = append(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXLMV1)
 		copy.Status.ModelFamilies = append(copy.Status.ModelFamilies, nativev1alpha1.ModelFamilyQwen35)
@@ -1123,6 +1143,22 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 		readyStatus = metav1.ConditionTrue
 		readyReason = "NativeRuntimePreparable"
 		readyMessage = "locked MLX inference runtime and model will be prepared on first use"
+	}
+	mlxModelsAvailable := mlxRuntimeErr == nil || a.config.PrepareHFModel != nil
+	if mlxModelsAvailable {
+		// Generic MLX models are downloaded on first use, so the family only
+		// needs a runtime that is ready or can be prepared.
+		copy.Status.RuntimeProfiles = appendUnique(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXLMV1)
+		copy.Status.ModelFamilies = appendUnique(copy.Status.ModelFamilies, nativev1alpha1.ModelFamilyMLX)
+		if readyReason == "DevelopmentRuntimeUnavailable" {
+			readyStatus = metav1.ConditionTrue
+			readyReason = "NativeRuntimePreparable"
+			readyMessage = "locked MLX runtime and pinned MLX models will be prepared on first use"
+			if mlxRuntimeErr == nil {
+				readyReason = "NativeRuntimeReady"
+				readyMessage = "locked MLX runtime is available; pinned MLX models are downloaded on first use"
+			}
+		}
 	}
 	if a.config.ResolveOllama != nil {
 		_, models, err := a.config.ResolveOllama()
@@ -1185,7 +1221,21 @@ func (a *DevAgent) updateHostStatus(ctx context.Context, host *nativev1alpha1.Id
 			}
 		}
 	}
-	if _, err := devruntime.VerifyRuntimeFast(a.config.Layout); err == nil {
+	if mlxModelsAvailable {
+		// Listed after the pinned local models: those must be advertised to be
+		// scheduled at all, while an MLX model can be scheduled unlisted.
+		for _, receipt := range devruntime.DiscoverHFModels(a.config.Layout) {
+			for _, model := range receipt.Models() {
+				copy.Status.AvailableModels = appendAvailableModel(copy.Status.AvailableModels, nativev1alpha1.HostModelStatus{
+					RuntimeProfile: nativev1alpha1.RuntimeProfileMLXLMV1,
+					Name:           nativev1alpha1.HuggingFaceArtifactName(nativev1alpha1.HuggingFaceSource{Repository: model.Repository, Revision: model.Revision}),
+					ManifestDigest: model.ManifestDigest, Family: nativev1alpha1.ModelFamilyMLX,
+					Format: nativev1alpha1.ArtifactFormatSafetensorsV1, SizeBytes: model.SizeBytes,
+				})
+			}
+		}
+	}
+	if mlxRuntimeErr == nil {
 		copy.Status.RuntimeProfiles = appendUnique(copy.Status.RuntimeProfiles, nativev1alpha1.RuntimeProfileMLXTrainV1)
 		copy.Status.Capabilities = appendUnique(copy.Status.Capabilities, nativev1alpha1.CapabilityNativeTrainingV1)
 		readyStatus = metav1.ConditionTrue

@@ -38,6 +38,10 @@ func (r *Reconciler) reconcileModelStatuses(ctx context.Context) error {
 			continue
 		}
 		for _, entry := range host.Status.AvailableModels {
+			if entry.RuntimeProfile == nativev1alpha1.RuntimeProfileMLXLMV1 {
+				// MLX safetensors carry no header geometry to measure.
+				continue
+			}
 			current := observed[entry.ManifestDigest]
 			if current == nil {
 				current = &observation{}

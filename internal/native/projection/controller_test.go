@@ -114,6 +114,21 @@ func TestProjectionUsesPinnedLlamaCppArtifactIdentity(t *testing.T) {
 	}
 }
 
+func TestProjectionUsesPinnedHuggingFaceArtifactIdentity(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("c", 64)
+	revision := strings.Repeat("0123456789", 4)
+	assignment := &nativev1alpha1.IdleloomWorkloadAssignment{Spec: nativev1alpha1.IdleloomWorkloadAssignmentSpec{
+		Model: &nativev1alpha1.ResolvedModel{Artifact: nativev1alpha1.ModelArtifact{
+			HuggingFace:    &nativev1alpha1.HuggingFaceSource{Repository: "mlx-community/LFM2-8B-A1B-4bit", Revision: revision},
+			ManifestDigest: digest,
+		}},
+	}}
+	want := "hf://mlx-community/LFM2-8B-A1B-4bit@" + revision + "#" + digest
+	if got := projectionAnnotations(assignment, false)[AnnotationModelArtifact]; got != want {
+		t.Fatalf("model artifact annotation = %q, want %q", got, want)
+	}
+}
+
 func TestReconcilePublishesLogsEndpointOnlyForConnectedWireKubeHost(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0).UTC()
 	workload, assignment := testProjectionObjects(now)

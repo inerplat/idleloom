@@ -36,6 +36,7 @@ type Layout struct {
 	Wheelhouse     string
 	Venv           string
 	Model          string
+	HFModels       string
 	Work           string
 	Runner         string
 	Receipt        string
@@ -65,6 +66,8 @@ type Preparer struct {
 	Root       string
 	Python     string
 	HTTPClient *http.Client
+	// HFEndpoint overrides the Hugging Face origin for generic MLX models.
+	HFEndpoint string
 	Progress   func(string)
 }
 
@@ -83,6 +86,7 @@ func NewLayout(root string) Layout {
 		Wheelhouse:     filepath.Join(root, "wheelhouse"),
 		Venv:           filepath.Join(root, "runtime", "venv"),
 		Model:          filepath.Join(root, "models", "qwen3.5-0.8b-4bit"),
+		HFModels:       filepath.Join(root, "models", "hf"),
 		Work:           filepath.Join(root, "work"),
 		Runner:         filepath.Join(root, "runtime", "runner.py"),
 		Receipt:        filepath.Join(root, "receipt.json"),

@@ -644,6 +644,9 @@ func modelArtifactIdentity(artifact nativev1alpha1.ModelArtifact) string {
 	if artifact.GGUFFile != "" && artifact.ManifestDigest != "" {
 		return "gguf://managed/" + artifact.GGUFFile + "@" + artifact.ManifestDigest
 	}
+	if artifact.HuggingFace != nil && artifact.ManifestDigest != "" {
+		return "hf://" + artifact.HuggingFace.Repository + "@" + artifact.HuggingFace.Revision + "#" + artifact.ManifestDigest
+	}
 	return ""
 }
 

@@ -27,7 +27,9 @@ const (
 )
 
 type ProcessConfig struct {
-	Layout       Layout
+	Layout Layout
+	// HFModel selects a prepared Hugging Face model instead of the locked one.
+	HFModel      *HFModel
 	DeniedPaths  []string
 	ReadyTimeout time.Duration
 	Nonce        string
@@ -84,7 +86,8 @@ func Start(ctx context.Context, config ProcessConfig) (*Process, error) {
 	if runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf("sandboxed MLX runner requires macOS")
 	}
-	if _, err := Verify(config.Layout); err != nil {
+	modelDirectory, err := verifiedModelDirectory(config.Layout, config.HFModel)
+	if err != nil {
 		return nil, err
 	}
 	if len(config.Nonce) != 64 {
@@ -93,7 +96,7 @@ func Start(ctx context.Context, config ProcessConfig) (*Process, error) {
 	if _, err := hex.DecodeString(config.Nonce); err != nil || strings.ToLower(config.Nonce) != config.Nonce {
 		return nil, fmt.Errorf("runner nonce must contain 64 lowercase hex characters")
 	}
-	profile, err := sandboxProfile(config.Layout, config.DeniedPaths, "")
+	profile, err := sandboxProfile(config.Layout, modelDirectory, config.DeniedPaths, "")
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +105,7 @@ func Start(ctx context.Context, config ProcessConfig) (*Process, error) {
 		return nil, err
 	}
 	python := filepath.Join(config.Layout.Venv, "bin", "python")
-	cmd := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, python, "-I", "-B", config.Layout.Runner, config.Layout.Model, config.Nonce)
+	cmd := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, python, "-I", "-B", config.Layout.Runner, modelDirectory, config.Nonce)
 	cmd.Dir = config.Layout.Work
 	cmd.Env = runnerEnv(config.Layout.Work)
 	procgroup.SetGroup(cmd)
@@ -303,13 +306,47 @@ func (p *Process) readResponses(reader io.Reader) {
 	}
 }
 
-func sandboxProfile(layout Layout, denied []string, servePort string) (string, error) {
+// verifiedModelDirectory fully verifies the model a process is about to load
+// and returns its directory: the locked model when hfModel is nil.
+func verifiedModelDirectory(layout Layout, hfModel *HFModel) (string, error) {
+	if hfModel == nil {
+		if _, err := Verify(layout); err != nil {
+			return "", err
+		}
+		return layout.Model, nil
+	}
+	if _, err := VerifyHFModel(layout, *hfModel); err != nil {
+		return "", err
+	}
+	return HFModelDirectory(layout, hfModel.ManifestDigest), nil
+}
+
+func sandboxProfile(layout Layout, modelDirectory string, denied []string, servePort string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	if inside(layout.Root, home) {
 		return "", fmt.Errorf("development runtime root must be outside the user home for sandbox isolation")
+	}
+	model, err := canonicalPath(modelDirectory)
+	if err != nil {
+		return "", err
+	}
+	lockedModel, err := canonicalPath(layout.Model)
+	if err != nil {
+		return "", err
+	}
+	hfModels, err := canonicalPath(layout.HFModels)
+	if err != nil {
+		return "", err
+	}
+	if model != lockedModel && filepath.Dir(model) != hfModels {
+		return "", fmt.Errorf("the sandbox only grants the locked model or one prepared model directory")
+	}
+	modelStore, err := canonicalPath(filepath.Join(layout.Root, "models"))
+	if err != nil {
+		return "", err
 	}
 	metalCaches, err := metalCompilerCaches()
 	if err != nil {
@@ -333,7 +370,20 @@ func sandboxProfile(layout Layout, denied []string, servePort string) (string, e
 		return "", err
 	}
 	pythonApp := "/Library/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python"
-	denied = append([]string{home}, denied...)
+	var deniedPaths []string
+	for _, name := range append([]string{home}, denied...) {
+		if name == "" {
+			continue
+		}
+		absolute, err := canonicalPath(name)
+		if err != nil {
+			return "", err
+		}
+		if inside(model, absolute) {
+			return "", fmt.Errorf("the model directory must not be inside a denied path")
+		}
+		deniedPaths = append(deniedPaths, absolute)
+	}
 	var rules strings.Builder
 	rules.WriteString("(version 1)\n(deny default)\n")
 	rules.WriteString("(allow process-fork)\n")
@@ -346,14 +396,7 @@ func sandboxProfile(layout Layout, denied []string, servePort string) (string, e
 	rules.WriteString("(allow mach-lookup (global-name \"com.apple.MTLCompilerService\"))\n")
 	rules.WriteString("(allow iokit-open)\n(allow iokit-get-properties)\n")
 	rules.WriteString("(allow file-read*)\n")
-	for _, name := range denied {
-		if name == "" {
-			continue
-		}
-		absolute, err := canonicalPath(name)
-		if err != nil {
-			return "", err
-		}
+	for _, absolute := range deniedPaths {
 		rules.WriteString("(deny file-read* (subpath \"")
 		rules.WriteString(escapeSandbox(absolute))
 		rules.WriteString("\"))\n")
@@ -361,6 +404,14 @@ func sandboxProfile(layout Layout, denied []string, servePort string) (string, e
 		rules.WriteString(escapeSandbox(absolute))
 		rules.WriteString("\"))\n")
 	}
+	// Later rules win: the whole model store is unreadable except the one
+	// model this process was verified and admitted for.
+	rules.WriteString("(deny file-read* (subpath \"")
+	rules.WriteString(escapeSandbox(modelStore))
+	rules.WriteString("\"))\n")
+	rules.WriteString("(allow file-read* (subpath \"")
+	rules.WriteString(escapeSandbox(model))
+	rules.WriteString("\"))\n")
 	rules.WriteString("(allow file-write* (subpath \"")
 	rules.WriteString(escapeSandbox(work))
 	rules.WriteString("\"))\n")

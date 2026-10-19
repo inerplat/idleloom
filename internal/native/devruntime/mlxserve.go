@@ -18,7 +18,9 @@ import (
 // ships inside the locked mlx-lm wheel, bound directly to the serving address.
 // Nothing sits between the client and the runtime's own API.
 type MLXServeConfig struct {
-	Layout       Layout
+	Layout Layout
+	// HFModel selects a prepared Hugging Face model instead of the locked one.
+	HFModel      *HFModel
 	DeniedPaths  []string
 	ReadyTimeout time.Duration
 	OnSpawn      func(int) error
@@ -43,7 +45,8 @@ func StartMLXServe(ctx context.Context, config MLXServeConfig) (*MLXServeProcess
 	if runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf("sandboxed MLX server requires macOS")
 	}
-	if _, err := Verify(config.Layout); err != nil {
+	modelDirectory, err := verifiedModelDirectory(config.Layout, config.HFModel)
+	if err != nil {
 		return nil, err
 	}
 	address, err := unusedLoopbackAddress()
@@ -54,7 +57,7 @@ func StartMLXServe(ctx context.Context, config MLXServeConfig) (*MLXServeProcess
 	if err != nil {
 		return nil, err
 	}
-	profile, err := sandboxProfile(config.Layout, config.DeniedPaths, port)
+	profile, err := sandboxProfile(config.Layout, modelDirectory, config.DeniedPaths, port)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +67,7 @@ func StartMLXServe(ctx context.Context, config MLXServeConfig) (*MLXServeProcess
 	}
 	python := filepath.Join(config.Layout.Venv, "bin", "python")
 	command := exec.Command("/usr/bin/sandbox-exec", "-f", profilePath, python, "-I", "-B",
-		"-m", "mlx_lm.server", "--model", config.Layout.Model, "--host", host, "--port", port)
+		"-m", "mlx_lm.server", "--model", modelDirectory, "--host", host, "--port", port)
 	command.Dir = config.Layout.Work
 	command.Env = runnerEnv(config.Layout.Work)
 	procgroup.SetGroup(command)
