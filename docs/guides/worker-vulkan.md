@@ -218,6 +218,11 @@ llama.cpp leaves `/v1/models` readable, so it answers 200 without a key.
 The complete values and request contract are in the
 [recipe reference](../recipes.md#linux-worker-vulkan-serving).
 
+`examples/worker/lfm2.5-24b-a2b-llama-vulkan-values.yaml` serves LiquidAI
+LFM2.5-24B-A2B instead. That model needs a newer llama.cpp than the recipe's
+default image, so the file starts with the commands that build and load
+`Dockerfile.llama-vulkan`.
+
 ## Cleanup
 
 ```sh

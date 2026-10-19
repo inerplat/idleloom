@@ -1,0 +1,7 @@
+# Values for serve/mlx-qwen@v1 with the catalog entry in
+# lfm2.5-24b-a2b-mlx-model.yaml.
+namespace: default
+model: lfm2-5-24b-a2b-mlx
+modelAlias: lfm2.5-24b-a2b
+servicePort: 8000
+unifiedMemory: 18Gi

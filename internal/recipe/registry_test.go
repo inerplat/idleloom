@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -297,6 +299,34 @@ func TestAllEmbeddedExamplesRender(t *testing.T) {
 		name := strings.ReplaceAll(definition.Backend+"-example", "/", "-")
 		if _, err := registry.Render(definition.ID(), RenderOptions{Name: name, Values: item.example}); err != nil {
 			t.Fatalf("render example for %s: %v", definition.ID(), err)
+		}
+	}
+}
+
+func TestRepositoryExampleValuesRender(t *testing.T) {
+	recipes := map[string]string{
+		"lfm2.5-24b-a2b-mlx-serve-values.yaml":    nativeServeID,
+		"lfm2.5-24b-a2b-llama-vulkan-values.yaml": workerServeID,
+	}
+	paths, err := filepath.Glob(filepath.Join("..", "..", "examples", "*", "*-values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) != len(recipes) {
+		t.Fatalf("example values files = %q, want one per entry in %v", paths, recipes)
+	}
+	registry := mustRegistry(t)
+	for _, path := range paths {
+		id, ok := recipes[filepath.Base(path)]
+		if !ok {
+			t.Fatalf("%s has no recipe in this test", path)
+		}
+		values, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := registry.Render(id, RenderOptions{Name: "example", Values: values}); err != nil {
+			t.Fatalf("render %s with %s: %v", path, id, err)
 		}
 	}
 }

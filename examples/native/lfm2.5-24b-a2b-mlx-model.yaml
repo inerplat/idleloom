@@ -1,0 +1,23 @@
+# Generated with:
+#   idlectl model inspect hf \
+#     LiquidAI/LFM2.5-24B-A2B-MLX-4bit@667408d494bde191c2cb9dd4f4549827816b9275 \
+#     --name lfm2-5-24b-a2b-mlx --max-context 131072 --min-memory 18Gi
+# 18Gi covers the 12.7 GiB of weights plus about 2.7 GB of cache for a full
+# 128K context, instead of the 1 MiB per token the default estimate assumes.
+apiVersion: ai.idleloom.io/v1alpha1
+kind: IdleloomModel
+metadata:
+  name: lfm2-5-24b-a2b-mlx
+spec:
+  artifact:
+    format: mlx-safetensors-v1
+    huggingFace:
+      repository: LiquidAI/LFM2.5-24B-A2B-MLX-4bit
+      revision: 667408d494bde191c2cb9dd4f4549827816b9275
+    manifestDigest: sha256:aba1acd571da13e63acbc7d3489cfcfc9603625acb026228c1db71e549785fb3
+    sizeBytes: 13585302723
+  family: mlx
+  maxConcurrentRequests: 1
+  maxContextLength: 131072
+  minimumUnifiedMemory: 18Gi
+  runtimeProfile: mlx-lm-v1

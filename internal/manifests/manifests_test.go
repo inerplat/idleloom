@@ -8,26 +8,35 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	nativev1alpha1 "github.com/inerplat/idleloom/api/native/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes/scheme"
 )
 
 func TestPublicManifestsDecodeStrictly(t *testing.T) {
+	decodeScheme := runtime.NewScheme()
+	for _, add := range []func(*runtime.Scheme) error{scheme.AddToScheme, nativev1alpha1.AddToScheme} {
+		if err := add(decodeScheme); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, root := range []string{
 		filepath.Join("..", "..", "deploy"),
 		filepath.Join("..", "..", "examples"),
 	} {
-		if err := walkManifests(root); err != nil {
+		if err := walkManifests(root, decodeScheme); err != nil {
 			t.Fatal(err)
 		}
 	}
 }
 
-func walkManifests(root string) error {
+func walkManifests(root string, decodeScheme *runtime.Scheme) error {
 	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -35,7 +44,8 @@ func walkManifests(root string) error {
 		if entry.IsDir() || filepath.Ext(path) != ".yaml" {
 			return nil
 		}
-		if entry.Name() == "kustomization.yaml" {
+		// Recipe values are rendered by internal/recipe tests instead.
+		if entry.Name() == "kustomization.yaml" || strings.HasSuffix(entry.Name(), "-values.yaml") {
 			return nil
 		}
 		data, err := os.ReadFile(path)
@@ -43,7 +53,7 @@ func walkManifests(root string) error {
 			return err
 		}
 		reader := yaml.NewYAMLReader(bufio.NewReaderSize(bytes.NewReader(data), 4096))
-		strict := serializer.NewCodecFactory(scheme.Scheme, serializer.EnableStrict).UniversalDeserializer()
+		strict := serializer.NewCodecFactory(decodeScheme, serializer.EnableStrict).UniversalDeserializer()
 		for document := 1; ; document++ {
 			raw, err := reader.Read()
 			if err != nil {

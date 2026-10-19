@@ -235,6 +235,11 @@ kubectl -n "${IDLELOOM_NAMESPACE}" apply -f my-mlx-serve.yaml
 `maxTokens` must stay below the model's `maxContextLength`. The projected Pod
 records the model as `hf://OWNER/NAME@REVISION#sha256:...`.
 
+`examples/native/lfm2.5-24b-a2b-mlx-model.yaml` is a complete entry for
+LiquidAI LFM2.5-24B-A2B at a 128K context, and
+`examples/native/lfm2.5-24b-a2b-mlx-serve-values.yaml` serves it with
+`serve/mlx-qwen@v1`.
+
 ## Cleanup
 
 ```sh
