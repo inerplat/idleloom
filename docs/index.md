@@ -29,7 +29,7 @@ node. Both modes use WireKube when the cluster must reach compute behind NAT.
 - [MLX training, inference, and serving](guides/native-mlx.md)
 - [Ollama GGUF inference and serving](guides/native-ollama.md)
 - [Standalone llama.cpp GGUF inference and serving](guides/native-llama-cpp.md)
-- [Native serving connectivity and authentication](guides/native-serving.md)
+- [Native serving connectivity](guides/native-serving.md)
 - [Worker storage](guides/worker-storage.md)
 - [Worker Vulkan inference and serving](guides/worker-vulkan.md)
 

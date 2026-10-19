@@ -9,7 +9,6 @@ WireKube.
 - a Native host with `READY=True` and `CONNECTED=True`
 - one real schedulable Linux kubelet node on the WireKube mesh
 - the runtime and exact model required by the selected recipe
-- permission to read the controller-generated client Secret
 
 The Linux node runs the client Pod. The projected Native Node is deliberately
 unschedulable.
@@ -20,26 +19,19 @@ Each serving recipe renders:
 
 - an `IdleloomWorkload` in `Server` mode
 - a selectorless ClusterIP Service
-- a generated `<service-name>-auth` Secret
 - an EndpointSlice that points at the host's WireKube address after assignment
   readiness
 
-Inspect the endpoint without printing the API key:
+Inspect the endpoint:
 
 ```sh
 kubectl -n "${IDLELOOM_NAMESPACE}" get service,endpointSlice
-kubectl -n "${IDLELOOM_NAMESPACE}" get secret SERVICE-auth \
-  -o jsonpath='{.metadata.name}{"\n"}'
 ```
 
-## Authentication test
+## Client test
 
-The reviewed client manifests perform two requests:
-
-1. an unauthenticated request that must return HTTP 401
-2. an authenticated OpenAI-compatible request using the mounted Secret
-
-Available examples are:
+Each client manifest sends one OpenAI-compatible chat request to the Service
+and fails if it does not succeed. Available examples are:
 
 ```text
 examples/native/serve-mlx-client.yaml
@@ -52,16 +44,21 @@ It tolerates Idleloom's default Worker taint.
 
 ## Supported API
 
-The current alpha adapter supports:
+The host agent relays the WireKube address byte for byte to the runtime's own
+OpenAI-compatible server: `mlx_lm.server`, `llama-server`, or Ollama. Idleloom
+does not parse or rewrite requests, so the routes, streaming, and response
+length (`max_tokens`) are whatever that runtime provides.
 
-- non-streaming `POST /v1/chat/completions`
-- `GET /v1/models`
-- one active generation per host
-- up to 512 response tokens
+Idleloom starts `llama-server` with a single slot (`--parallel 1`) and Ollama
+with `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_QUEUE=1`; `mlx_lm.server` runs with
+its own defaults. A request beyond what the runtime accepts gets that runtime's
+own response, because Idleloom neither queues requests nor answers with HTTP
+429.
 
-Concurrent requests receive HTTP 429 with `Retry-After: 1`. Traffic is
-encrypted by WireGuard and authenticated by the generated API key. Idleloom
-does not add application-layer TLS or publish an Ingress.
+Traffic is encrypted by WireGuard but not authenticated. The endpoint is
+cluster-private by design, like an ordinary ClusterIP Service, and Idleloom does
+not add application-layer TLS or publish an Ingress. Front the Service with your
+own gateway when clients need authentication.
 
 ## Kubernetes limitations
 
@@ -81,5 +78,5 @@ idlectl logs workload/WORKLOAD \
   -n "${IDLELOOM_NAMESPACE}"
 ```
 
-Confirm runtime verification, Metal acceleration or full offload, process
-startup, request start, and request completion in the log.
+Confirm runtime verification, Metal acceleration or full offload, and process
+startup in the log. Requests are relayed without being logged.

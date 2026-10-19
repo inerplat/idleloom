@@ -76,8 +76,8 @@ kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
 kubectl -n default logs pod/native-ollama-serve-client
 ```
 
-The client first asserts HTTP 401 without credentials, then mounts the
-controller-generated Secret and makes an authenticated request. See
+The client sends one OpenAI-compatible chat request straight to the Service;
+the endpoint is cluster-private and unauthenticated. See
 [Native Serving](native-serving.md).
 
 ## Cleanup

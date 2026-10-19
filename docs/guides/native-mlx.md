@@ -68,8 +68,8 @@ kubectl -n default wait --for=jsonpath='{.status.phase}'=Succeeded \
 kubectl -n default logs pod/native-mlx-serve-client
 ```
 
-Read [Native Serving](native-serving.md) for the authentication, Service,
-EndpointSlice, and connectivity contract.
+Read [Native Serving](native-serving.md) for the Service, EndpointSlice, and
+connectivity contract.
 
 ## Cleanup
 
