@@ -61,6 +61,14 @@ func (p Planner) SelectHost(workload *nativev1alpha1.IdleloomWorkload, model *na
 		if workload.Spec.Model.CatalogRef != model.Name {
 			return nil, &SpecValidationError{Reason: "ModelValidationFailed", Err: fmt.Errorf("workload requested model %q but controller resolved %q", workload.Spec.Model.CatalogRef, model.Name)}
 		}
+		// Admission sizes the KV cache from maxContextLength, and the context
+		// holds the prompt as well, so a budget that reaches it is either cut
+		// short by the runtime or grows past the memory the host reserved.
+		if batch := workload.Spec.Batch; batch != nil && batch.MaxTokens >= model.Spec.MaxContextLength {
+			return nil, &SpecValidationError{Reason: "WorkloadValidationFailed", Err: fmt.Errorf(
+				"batch maxTokens %d must be smaller than the model's maxContextLength %d",
+				batch.MaxTokens, model.Spec.MaxContextLength)}
+		}
 	} else if model != nil {
 		return nil, &SpecValidationError{Reason: "WorkloadValidationFailed", Err: fmt.Errorf("non-model workload must not resolve a model")}
 	}

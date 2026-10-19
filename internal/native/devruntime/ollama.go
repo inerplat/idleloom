@@ -289,8 +289,8 @@ func (p *OllamaProcess) Generate(ctx context.Context, request GenerateRequest) (
 	if request.Prompt == "" || len([]byte(request.Prompt)) > 16<<10 {
 		return GenerateResponse{}, fmt.Errorf("prompt must contain 1 to 16384 UTF-8 bytes")
 	}
-	if request.MaxTokens < 1 || request.MaxTokens > 512 {
-		return GenerateResponse{}, fmt.Errorf("maxTokens must be between 1 and 512")
+	if err := validateMaxTokens(request.MaxTokens); err != nil {
+		return GenerateResponse{}, err
 	}
 	p.requestMu.Lock()
 	defer p.requestMu.Unlock()

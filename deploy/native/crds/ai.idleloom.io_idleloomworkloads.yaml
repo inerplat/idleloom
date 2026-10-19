@@ -42,7 +42,7 @@ spec:
                 properties:
                   maxTokens:
                     format: int32
-                    maximum: 512
+                    maximum: 32768
                     minimum: 1
                     type: integer
                   prompt:

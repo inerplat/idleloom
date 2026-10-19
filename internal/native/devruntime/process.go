@@ -39,6 +39,17 @@ type GenerateRequest struct {
 	MaxTokens int    `json:"maxTokens"`
 }
 
+// MaxGenerateTokens must equal nativev1alpha1.MaxBatchInferenceTokens and the
+// bound in runner.py, so a request the API admits is never refused here.
+const MaxGenerateTokens = 32768
+
+func validateMaxTokens(maxTokens int) error {
+	if maxTokens < 1 || maxTokens > MaxGenerateTokens {
+		return fmt.Errorf("maxTokens must be between 1 and %d", MaxGenerateTokens)
+	}
+	return nil
+}
+
 type GenerateResponse struct {
 	Text          string `json:"text"`
 	ElapsedMillis int64  `json:"elapsedMillis"`
@@ -152,8 +163,8 @@ func (p *Process) Generate(ctx context.Context, request GenerateRequest) (Genera
 	if request.Prompt == "" || len([]byte(request.Prompt)) > 16<<10 {
 		return GenerateResponse{}, fmt.Errorf("prompt must contain 1 to 16384 UTF-8 bytes")
 	}
-	if request.MaxTokens < 1 || request.MaxTokens > 512 {
-		return GenerateResponse{}, fmt.Errorf("maxTokens must be between 1 and 512")
+	if err := validateMaxTokens(request.MaxTokens); err != nil {
+		return GenerateResponse{}, err
 	}
 	p.requestMu.Lock()
 	defer p.requestMu.Unlock()

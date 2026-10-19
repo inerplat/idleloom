@@ -126,6 +126,28 @@ func TestPlannerCopiesBatchInferenceIntent(t *testing.T) {
 	}
 }
 
+func TestBatchInferenceRejectsBudgetThatFillsTheContext(t *testing.T) {
+	now := time.Now().UTC()
+	workload := testWorkload()
+	workload.Spec.Mode = nativev1alpha1.WorkloadModeBatch
+	workload.Spec.Server = nil
+	model := testModel()
+	host := testHost("native", "32Gi", now)
+	planner := Planner{Now: func() time.Time { return now }}
+
+	workload.Spec.Batch = &nativev1alpha1.WorkloadBatchInference{Prompt: "hello", MaxTokens: model.Spec.MaxContextLength}
+	_, err := planner.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host})
+	var specErr *SpecValidationError
+	if !errors.As(err, &specErr) || !strings.Contains(err.Error(), "maxContextLength") {
+		t.Fatalf("budget equal to the context: error = %v", err)
+	}
+
+	workload.Spec.Batch.MaxTokens = model.Spec.MaxContextLength - 1
+	if _, err := planner.SelectHost(&workload, &model, []nativev1alpha1.IdleloomHost{host}); err != nil {
+		t.Fatalf("budget below the context was rejected: %v", err)
+	}
+}
+
 func TestBatchInferenceRejectsAgentWithoutCapability(t *testing.T) {
 	now := time.Now().UTC()
 	workload := testWorkload()

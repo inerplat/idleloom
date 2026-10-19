@@ -232,6 +232,14 @@ and reports progress through the normal workload log.
 Prompts are stored in the Kubernetes API as part of the immutable workload.
 Do not put credentials or other secrets in a prompt.
 
+`maxTokens` accepts up to 32768 and must stay below the model's
+`maxContextLength`, which also holds the prompt; the controller rejects a
+budget that reaches it. The result is returned in one piece, so `timeoutSeconds`
+(default 600, at most 3600) has to cover the whole generation: at 30 tokens per
+second, 8192 tokens need about 270 seconds. A host still running an agent that
+predates this limit refuses budgets above 512 at run time, so upgrade hosts
+before raising `maxTokens`.
+
 A successful log ends with one structured result record. The generated text
 varies, but the envelope is stable:
 

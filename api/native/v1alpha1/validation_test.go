@@ -1,12 +1,15 @@
 package v1alpha1
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/yaml"
 )
 
 func TestValidateWorkload(t *testing.T) {
@@ -52,11 +55,64 @@ func TestValidateBatchInferenceWorkload(t *testing.T) {
 	if err := ValidateWorkload(&workload); err != nil {
 		t.Fatalf("ValidateWorkload: %v", err)
 	}
+	workload.Spec.Batch.MaxTokens = MaxBatchInferenceTokens
+	if err := ValidateWorkload(&workload); err != nil {
+		t.Fatalf("ValidateWorkload rejected the maximum batch token budget: %v", err)
+	}
+	workload.Spec.Batch.MaxTokens = MaxBatchInferenceTokens + 1
+	if err := ValidateWorkload(&workload); err == nil {
+		t.Fatal("ValidateWorkload accepted a batch token budget above the maximum")
+	}
 	workload.Spec.Batch.Prompt = ""
 	workload.Spec.Batch.MaxTokens = 0
 	if err := ValidateWorkload(&workload); err == nil {
 		t.Fatal("ValidateWorkload accepted an empty batch request")
 	}
+}
+
+func TestBatchMaxTokensMatchesGeneratedCRDs(t *testing.T) {
+	for _, name := range []string{
+		"ai.idleloom.io_idleloomworkloads.yaml",
+		"ai.idleloom.io_idleloomworkloadassignments.yaml",
+	} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "..", "deploy", "native", "crds", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document any
+		if err := yaml.Unmarshal(data, &document); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		maxima := maxTokensMaxima(document)
+		if len(maxima) == 0 {
+			t.Fatalf("%s declares no maxTokens schema", name)
+		}
+		for _, maximum := range maxima {
+			if maximum != float64(MaxBatchInferenceTokens) {
+				t.Fatalf("%s maxTokens maximum = %v, want %d; rerun make generate-native", name, maximum, MaxBatchInferenceTokens)
+			}
+		}
+	}
+}
+
+func maxTokensMaxima(node any) []float64 {
+	var found []float64
+	switch typed := node.(type) {
+	case map[string]any:
+		for key, value := range typed {
+			if schema, ok := value.(map[string]any); ok && key == "maxTokens" {
+				if maximum, ok := schema["maximum"].(float64); ok {
+					found = append(found, maximum)
+				}
+			}
+			found = append(found, maxTokensMaxima(value)...)
+		}
+	case []any:
+		for _, value := range typed {
+			found = append(found, maxTokensMaxima(value)...)
+		}
+	}
+	return found
 }
 
 func TestValidateConnectedServerWorkload(t *testing.T) {

@@ -54,8 +54,10 @@ idlectl logs workload/native-ollama-infer \
 ```
 
 For thinking models, a small `maxTokens` value can be consumed before visible
-text is produced. Use a larger bounded value, such as 512, when validating that
-the response body is non-empty.
+text is produced. Use a larger bounded value, such as 2048, when validating that
+the response body is non-empty. Batch inference accepts up to 32768 tokens; raise
+`timeoutSeconds` (at most 3600) with it, because the default of 600 seconds
+also bounds how long a long generation may run.
 
 ## Serving
 

@@ -30,6 +30,10 @@ const (
 	CapabilityNativeTrainingV1          = "NativeTrainingV1"
 	CapabilityMemoryProfileV1           = "memory-profile-v1"
 	NativeServingPort             int32 = 18080
+	// MaxBatchInferenceTokens must match the Maximum marker on
+	// WorkloadBatchInference.MaxTokens, which kubebuilder only accepts as a
+	// literal.
+	MaxBatchInferenceTokens int32 = 32768
 
 	KrunkitStateStopped = "Stopped"
 	KrunkitStateRunning = "Running"
@@ -147,7 +151,7 @@ type WorkloadBatchInference struct {
 	// +kubebuilder:validation:MaxLength=16384
 	Prompt string `json:"prompt"`
 	// +kubebuilder:validation:Minimum=1
-	// +kubebuilder:validation:Maximum=512
+	// +kubebuilder:validation:Maximum=32768
 	MaxTokens int32 `json:"maxTokens"`
 	// +kubebuilder:validation:Minimum=1
 	// +kubebuilder:validation:Maximum=3600

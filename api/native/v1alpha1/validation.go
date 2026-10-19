@@ -381,8 +381,8 @@ func validateBatchInference(batch *WorkloadBatchInference, path *field.Path) fie
 	if len([]byte(batch.Prompt)) > 16<<10 {
 		errs = append(errs, field.TooLong(path.Child("prompt"), "", 16<<10))
 	}
-	if batch.MaxTokens < 1 || batch.MaxTokens > 512 {
-		errs = append(errs, field.Invalid(path.Child("maxTokens"), batch.MaxTokens, "must be between 1 and 512"))
+	if batch.MaxTokens < 1 || batch.MaxTokens > MaxBatchInferenceTokens {
+		errs = append(errs, field.Invalid(path.Child("maxTokens"), batch.MaxTokens, fmt.Sprintf("must be between 1 and %d", MaxBatchInferenceTokens)))
 	}
 	if batch.TimeoutSeconds < 0 || batch.TimeoutSeconds > 3600 {
 		errs = append(errs, field.Invalid(path.Child("timeoutSeconds"), batch.TimeoutSeconds, "must be between 1 and 3600 when set"))

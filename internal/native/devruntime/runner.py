@@ -26,8 +26,8 @@ def main():
                 raise ValueError("id is required")
             if not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > 16384:
                 raise ValueError("prompt must contain 1 to 16384 UTF-8 bytes")
-            if not isinstance(max_tokens, int) or max_tokens < 1 or max_tokens > 512:
-                raise ValueError("maxTokens must be between 1 and 512")
+            if not isinstance(max_tokens, int) or max_tokens < 1 or max_tokens > 32768:
+                raise ValueError("maxTokens must be between 1 and 32768")
             started = time.monotonic()
             formatted = prompt
             if getattr(tokenizer, "chat_template", None):
