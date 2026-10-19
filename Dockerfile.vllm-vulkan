@@ -1,0 +1,83 @@
+# vLLM with the vllm-vulkan plugin on a mesa userspace the host's Venus
+# renderer supports.
+#
+# Mesa comes from the ramalama base for the same reason as
+# Dockerfile.llama-vulkan: a mesa newer than the host renderer enumerates no
+# Vulkan device at all, and neither the loader nor the driver reports why.
+# Bumping the ramalama pin moves mesa, so re-check Venus on a real worker
+# first.
+#
+# vLLM publishes no GPU wheel for this target. The vllm-vulkan plugin runs
+# vLLM's CPU platform (device_type=cpu) and dispatches compute to the Vulkan
+# device itself, so vLLM is built from source as a CPU build, exactly the way
+# the plugin's install.sh does it. The plugin wheel is a prebuilt cp312
+# release, which is why the venv pins Python 3.12.
+ARG RAMALAMA_BASE=quay.io/ramalama/ramalama@sha256:abe07beba518d6864738a67af8ea3511cdaa4b24efb197740967d0d8e19419e4
+
+FROM ${RAMALAMA_BASE} AS build
+
+# Keep the two pins in step: .vllm-version in the vllm-vulkan release names the
+# vLLM it was built against.
+ARG VLLM_VERSION=0.20.1
+ARG VLLM_SHA256=d7bfe0c1445cb054db99d02d54d7c53abfec49c6f40171ff8414ffccf5eb7067
+ARG VLLM_VULKAN_WHEEL_URL=https://github.com/ericcurtin/vllm-vulkan/releases/download/v0.1.0-20261016-204158/vllm_vulkan-0.1.0-cp312-cp312-linux_aarch64.whl
+ARG VLLM_VULKAN_WHEEL_SHA256=349406764d40cccdff66372fd4187b8cd4cab4105786d20bb98bcf5c7cc4e3be
+
+# The straight-to-master baseurl skips the metalink mirror lottery: broken
+# community mirrors (stale metadata, 404s on every package) cost minutes per
+# build. numactl-devel provides the numa.h that vLLM's CPU ops compile needs.
+RUN dnf install -y \
+      --setopt=fedora.baseurl='https://dl.fedoraproject.org/pub/fedora/linux/releases/$releasever/Everything/$basearch/os/' \
+      --setopt=updates.baseurl='https://dl.fedoraproject.org/pub/fedora/linux/updates/$releasever/Everything/$basearch/' \
+      python3.12 python3.12-devel gcc gcc-c++ cmake ninja-build git numactl-devel \
+    && dnf clean all
+
+RUN python3.12 -m venv /opt/vllm
+
+# The CPU requirements pull torch from the CPU wheel index; the source build
+# then compiles vLLM's CPU ops against it. VLLM_TARGET_DEVICE=cpu keeps
+# setup.py off the CUDA path (it asserts on CUDA_HOME otherwise), and
+# --no-build-isolation lets it import the torch the venv already holds.
+# MAX_JOBS caps ninja's parallel compile jobs so the build fits a builder with
+# a few GiB of memory.
+RUN set -eux; \
+    curl -fsSL -o /tmp/vllm.tar.gz \
+      "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}.tar.gz"; \
+    echo "${VLLM_SHA256}  /tmp/vllm.tar.gz" | sha256sum -c -; \
+    tar -C /tmp -xf /tmp/vllm.tar.gz; \
+    cd "/tmp/vllm-${VLLM_VERSION}"; \
+    /opt/vllm/bin/pip install --no-cache-dir -r requirements/cpu.txt \
+      --extra-index-url https://download.pytorch.org/whl/cpu; \
+    /opt/vllm/bin/pip install --no-cache-dir setuptools-scm wheel; \
+    VLLM_TARGET_DEVICE=cpu CXXFLAGS="-Wno-parentheses" MAX_JOBS=4 \
+      /opt/vllm/bin/pip install --no-cache-dir --no-build-isolation .; \
+    rm -rf /tmp/vllm.tar.gz "/tmp/vllm-${VLLM_VERSION}"
+
+# pip validates the wheel's filename, so keep the release asset's name.
+RUN set -eux; \
+    wheel="/tmp/$(basename "${VLLM_VULKAN_WHEEL_URL}")"; \
+    curl -fsSL -o "${wheel}" "${VLLM_VULKAN_WHEEL_URL}"; \
+    echo "${VLLM_VULKAN_WHEEL_SHA256}  ${wheel}" | sha256sum -c -; \
+    /opt/vllm/bin/pip install --no-cache-dir "${wheel}"; \
+    rm -f "${wheel}"
+
+FROM ${RAMALAMA_BASE}
+
+RUN dnf install -y \
+      --setopt=fedora.baseurl='https://dl.fedoraproject.org/pub/fedora/linux/releases/$releasever/Everything/$basearch/os/' \
+      --setopt=updates.baseurl='https://dl.fedoraproject.org/pub/fedora/linux/updates/$releasever/Everything/$basearch/' \
+      python3.12 numactl-libs \
+    && dnf clean all
+
+COPY --from=build /opt/vllm /opt/vllm
+
+# The plugin schedules on vLLM's CPU platform; nobind keeps vLLM from pinning
+# OpenMP threads to cores the cgroup may not grant.
+ENV VLLM_CPU_OMP_THREADS_BIND=nobind \
+    PATH=/opt/vllm/bin:${PATH}
+
+# Fails the build when the plugin cannot register against this vLLM, instead
+# of failing at Pod start.
+RUN /opt/vllm/bin/python -c "import vllm, vllm_vulkan; print(vllm.__version__)"
+
+ENTRYPOINT ["/opt/vllm/bin/vllm"]
