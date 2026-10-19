@@ -58,6 +58,7 @@ Native Metal — run macOS workloads on this Mac and project observability-only 
   idlectl join HOST [flags]
   idlectl run NAME --shell '<script>' [flags]
   idlectl recipe (list | show NAME@VERSION | render NAME@VERSION --name RUN) [flags]
+  idlectl model inspect hf REPOSITORY@REVISION --name NAME [flags]
   idlectl logs (WORKLOAD | workload/WORKLOAD) [flags]
 
 Worker — run a schedulable Kubernetes Node on this machine:
@@ -166,6 +167,8 @@ func runPublicCommand(ctx context.Context, command string, args []string) (bool,
 		return true, runWorkload(ctx, args)
 	case "recipe":
 		return true, runRecipe(args, os.Stdin, os.Stdout)
+	case "model":
+		return true, runModel(ctx, args, os.Stdout)
 	case "get":
 		return true, runGet(ctx, args)
 	case "logs":
