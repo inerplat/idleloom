@@ -23,7 +23,7 @@
     },
     "prompt": {
       "type": "string",
-      "description": "Prompt passed to the locked MLX model.",
+      "description": "Prompt passed to the MLX model.",
       "default": "Explain why idle compute is useful in one sentence.",
       "minLength": 1,
       "maxLength": 16384

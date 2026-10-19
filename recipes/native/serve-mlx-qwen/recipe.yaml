@@ -1,6 +1,6 @@
 name: serve/mlx-qwen
 version: v1
-description: Serve the locked Qwen MLX model through an unauthenticated cluster-private Service on a connected Native Metal host.
+description: Serve an MLX catalog model, the built-in Qwen by default, through an unauthenticated cluster-private Service on a connected Native Metal host.
 task: serve
 backend: native
 runtime: mlx
@@ -11,4 +11,4 @@ prerequisites:
 - A Native Metal host joined in the default WireKube connected mode.
 - A real schedulable Linux kubelet node on the WireKube mesh for in-cluster clients.
 - macOS 26 or later and Python 3.12 for first-use runtime preparation.
-- The built-in qwen3-5-0-8b-mlx model catalog installed by idlectl join.
+- The built-in qwen3-5-0-8b-mlx catalog entry installed by idlectl join, or an mlx-family IdleloomModel pinned to a Hugging Face commit.
