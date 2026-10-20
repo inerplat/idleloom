@@ -36,6 +36,7 @@ type servingRelay struct {
 	waitErr  error
 	stopped  bool
 	conns    sync.WaitGroup
+	open     map[net.Conn]struct{}
 }
 
 func startServingRelay(process Process, listenAddress string, listen func(string, string) (net.Listener, error)) (Process, error) {
@@ -64,7 +65,7 @@ func startServingRelay(process Process, listenAddress string, listen func(string
 		_ = process.Stop()
 		return nil, fmt.Errorf("listen for Native serving: %w", err)
 	}
-	relay := &servingRelay{process: process, listener: listener, upstream: upstream, done: make(chan struct{})}
+	relay := &servingRelay{process: process, listener: listener, upstream: upstream, done: make(chan struct{}), open: map[net.Conn]struct{}{}}
 	go relay.accept()
 	return relay, nil
 }
@@ -90,12 +91,20 @@ func (r *servingRelay) accept() {
 }
 
 func (r *servingRelay) proxy(client net.Conn) {
-	defer func() { _ = client.Close() }()
+	if !r.track(client) {
+		_ = client.Close()
+		return
+	}
+	defer r.untrack(client)
 	upstream, err := net.DialTimeout("tcp", r.upstream, 10*time.Second)
 	if err != nil {
 		return
 	}
-	defer func() { _ = upstream.Close() }()
+	if !r.track(upstream) {
+		_ = upstream.Close()
+		return
+	}
+	defer r.untrack(upstream)
 	// Half-close each direction as it drains so a client that stops sending
 	// still receives the rest of a long streaming response.
 	var wg sync.WaitGroup
@@ -129,15 +138,45 @@ func (r *servingRelay) Alive() bool {
 	}
 }
 
+// track registers a connection so Stop can close it; it refuses once the
+// relay is stopping.
+func (r *servingRelay) track(conn net.Conn) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped {
+		return false
+	}
+	r.open[conn] = struct{}{}
+	return true
+}
+
+func (r *servingRelay) untrack(conn net.Conn) {
+	r.mu.Lock()
+	delete(r.open, conn)
+	r.mu.Unlock()
+	_ = conn.Close()
+}
+
+// Stop stops the runtime before draining connections. A generation can hold
+// its connection open for minutes, and waiting for it first would keep the
+// runtime running after the workload is gone.
 func (r *servingRelay) Stop() error {
 	r.mu.Lock()
 	r.stopped = true
 	r.mu.Unlock()
 	closeErr := r.listener.Close()
 	<-r.done
+	stopErr := r.process.Stop()
+	r.mu.Lock()
+	for conn := range r.open {
+		_ = conn.Close()
+	}
+	r.mu.Unlock()
 	r.conns.Wait()
-	return errors.Join(closeErr, r.process.Stop())
+	return errors.Join(closeErr, stopErr)
 }
+
+func (r *servingRelay) PID() int { return processPID(r.process) }
 
 // Generate is unsupported: a serving relay carries HTTP for clients, while
 // batch inference keeps using the runtime's own generate path.
