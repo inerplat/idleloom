@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,7 +27,11 @@ type MLXServeConfig struct {
 	// MaxTokens is the server's default output limit for requests that send
 	// no max_tokens. mlx_lm.server otherwise stops every such response at
 	// 512 tokens, which a reasoning model can spend before it answers.
-	MaxTokens    int
+	MaxTokens int
+	// ModelAlias is the model name clients send. mlx_lm.server answers only
+	// default_model and the --model value it was started with, and treats any
+	// other name as a Hugging Face repository to download.
+	ModelAlias   string
 	DeniedPaths  []string
 	ReadyTimeout time.Duration
 	OnSpawn      func(int) error
@@ -42,6 +48,40 @@ func mlxServeArgs(profilePath, python, modelDirectory, host, port string, maxTok
 		"-m", "mlx_lm.server", "--model", modelDirectory, "--host", host, "--port", port,
 		"--max-tokens", strconv.Itoa(maxTokens),
 		"--decode-concurrency", "1", "--prompt-concurrency", "1", "--prompt-cache-size", "1"}, nil
+}
+
+// mlxServeModelArgument returns the server's working directory and --model
+// value. With an alias it links the alias name to the verified model inside a
+// serving directory, so a request for the alias resolves to the loaded model
+// instead of a download.
+func mlxServeModelArgument(work, modelDirectory, alias string) (string, string, error) {
+	if alias == "" {
+		return work, modelDirectory, nil
+	}
+	if alias == "." || alias == ".." || strings.ContainsAny(alias, `/\`) {
+		return "", "", fmt.Errorf("MLX model alias %q is not a plain name", alias)
+	}
+	dir := filepath.Join(work, "mlx-serve")
+	if err := os.RemoveAll(dir); err != nil {
+		return "", "", fmt.Errorf("clear MLX serving directory: %w", err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", fmt.Errorf("create MLX serving directory: %w", err)
+	}
+	if err := os.Symlink(modelDirectory, filepath.Join(dir, alias)); err != nil {
+		return "", "", fmt.Errorf("link MLX model alias: %w", err)
+	}
+	return dir, alias, nil
+}
+
+// mlxServeEnv adds an empty Hugging Face cache. GET /v1/models scans that
+// cache and fails after sending its status line when the cache is missing.
+func mlxServeEnv(work, serveDirectory string) ([]string, error) {
+	cache := filepath.Join(serveDirectory, "hf-cache")
+	if err := os.MkdirAll(cache, 0o700); err != nil {
+		return nil, fmt.Errorf("create MLX serving cache: %w", err)
+	}
+	return append(runnerEnv(work), "HF_HUB_CACHE="+cache), nil
 }
 
 // MLXServeProcess supervises a serving mlx_lm.server. It intentionally does
@@ -84,13 +124,20 @@ func StartMLXServe(ctx context.Context, config MLXServeConfig) (*MLXServeProcess
 		return nil, err
 	}
 	python := filepath.Join(config.Layout.Venv, "bin", "python")
-	args, err := mlxServeArgs(profilePath, python, modelDirectory, host, port, config.MaxTokens)
+	serveDirectory, modelArgument, err := mlxServeModelArgument(config.Layout.Work, modelDirectory, config.ModelAlias)
+	if err != nil {
+		return nil, err
+	}
+	args, err := mlxServeArgs(profilePath, python, modelArgument, host, port, config.MaxTokens)
 	if err != nil {
 		return nil, err
 	}
 	command := exec.Command("/usr/bin/sandbox-exec", args...)
-	command.Dir = config.Layout.Work
-	command.Env = runnerEnv(config.Layout.Work)
+	command.Dir = serveDirectory
+	command.Env, err = mlxServeEnv(config.Layout.Work, serveDirectory)
+	if err != nil {
+		return nil, err
+	}
 	procgroup.SetGroup(command)
 	stderr := &boundedBuffer{limit: maxStderrBytes}
 	command.Stdout = stderr

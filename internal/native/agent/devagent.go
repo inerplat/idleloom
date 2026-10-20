@@ -837,6 +837,7 @@ func (a *DevAgent) startProcessWithLease(ctx context.Context, assignment *native
 					process, err = a.config.StartMLXServe(startupCtx, devruntime.MLXServeConfig{
 						Layout: a.config.Layout, HFModel: hfModel,
 						MaxTokens:    int(assignment.Spec.Model.MaxContextLength),
+						ModelAlias:   modelAlias,
 						DeniedPaths:  []string{a.config.StateDirectory, a.config.KubeconfigPath},
 						ReadyTimeout: 5 * time.Minute, OnSpawn: onSpawn,
 					})

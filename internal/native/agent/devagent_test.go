@@ -1384,6 +1384,9 @@ func TestEnsureProcessServesMLXThroughOwnServer(t *testing.T) {
 				if config.MaxTokens != 2048 {
 					t.Fatalf("MLX server MaxTokens = %d, want the model context length 2048", config.MaxTokens)
 				}
+				if config.ModelAlias != "qwen3-5-0-8b" {
+					t.Fatalf("MLX server ModelAlias = %q, want the workload alias", config.ModelAlias)
+				}
 				if err := config.OnSpawn(126); err != nil {
 					return nil, err
 				}

@@ -235,6 +235,11 @@ kubectl -n "${IDLELOOM_NAMESPACE}" apply -f my-mlx-serve.yaml
 `maxTokens` must stay below the model's `maxContextLength`. The projected Pod
 records the model as `hf://OWNER/NAME@REVISION#sha256:...`.
 
+Serving clients send `modelAlias` as the request `model`. `mlx_lm.server` also
+answers `default_model`, and any other name fails with 404, because the server
+treats it as a Hugging Face repository to download. `GET /v1/models` lists the
+model by its directory on the host rather than by the alias.
+
 `examples/native/lfm2.5-24b-a2b-mlx-model.yaml` is a complete entry for
 LiquidAI LFM2.5-24B-A2B at a 128K context, and
 `examples/native/lfm2.5-24b-a2b-mlx-serve-values.yaml` serves it with
