@@ -51,7 +51,10 @@ request's own `max_tokens` are handled by that runtime.
 
 Idleloom starts `llama-server` with a single slot (`--parallel 1`) and Ollama
 with `OLLAMA_NUM_PARALLEL=1` and `OLLAMA_MAX_QUEUE=1`. It starts `mlx_lm.server`
-with `--max-tokens` set to the model's `maxContextLength`, so a request that
+with `--decode-concurrency 1`, `--prompt-concurrency 1`, and
+`--prompt-cache-size 1`, so it processes one request and keeps one KV cache,
+which is the memory that admission charges for. It also sets
+`--max-tokens` to the model's `maxContextLength`, so a request that
 sends no `max_tokens` is not cut off at the server's built-in default of 512
 tokens. That flag limits only the output: unlike the other two runtimes,
 `mlx_lm.server` does not bound prompt plus output by the context length, so a

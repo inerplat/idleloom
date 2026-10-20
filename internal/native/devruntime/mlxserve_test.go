@@ -12,7 +12,8 @@ func TestMLXServeArgsSetDefaultOutputLimit(t *testing.T) {
 	}
 	want := []string{"-f", "/root/runtime/server.sb", "/root/venv/bin/python", "-I", "-B",
 		"-m", "mlx_lm.server", "--model", "/root/models/m", "--host", "127.0.0.1", "--port", "41000",
-		"--max-tokens", "131072"}
+		"--max-tokens", "131072",
+		"--decode-concurrency", "1", "--prompt-concurrency", "1", "--prompt-cache-size", "1"}
 	if !slices.Equal(args, want) {
 		t.Fatalf("args = %q, want %q", args, want)
 	}

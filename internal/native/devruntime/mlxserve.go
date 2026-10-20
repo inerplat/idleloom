@@ -35,9 +35,13 @@ func mlxServeArgs(profilePath, python, modelDirectory, host, port string, maxTok
 	if maxTokens < 1 {
 		return nil, fmt.Errorf("MLX server maxTokens must be positive, got %d", maxTokens)
 	}
+	// The catalog admits one request per model, and admission charges memory
+	// for one context. mlx_lm.server otherwise batches up to 32 decodes and 8
+	// prompts and keeps 10 KV caches, which can exhaust unified memory.
 	return []string{"-f", profilePath, python, "-I", "-B",
 		"-m", "mlx_lm.server", "--model", modelDirectory, "--host", host, "--port", port,
-		"--max-tokens", strconv.Itoa(maxTokens)}, nil
+		"--max-tokens", strconv.Itoa(maxTokens),
+		"--decode-concurrency", "1", "--prompt-concurrency", "1", "--prompt-cache-size", "1"}, nil
 }
 
 // MLXServeProcess supervises a serving mlx_lm.server. It intentionally does
